@@ -14,6 +14,9 @@ import (
 // independent scrypt lanes concurrently. It stores every fourth ROMix state
 // and recomputes the intervening states during the second ROMix pass.
 func parallelScryptKey(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
+	if err := checkScryptParams(N, r, p); err != nil {
+		return nil, err
+	}
 	const stride = 4
 	workers := min(4, p, runtime.GOMAXPROCS(0))
 	if workers <= 1 {
