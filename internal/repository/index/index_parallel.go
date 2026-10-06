@@ -16,9 +16,7 @@ func ForAllIndexes(ctx context.Context, lister restic.Lister, repo restic.Loader
 
 	// decoding an index can take quite some time such that this can be both CPU- or IO-bound
 	// Each active load also owns decompressed plaintext until decoding completes.
-	// Keep enough workers to use the CPUs, without adding another connection's
-	// worth of transient plaintext. Two workers still overlap IO on one core.
-	workerCount := min(repo.Connections()+uint(runtime.GOMAXPROCS(0)), uint(max(2, runtime.GOMAXPROCS(0))))
+	workerCount := indexLoadWorkers(repo.Connections(), runtime.GOMAXPROCS(0))
 
 	var m sync.Mutex
 	return restic.ParallelList(ctx, lister, restic.IndexFile, workerCount, func(ctx context.Context, id restic.ID, size int64) error {

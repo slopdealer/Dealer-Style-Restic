@@ -52,7 +52,9 @@ func (l admissionTestLister) List(_ context.Context, _ restic.FileType, fn func(
 }
 
 func TestIndexLoadAdmissionAndCancellation(t *testing.T) {
-	width := max(2, runtime.GOMAXPROCS(0))
+	// the loader reports 32 connections: the admitted loads are the workers of
+	// ForAllIndexes, which follow the connections and not the CPU count alone
+	width := int(indexLoadWorkers((*admissionTestLoader)(nil).Connections(), runtime.GOMAXPROCS(0)))
 	for _, canceled := range []bool{false, true} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		r := &admissionTestLoader{entered: make(chan struct{}, 4*width), release: make(chan struct{})}
