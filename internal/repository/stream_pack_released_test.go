@@ -165,7 +165,7 @@ func TestRepackHandlerRunsOutsideLoad(t *testing.T) {
 	if n := uploader.insideLoad.Load(); n != 0 {
 		t.Fatalf("%d of %d saves were requested inside the backend Load callback of the pack read", n, len(ids))
 	}
-	// 6 blobs of 1 MiB in windows of 2 MiB: one blob per window, one request each
-	test.Equals(t, int32(len(ids)), probe.loads.Load())
+	// 6 blobs of 1 MiB in ranges below 4 MiB: three blobs per request
+	test.Equals(t, int32(2), probe.loads.Load())
 	test.Equals(t, 0, keep.Len())
 }

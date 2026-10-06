@@ -21,20 +21,19 @@ type parentCutLength struct {
 }
 
 type parentCutReader struct {
-	lengths                                 [2]parentCutLength
-	disabled                                bool
-	parent                                  *data.Node
-	lookup                                  func(restic.BlobHandle) (uint, bool)
-	factory                                 restic.ChunkerFactory
-	extra                                   restic.Chunker
-	hashes                                  *parentPairHashLane
-	pendingID                               restic.ID
-	pendingHashed                           bool
-	offset, hintOffset                      uint64
-	hint                                    int
-	root, pending                           []byte
-	nextCut                                 int
-	accepted, replayed, scheduled, capacity uint64
+	lengths            [2]parentCutLength
+	disabled           bool
+	parent             *data.Node
+	lookup             func(restic.BlobHandle) (uint, bool)
+	factory            restic.ChunkerFactory
+	extra              restic.Chunker
+	hashes             *parentPairHashLane
+	pendingID          restic.ID
+	pendingHashed      bool
+	offset, hintOffset uint64
+	hint               int
+	root, pending      []byte
+	nextCut            int
 }
 
 func (g *parentCutReader) span(i int) (uint64, bool) {
@@ -126,7 +125,6 @@ func (g *parentCutReader) readNext(ctx context.Context, state *fileChunkState, r
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, err
 	}
-	g.capacity = max(g.capacity, uint64(cap(input)))
 	g.pending = input[:n]
 	g.nextCut = 0
 	g.pendingHashed = false
@@ -143,7 +141,6 @@ func (g *parentCutReader) readNext(ctx context.Context, state *fileChunkState, r
 	var second int
 	var wg sync.WaitGroup
 	wg.Add(1)
-	g.scheduled++
 	go func() { defer wg.Done(); second = g.extra.NextSplitPoint(input[a:]) }()
 	first := ordinary.NextSplitPoint(input[:a])
 	wg.Wait()
@@ -153,19 +150,14 @@ func (g *parentCutReader) readNext(ctx context.Context, state *fileChunkState, r
 	}
 	if first == a {
 		state.chunkID, state.hashed = ids[0], hashed[0]
-		g.accepted += uint64(a)
 		if second == b {
 			g.nextCut = b
 			g.pendingID, g.pendingHashed = ids[1], hashed[1]
-			g.accepted += uint64(b)
-		} else {
-			g.replayed += uint64(b)
 		}
 		g.pending = input[a:]
 		ordinary.Reset()
 		return input[:a], nil
 	}
-	g.replayed += uint64(a + b)
 	ordinary.Reset()
 	return g.pop(state, rd, ordinary)
 }

@@ -1562,6 +1562,12 @@ type smallRestoreDecodePolicy struct {
 	ensureOrdinary func(context.Context) error
 }
 
+// streamPack reads each range of at most maxStreamPackChunkSize into memory,
+// returns the backend connection and then decodes the blobs and calls
+// handleBlobFn: the handler never runs inside the backend's Load callback.
+// It is the pack stream of repack, copy and repair packs
+// (loadBlobsFromPackReleased) and the function that TestStreamPack,
+// TestBlobVerification and TestStreamPackFallback test.
 func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
 	return streamPackWindowed(ctx, beLoad, loadBlobFn, dec, key, packID, blobs, handleBlobFn, maxStreamPackChunkSize, true)
 }
@@ -1625,11 +1631,6 @@ func streamPackWindowed(ctx context.Context, beLoad backendLoadFn, loadBlobFn lo
 	}
 	// load remainder
 	return loadPart(blobs[lowerIdx:])
-}
-
-func streamPackPart(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
-	var data []byte
-	return streamPackPartWithBuffer(ctx, beLoad, loadBlobFn, dec, key, packID, blobs, &data, handleBlobFn)
 }
 
 func streamPackPartWithBuffer(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, data *[]byte, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {

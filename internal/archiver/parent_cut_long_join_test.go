@@ -54,10 +54,10 @@ func TestB18LongPairBlockedValidatorJoin(t *testing.T) {
 				sizes[parent.Content[1]] -= 10
 			}
 			factory := b18LongBlockedFactory{b18TrialFactory{pol}, make(chan struct{}), make(chan struct{}), make(chan bool, 1)}
-			g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+			g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
+			state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
 			storage := make([]byte, 0, chunker.MaxSize)
 			type result struct {
 				out []byte
@@ -65,7 +65,7 @@ func TestB18LongPairBlockedValidatorJoin(t *testing.T) {
 			}
 			done := make(chan result, 1)
 			go func() {
-				out, err := state.readNextChunk(bytes.NewReader(input), b18TrialFactory{pol}.NewChunker(), storage)
+				out, err := state.readNextChunk(bytes.NewReader(input), g.ordinary(b18TrialFactory{pol}.NewChunker()), storage)
 				done <- result{out, err}
 			}()
 			select {

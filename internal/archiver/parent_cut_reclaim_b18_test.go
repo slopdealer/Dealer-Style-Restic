@@ -29,9 +29,9 @@ func TestB18FallbackReadErrorReclaimsAssembly(t *testing.T) {
 		sizes[id] = uint(n)
 	}
 	factory := b18TrialFactory{pol}
-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
-	c := factory.NewChunker()
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
+	c := g.ordinary(factory.NewChunker())
 	pool := newBufferPool(2 << 20)
 	buf := pool.Get()
 	base := &buf.Data[0]

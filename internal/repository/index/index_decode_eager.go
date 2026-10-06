@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"math"
 
-	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/repository/pack"
 	"github.com/restic/restic/internal/restic"
 )
@@ -14,10 +13,6 @@ import (
 // the entire document before lookup storage exists, including storage overflow.
 // Fallback therefore holds no partial index or typed pack/blob representation.
 func decodeIndexEager(buf []byte, id restic.ID) (*Index, error) {
-	// Preserve the ordinary decoder's instrumentation sites and debug filters.
-	if debug.IsEnabled() {
-		return DecodeIndex(buf, id)
-	}
 	if idx, ok := decodeCanonicalIndex(buf, id); ok {
 		return idx, nil
 	}

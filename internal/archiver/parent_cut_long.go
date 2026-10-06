@@ -33,7 +33,6 @@ func (g *parentCutReader) readLongPair(ctx context.Context, state *fileChunkStat
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, err, true
 	}
-	g.capacity = max(g.capacity, uint64(cap(input)))
 	g.pending = input[:n]
 	g.nextCut = 0
 	g.pendingHashed = false
@@ -51,7 +50,6 @@ func (g *parentCutReader) readLongPair(ctx context.Context, state *fileChunkStat
 	var second int
 	var wg sync.WaitGroup
 	wg.Add(1)
-	g.scheduled++
 	go func() { defer wg.Done(); second = g.extra.NextSplitPoint(input[int(a):]) }()
 	first := ordinary.NextSplitPoint(input[:int(a)])
 	wg.Wait()
@@ -61,19 +59,14 @@ func (g *parentCutReader) readLongPair(ctx context.Context, state *fileChunkStat
 	}
 	if first == int(a) {
 		state.chunkID, state.hashed = ids[0], hashed[0]
-		g.accepted += a
 		if second == int(b) {
 			g.nextCut = int(b)
 			g.pendingID, g.pendingHashed = ids[1], hashed[1]
-			g.accepted += b
-		} else {
-			g.replayed += b
 		}
 		g.pending = input[int(a):]
 		ordinary.Reset()
 		return input[:int(a)], nil, true
 	}
-	g.replayed += a + b
 	ordinary.Reset()
 	out, err := g.pop(state, rd, ordinary)
 	return out, err, true

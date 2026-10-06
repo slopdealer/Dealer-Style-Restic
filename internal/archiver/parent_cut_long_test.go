@@ -33,10 +33,10 @@ func b18LongFixture(t *testing.T) ([]byte, *data.Node, map[restic.ID]uint) {
 	t.Fatal("no long pair in reference input")
 	return nil, nil, nil
 }
-func b18ReadLong(ctx context.Context, rd io.Reader, factory restic.ChunkerFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *parentCutReader, error) {
-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
-	c := factory.NewChunker()
+func b18ReadLong(ctx context.Context, rd io.Reader, factory restic.ChunkerFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *b18Guided, error) {
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
+	c := g.ordinary(factory.NewChunker())
 	scratch := make([]byte, 0, chunker.MaxSize)
 	var ends []int
 	var ids []restic.ID
@@ -89,7 +89,7 @@ func TestB18LongPairIdentity(t *testing.T) {
 				if tc.name == "unchanged" && (g.scheduled == 0 || g.accepted == 0) {
 					t.Fatal("long route not exercised")
 				}
-				t.Logf("division=%d accepted=%d replay=%d scheduled=%d capacity=%d", division, g.accepted, g.replayed, g.scheduled, g.capacity)
+				t.Logf("division=%d accepted=%d replay=%d scheduled=%d", division, g.accepted, g.replayed, g.scheduled)
 			}
 		})
 	}
@@ -150,10 +150,10 @@ func TestB18LongPairFailureAndJoin(t *testing.T) {
 	defer cancel()
 	joined := make(chan struct{})
 	factory := b18CancelFactory{b18TrialFactory{pol}, cancel, joined}
-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
 	storage := make([]byte, 0, chunker.MaxSize)
-	out, err := state.readNextChunk(bytes.NewReader(input), b18TrialFactory{pol}.NewChunker(), storage)
+	out, err := state.readNextChunk(bytes.NewReader(input), g.ordinary(b18TrialFactory{pol}.NewChunker()), storage)
 	if out != nil || !errors.Is(err, context.Canceled) || g.scheduled != 1 {
 		t.Fatal("long validator published after cancellation", err)
 	}
@@ -197,12 +197,12 @@ func TestB18LongReplayGrowthError(t *testing.T) {
 		parent.Content = append(parent.Content, id)
 		sizes[id] = n
 	}
-	g := &parentCutReader{parent: parent, factory: b18TrialFactory{pol}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
+	g := b18Probed(&parentCutReader{parent: parent, factory: b18TrialFactory{pol}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
 	initial := make([]byte, 0, 3*1024*1024)
 	sentinel := errors.New("after long replay growth")
 	rd := &b18FailReader{r: bytes.NewReader(input), left: 4 * 1024 * 1024, err: sentinel}
-	out, err := state.readNextChunk(rd, b18TrialFactory{pol}.NewChunker(), initial)
+	out, err := state.readNextChunk(rd, g.ordinary(b18TrialFactory{pol}.NewChunker()), initial)
 	if len(out) == 0 || !errors.Is(err, sentinel) || g.scheduled != 1 || g.replayed == 0 || cap(g.root) <= cap(initial) {
 		t.Fatalf("err=%v scheduled=%d replay=%d cap=%d", err, g.scheduled, g.replayed, cap(g.root))
 	}

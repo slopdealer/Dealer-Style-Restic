@@ -32,10 +32,10 @@ func b18Guidance(payload []byte, pol chunker.Pol) (*data.Node, map[restic.ID]uin
 	}
 	return parent, sizes
 }
-func b18ReadGuided(ctx context.Context, rd io.Reader, factory b18TrialFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *parentCutReader, error) {
-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
-	c := factory.NewChunker()
+func b18ReadGuided(ctx context.Context, rd io.Reader, factory b18TrialFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *b18Guided, error) {
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
+	c := g.ordinary(factory.NewChunker())
 	scratch := make([]byte, 0, 2*1024*1024)
 	offset := 0
 	var ends []int
@@ -84,7 +84,7 @@ func TestB18GuidedReader(t *testing.T) {
 				if err != nil || !slices.Equal(got, want) || !slices.Equal(ids, b18ContentIDs(tc.input, want)) {
 					t.Fatalf("division=%d got=%v want=%v err=%v", division, got, want, err)
 				}
-				t.Logf("division=%d bytes=%d accepted=%d replayed=%d scheduled=%d assembly_capacity=%d", division, len(tc.input), g.accepted, g.replayed, g.scheduled, g.capacity)
+				t.Logf("division=%d bytes=%d accepted=%d replayed=%d scheduled=%d", division, len(tc.input), g.accepted, g.replayed, g.scheduled)
 			}
 		})
 	}
@@ -213,12 +213,12 @@ func TestB18GuidedSaverHashOwnership(t *testing.T) {
 	s.NodeFromFileInfo = func(string, string, toNoder, bool) (*data.Node, error) {
 		return &data.Node{Type: data.NodeTypeFile, Size: uint64(len(input))}, nil
 	}
-	g := &parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize}
-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize})
+	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
 	file := &b06SaverFile{r: bytes.NewReader(input)}
 	var result futureNodeResult
 	completed, reading := 0, 0
-	s.saveFile(t.Context(), factory.NewChunker(), state, "/guided", "guided", file, func() {}, func() { reading++ }, func(r futureNodeResult) { result = r; completed++ })
+	s.saveFile(t.Context(), g.ordinary(factory.NewChunker()), state, "/guided", "guided", file, func() {}, func() { reading++ }, func(r futureNodeResult) { result = r; completed++ })
 	if g.accepted == 0 || reading != 1 || completed != 0 || !file.closed {
 		t.Fatalf("guided save not exercised: accepted=%d reading=%d completed=%d", g.accepted, reading, completed)
 	}
@@ -319,9 +319,9 @@ func TestB18GuidedCancellationDuringValidator(t *testing.T) {
 	defer cancel()
 	joined := make(chan struct{})
 	factory := b18CancelFactory{b18TrialFactory{pol}, cancel, joined}
-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
-	output, err := state.readNextChunk(bytes.NewReader(input), b18TrialFactory{pol}.NewChunker(), make([]byte, 0, 2*1024*1024))
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
+	output, err := state.readNextChunk(bytes.NewReader(input), g.ordinary(b18TrialFactory{pol}.NewChunker()), make([]byte, 0, 2*1024*1024))
 	if !errors.Is(err, context.Canceled) || output != nil || g.scheduled != 1 {
 		t.Fatal("validator cancellation did not prevent emission", err, g.scheduled)
 	}
@@ -349,11 +349,11 @@ func TestB18GuidedEOFReturnsAssemblyBase(t *testing.T) {
 	s.NodeFromFileInfo = func(string, string, toNoder, bool) (*data.Node, error) {
 		return &data.Node{Type: data.NodeTypeFile, Size: uint64(len(input))}, nil
 	}
-	g := &parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize}
-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize})
+	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
 	var result futureNodeResult
 	completed := 0
-	s.saveFile(t.Context(), factory.NewChunker(), state, "/cut", "cut", &b06SaverFile{r: bytes.NewReader(input)}, func() {}, func() {}, func(r futureNodeResult) { result = r; completed++ })
+	s.saveFile(t.Context(), g.ordinary(factory.NewChunker()), state, "/cut", "cut", &b06SaverFile{r: bytes.NewReader(input)}, func() {}, func() {}, func(r futureNodeResult) { result = r; completed++ })
 	for _, p := range u.pending {
 		p.cb(p.id, p.known, p.size, nil)
 	}

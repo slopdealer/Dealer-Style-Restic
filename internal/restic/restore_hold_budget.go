@@ -10,9 +10,11 @@ import "context"
 // room (Acquire), so it only adds to what the others hold while that is low.
 // The implementation is the restorer's.
 //
-// This file declares types only, on purpose: this package is placed before
-// the key derivation code in the binary, and that code runs about 3% slower
-// or faster depending on where it lands (6 ms per process).
+// This file declares types only; the implementation is in the restorer
+// package. On the build that was measured, code added to this package moved
+// the key derivation code in the binary, and its run time changed by about
+// 3% (6 ms per process) in one direction or the other. The effect belongs to
+// one compiler version, one linker layout and one machine.
 type RestoreHoldBudget interface {
 	// Force takes n bytes without waiting and returns the amount taken.
 	Force(n int64) int64

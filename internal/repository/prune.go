@@ -121,13 +121,9 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 
 	// Compute index-only headers alongside used-tree traversal and counting.
 	// Diagnostics and header errors settle at their original position below.
-	var headers *pruneHeaderSizes
-	var takeHeaders func() (map[restic.ID]int64, error)
-	if !debug.IsEnabled() {
-		headers = startPruneHeaderSizesWithCalculator(ctx, repo.idx.PackHeaderSizes)
-		defer headers.discard()
-		takeHeaders = headers.take
-	}
+	headers := startPruneHeaderSizesWithCalculator(ctx, repo.idx.PackHeaderSizes)
+	defer headers.discard()
+	takeHeaders := headers.take
 
 	usedBlobs := index.NewAssociatedSet[uint8](repo.idx)
 	err := getUsedBlobs(ctx, repo, usedBlobs)

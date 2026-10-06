@@ -7,7 +7,6 @@ import (
 	"io"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/repository/crypto"
 	"github.com/restic/restic/internal/repository/index"
 	"github.com/restic/restic/internal/restic"
@@ -26,10 +25,6 @@ func (r *Repository) loadIndexesStreaming(ctx context.Context, p restic.Counter,
 }
 
 func (r *ordinaryIndexStreamRepository) LoadIndexStream(ctx context.Context, id restic.ID) (*index.Index, []byte, error) {
-	if debug.IsEnabled() {
-		buf, err := r.LoadUnpacked(ctx, restic.IndexFile, id)
-		return nil, buf, err
-	}
 	buf, err := r.LoadRaw(ctx, restic.IndexFile, id)
 	if err != nil {
 		return nil, nil, err

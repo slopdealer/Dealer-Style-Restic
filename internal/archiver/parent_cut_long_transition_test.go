@@ -20,9 +20,9 @@ func TestB18LongPairNaturallyGrownAssembly(t *testing.T) {
 	input := b06Payload(32*1024*1024+173, 881)
 	parent, sizes := b18Guidance(input, pol)
 	factory := b18TrialFactory{pol}
-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
-	c := factory.NewChunker()
+	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
+	c := g.ordinary(factory.NewChunker())
 	assembly := make([]byte, 0, 2<<20)
 	rd := bytes.NewReader(input)
 	var ends []int
@@ -71,14 +71,14 @@ func TestB18LongPairRouteTransitionReadError(t *testing.T) {
 			input = append(input, bytes.Repeat([]byte{byte(i + 1)}, n)...)
 		}
 	}
-	g := &parentCutReader{parent: parent, factory: b18ReclaimFactory{}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g, bmax: 111}
+	g := b18Probed(&parentCutReader{parent: parent, factory: b18ReclaimFactory{}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader, bmax: 111}
 	copy(state.readBuf, input[:111])
 	sentinel := errors.New("next long pair failed")
 	rd := &b18FailReader{r: bytes.NewReader(input[111:]), left: len(input) - 111, err: sentinel}
 	storage := make([]byte, 0, 4<<20)
 	assembly := storage
-	c := g.factory.NewChunker()
+	c := g.newOrdinary()
 	for i := 0; i < 6; i++ {
 		out, err := state.readNextChunk(rd, c, assembly)
 		if err != nil || len(out) != lengths[i] || !bytes.Equal(out, bytes.Repeat([]byte{byte(i + 1)}, lengths[i])) {
