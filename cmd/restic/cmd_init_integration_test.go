@@ -15,7 +15,8 @@ import (
 func testRunInit(t testing.TB, gopts global.Options) {
 	repository.TestUseLowSecurityKDFParameters(t)
 	restic.TestDisableCheckPolynomial(t)
-	repository.TestSetLockTimeout(t, 0)
+	// zero unless RESTIC_TEST_LOCK_WAIT is set, see testLockWait
+	repository.TestSetLockTimeout(t, testLockWait(t))
 
 	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
 		return runInit(ctx, InitOptions{}, gopts, nil, gopts.Term)

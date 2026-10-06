@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/restic/restic/internal/backend"
@@ -46,16 +47,30 @@ func TestCheckRestoreNoLock(t *testing.T) {
 // listing filetypes more than once may cause problems with eventually consistent
 // backends (like e.g. Amazon S3) as the second listing may be inconsistent to what
 // is expected by the first listing + some operations.
+//
+// With a settle delay above zero (see testLockWait) a command also reads while
+// it waits for its lock: it lists the snapshot and the index files once during
+// the wait, and once more after the lock is confirmed, to compare. The listings
+// of the wait are therefore counted on their own: once per type, snapshots
+// before index. Everything from the confirmation scan of the lock on is held
+// to the rule above. The wait begins when the command has saved its lock file
+// and ends with the next listing of the lock files.
 type listOnceBackend struct {
 	backend.Backend
+	strictOrder bool
+
+	mu             sync.Mutex
 	listedFileType map[backend.FileType]bool
-	strictOrder    bool
+	// set between the save of the own lock file and the next lock listing
+	inLockWait   bool
+	listedInWait map[backend.FileType]bool
 }
 
 func newListOnceBackend(be backend.Backend) *listOnceBackend {
 	return &listOnceBackend{
 		Backend:        be,
 		listedFileType: make(map[backend.FileType]bool),
+		listedInWait:   make(map[backend.FileType]bool),
 		strictOrder:    false,
 	}
 }
@@ -64,18 +79,47 @@ func newOrderedListOnceBackend(be backend.Backend) *listOnceBackend {
 	return &listOnceBackend{
 		Backend:        be,
 		listedFileType: make(map[backend.FileType]bool),
+		listedInWait:   make(map[backend.FileType]bool),
 		strictOrder:    true,
 	}
 }
 
+func (be *listOnceBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+	err := be.Backend.Save(ctx, h, rd)
+	if err == nil && h.Type == backend.LockFile {
+		be.mu.Lock()
+		be.inLockWait = true
+		be.listedInWait = make(map[backend.FileType]bool)
+		be.mu.Unlock()
+	}
+	return err
+}
+
 func (be *listOnceBackend) List(ctx context.Context, t backend.FileType, fn func(backend.FileInfo) error) error {
-	if t != backend.LockFile && be.listedFileType[t] {
-		return errors.Errorf("tried listing type %v the second time", t)
+	if t == backend.LockFile {
+		err := be.Backend.List(ctx, t, fn)
+		be.mu.Lock()
+		be.inLockWait = false
+		be.mu.Unlock()
+		return err
 	}
-	if be.strictOrder && t == backend.SnapshotFile && be.listedFileType[backend.IndexFile] {
-		return errors.Errorf("tried listing type snapshots after index")
+
+	be.mu.Lock()
+	listed, when := be.listedFileType, ""
+	if be.inLockWait {
+		listed, when = be.listedInWait, " during the lock wait"
 	}
-	be.listedFileType[t] = true
+	var err error
+	if listed[t] {
+		err = errors.Errorf("tried listing type %v the second time%s", t, when)
+	} else if be.strictOrder && t == backend.SnapshotFile && listed[backend.IndexFile] {
+		err = errors.Errorf("tried listing type snapshots after index%s", when)
+	}
+	listed[t] = true
+	be.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	return be.Backend.List(ctx, t, fn)
 }
 
