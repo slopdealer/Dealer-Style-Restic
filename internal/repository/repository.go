@@ -1484,6 +1484,11 @@ func putStreamPackBuffer(buf []byte) {
 // handleBlobFn is called at most once for each blob. If the callback returns an error,
 // then LoadBlobsFromPack will abort and not retry it. The buf passed to the callback is only valid within
 // this specific call. The callback must not keep a reference to buf.
+//
+// handleBlobFn may be called while the backend connection of the pack read is
+// still held, so it must not call the backend itself. The restorer, the only
+// caller, writes to the target and nothing else. Handlers that save or load
+// use loadBlobsFromPackReleased.
 func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
 	blobs, err := r.blobsInPack(packID, handles)
 	if err != nil {

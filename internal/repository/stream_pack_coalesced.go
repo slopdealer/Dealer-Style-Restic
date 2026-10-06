@@ -78,6 +78,9 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
 	}
 	committed := 0
 	var handlerErr error
+	// decodeErr is an error of the decoder itself (not of a blob and not of the
+	// transfer), found in a window that was read completely.
+	var decodeErr error
 	yield := false
 	var finalPart pack.Blobs
 	// The final window is read here and decoded after Load returns: its bytes
@@ -120,8 +123,13 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
 			}
 			// Reuse the established window decoder. Its load reads from this
 			// response; alternate-copy recovery is deliberately disabled here.
+			windowRead := false
 			readWindow := func(_ context.Context, _ backend.Handle, _ int, _ int64, consume func(io.Reader) error) error {
-				return consume(rd)
+				if err := consume(rd); err != nil {
+					return err
+				}
+				windowRead = true
+				return nil
 			}
 			err := streamPackPartWithBuffer(requestCtx, readWindow, nil, dec, key, packID, part, data,
 				func(h restic.BlobHandle, plaintext []byte, blobErr error) error {
@@ -141,6 +149,15 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
 			if err == errStreamPackYield {
 				yield = true
 				stop()
+			} else if err != nil && windowRead && handlerErr == nil && requestCtx.Err() == nil {
+				// The window arrived completely, so this is not a failed transfer:
+				// the decoder rejected an entry (for example an index entry with an
+				// invalid length). Where decoding happens after Load has returned
+				// such an error is reported once. Cancel the request so that the
+				// retry backend does not download the range again and does not
+				// count the pack as unreadable.
+				decodeErr = err
+				stop()
 			}
 			if err != nil {
 				return err
@@ -154,6 +171,9 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if decodeErr != nil {
+		return decodeErr
 	}
 	if yield {
 		// No live response remains here. The original context and policy allow
@@ -200,5 +220,31 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
 		}
 		return streamPackPartWithBuffer(finalCtx, readFinal, recoverBlob, dec, key, packID, finalPart, data, handle)
 	}
+	// Load reported success, but the consumer did not take the range to its
+	// end (it was never called, or its error was dropped): nothing was read for
+	// the blobs that are still open. Fail closed exactly as a decode after Load
+	// does with a buffer that was never filled: the remaining blobs are decoded
+	// from zero bytes, none of them authenticates, and each one goes through
+	// alternate-copy recovery or is reported to the handler with its error.
+	for remaining := blobs[committed:]; len(remaining) > 0; {
+		n := packRangeEnd(remaining, window)
+		if err := streamPackPartWithBuffer(ctx, loadNothing, recoverBlob, dec, key, packID, remaining[:n], data, handle); err != nil {
+			return err
+		}
+		remaining = remaining[n:]
+	}
 	return nil
+}
+
+// loadNothing stands for a Load that delivered no bytes: it fills the window
+// with zeros, which is what a freshly allocated range buffer holds.
+func loadNothing(_ context.Context, _ backend.Handle, _ int, _ int64, consume func(io.Reader) error) error {
+	return consume(zeroReader{})
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }

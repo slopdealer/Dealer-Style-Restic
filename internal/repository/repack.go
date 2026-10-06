@@ -120,7 +120,8 @@ func repack(
 			var resultMu sync.Mutex
 			var results []saveResult
 
-			err := repo.loadBlobsFromPack(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+			// the handler saves blobs: it must not run inside the backend Load callback
+			err := repo.loadBlobsFromPackReleased(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
 				if err != nil {
 					// a required blob couldn't be retrieved
 					return err

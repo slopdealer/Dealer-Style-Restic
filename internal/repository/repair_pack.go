@@ -98,7 +98,8 @@ func resolveBlobsForPacks(ctx context.Context, repo *Repository, ids restic.IDSe
 }
 
 func reuploadBlobsFromPack(ctx context.Context, repo *Repository, packID restic.ID, blobs pack.Blobs, printer restic.Printer, uploader restic.BlobSaverWithAsync) error {
-	err := repo.loadBlobsFromPack(ctx, packID, blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+	// the handler uploads blobs: it must not run inside the backend Load callback
+	err := repo.loadBlobsFromPackReleased(ctx, packID, blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
 		if err != nil {
 			printer.E("failed to load blob %v: %v", blob.ID, err)
 			return nil
