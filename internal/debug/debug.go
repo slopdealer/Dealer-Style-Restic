@@ -36,11 +36,6 @@ func initDebug() bool {
 	return true
 }
 
-// IsEnabled reports whether this process will emit debug log records.
-func IsEnabled() bool {
-	return opts.isEnabled
-}
-
 func initDebugLogger() {
 	debugfile := os.Getenv("DEBUG_LOG")
 	if debugfile == "" {
@@ -191,15 +186,16 @@ func Log(f string, args ...any) {
 	pos := fmt.Sprintf("%s/%s:%d", dir, file, line)
 
 	formatString := fmt.Sprintf("%s\t%s\t%d\t%s", pos, fn, goroutine, f)
+
 	dbgprint := func() {
 		fmt.Fprintf(os.Stderr, formatString, args...)
 	}
 
-	filename := fmt.Sprintf("%s/%s:%d", dir, file, line)
 	if opts.logger != nil {
 		opts.logger.Printf(formatString, args...)
 	}
 
+	filename := fmt.Sprintf("%s/%s:%d", dir, file, line)
 	if checkFilter(opts.files, filename) {
 		dbgprint()
 		return
