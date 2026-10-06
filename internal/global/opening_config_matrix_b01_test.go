@@ -106,10 +106,9 @@ func TestB01OpeningConfigFailureMatrix(t *testing.T) {
 							if statFailure {
 								wantKeys, wantConfig = 0, 0
 							} else if password != rtest.TestPassword {
+								// a wrong password costs one key search on both
+								// arms, with or without the staged listing
 								wantConfig = 0
-								if arm == 0 && connections == 2 {
-									wantKeys = 2
-								}
 							}
 							if keyLoads[arm].Load() != wantKeys || configLoads[arm].Load() != wantConfig {
 								t.Fatalf("arm%d key/config loads=%d/%d want=%d/%d", arm, keyLoads[arm].Load(), configLoads[arm].Load(), wantKeys, wantConfig)

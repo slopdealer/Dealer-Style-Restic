@@ -104,11 +104,9 @@ func TestOpeningActualPathsMatchOrdinary(t *testing.T) {
 			if tc.password != rtest.TestPassword && errors[0] == "" {
 				t.Fatal("wrong password accepted")
 			}
-			if tc.name == "wrong" {
-				if len(orders[0]) != 40 || len(orders[1]) != 20 {
-					t.Fatalf("attempts=%v", orders)
-				}
-			} else if fmt.Sprint(orders[0]) != fmt.Sprint(orders[1]) {
+			// also for a wrong password with the staged listing: the same key
+			// files, once each, in the same order
+			if fmt.Sprint(orders[0]) != fmt.Sprint(orders[1]) {
 				t.Fatalf("attempt order differs: %v", orders)
 			}
 			t.Logf("staged loads=%d ordinary loads=%d error=%q", len(orders[0]), len(orders[1]), errors[0])
