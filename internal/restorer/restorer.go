@@ -676,11 +676,14 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 		}
 	}
 
-	// The first pass only needs to recognize duplicate hardlinks so their
-	// contents are not restored more than once. Keep no canonical path here:
-	// the path-bearing index is rebuilt in the second pass, after file workers
-	// have finished.
-	seenLinks := data.NewHardlinkIndex[struct{}]()
+	// As in stock, the first pass records the first path of every inode that a
+	// node reports with more than one link, and the second pass looks every
+	// regular file up in this index, whatever link count that node itself
+	// reports. The index cannot be rebuilt during the second pass: a path that
+	// records one link may come before the path that records more.
+	idx := data.NewHardlinkIndex[string]()
+	// number of inodes in idx: without any, the second pass has nothing to look up
+	indexedInodes := 0
 	filerestorer := newFileRestorer(dst, res.repo.LoadBlobsFromPack, res.repo.LookupBlob,
 		res.repo.Connections(), res.opts.Sparse, res.opts.Delete, res.repo.StartWarmup, res.opts.Progress,
 		res.repo.ChunkerFactory().ZeroChunk())
@@ -766,12 +769,13 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			}
 
 			if node.Links > 1 {
-				if seenLinks.Has(node.Inode, node.DeviceID) {
+				if idx.Has(node.Inode, node.DeviceID) {
 					// a hardlinked file does not increase the restore size
 					res.opts.Progress.AddFile(0)
 					return nil
 				}
-				seenLinks.Add(node.Inode, node.DeviceID, struct{}{})
+				idx.Add(node.Inode, node.DeviceID, location)
+				indexedInodes++
 			}
 
 			_, parentFresh := freshDirs[parentDir]
@@ -807,7 +811,6 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	if err != nil {
 		return 0, err
 	}
-	seenLinks = nil
 
 	var treePrefetch *restoreTreePrefetch
 	if !res.opts.DryRun && len(filerestorer.files) != 0 && len(restoreTreeIDs) != 0 {
@@ -826,7 +829,6 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	}
 
 	debug.Log("second pass for %q", dst)
-	idx := data.NewHardlinkIndex[string]()
 	var metadataPool *restoreMetadataPool
 	traverseCtx := ctx
 	previousSettleBeforeError := res.settleBeforeError
@@ -856,19 +858,16 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 				return err
 			}
 
-			if node.Links > 1 {
-				if idx.Has(node.Inode, node.DeviceID) {
-					if metadataPool != nil {
-						if err := metadataPool.drain(); err != nil {
-							return err
-						}
+			if indexedInodes != 0 && idx.Has(node.Inode, node.DeviceID) && idx.Value(node.Inode, node.DeviceID) != location {
+				if metadataPool != nil {
+					if err := metadataPool.drain(); err != nil {
+						return err
 					}
-					_, err := res.withOverwriteCheck(ctx, node, target, location, true, nil, func(_ bool, _ *fileState) error {
-						return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.Value(node.Inode, node.DeviceID)), target, location)
-					})
-					return err
 				}
-				idx.Add(node.Inode, node.DeviceID, location)
+				_, err := res.withOverwriteCheck(ctx, node, target, location, true, nil, func(_ bool, _ *fileState) error {
+					return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.Value(node.Inode, node.DeviceID)), target, location)
+				})
+				return err
 			}
 
 			if _, ok := res.hasRestoredFile(location); ok {
