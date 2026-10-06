@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"strconv"
-	"strings"
 
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/restic"
@@ -86,8 +85,10 @@ func nextParentNode(t *treeIterator, payload []byte) (*Node, error) {
 	}
 	// The JSON decoder has already removed the outer JSON escaping. Names
 	// written by Node.MarshalJSON contain a second layer of escaping, which
-	// only needs decoding when that layer left a backslash in the string.
-	if strings.IndexByte(n.Name, '\\') >= 0 {
+	// Node.UnmarshalJSON removes with strconv.Unquote for every name. The call
+	// is skipped only for names it returns unchanged; every other name gets
+	// it, so a name is rejected here exactly when stock rejects it.
+	if !nodeNameIsPlain(n.Name) {
 		n.Name, err = strconv.Unquote(`"` + n.Name + `"`)
 		if err != nil {
 			return nil, errors.Wrap(err, "Unquote")
