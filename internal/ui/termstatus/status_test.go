@@ -204,7 +204,7 @@ func TestFlushWaitsForPendingOutput(t *testing.T) {
 	_, err := term.OutputWriter().Write([]byte("record\n"))
 	rtest.OK(t, err)
 
-	term.Flush()
+	term.(*terminal).Flush()
 	rtest.Equals(t, "stdout\nstderr\nrecord\n", output.String())
 }
 
@@ -376,81 +376,6 @@ func TestRunWithoutStatusRespectsBatchSizeLimit(t *testing.T) {
 	rtest.Equals(t, "b\n", string(stdout.data[maxOutputBatchSize:]))
 	rtest.Equals(t, maxOutputBatchSize, len(events[0])-len("stdout:"))
 	rtest.Equals(t, "stdout:b\n", events[1])
-}
-
-type partialErrorOutputWriter struct {
-	data  []byte
-	calls int
-}
-
-func (w *partialErrorOutputWriter) Write(p []byte) (int, error) {
-	w.calls++
-	if w.calls == 1 {
-		n := len(p) / 2
-		w.data = append(w.data, p[:n]...)
-		return n, errors.New("temporary write error")
-	}
-	w.data = append(w.data, p...)
-	return len(p), nil
-}
-
-func TestRunWithoutStatusRetriesPartialBatchWrite(t *testing.T) {
-	w := &partialErrorOutputWriter{}
-	term := new(nil, w, io.Discard, true)
-	term.batchStdout = true
-	term.outputBatchWindow = time.Hour
-	ctx, cancel := context.WithCancel(context.Background())
-	go term.Run(ctx)
-
-	term.Print("one")
-	term.Print("two")
-	term.Flush()
-	cancel()
-	<-term.closed
-	rtest.Equals(t, "one\ntwo\n", string(w.data))
-	rtest.Equals(t, 2, w.calls)
-}
-
-type recoveringOutputWriter struct {
-	data  []byte
-	calls int
-}
-
-func (w *recoveringOutputWriter) Write(p []byte) (int, error) {
-	w.calls++
-	switch w.calls {
-	case 1:
-		n := len(p) / 2
-		w.data = append(w.data, p[:n]...)
-		return n, errors.New("temporary partial write error")
-	case 2:
-		return 0, errors.New("temporary zero-progress write error")
-	default:
-		w.data = append(w.data, p...)
-		return len(p), nil
-	}
-}
-
-func TestRunWithoutStatusKeepsSuffixAfterZeroProgressRetry(t *testing.T) {
-	w := &recoveringOutputWriter{}
-	term := new(nil, w, io.Discard, true)
-	term.batchStdout = true
-	term.outputBatchWindow = time.Hour
-	ctx, cancel := context.WithCancel(context.Background())
-	go term.Run(ctx)
-
-	term.Print("one")
-	term.Print("two")
-	term.Flush()
-	rtest.Equals(t, "one\n", string(w.data))
-	rtest.Equals(t, 2, w.calls)
-
-	term.Print("three")
-	term.Flush()
-	cancel()
-	<-term.closed
-	rtest.Equals(t, "one\ntwo\nthree\n", string(w.data))
-	rtest.Equals(t, 3, w.calls)
 }
 
 func TestRunWithoutStatusWritesOversizedRecordDirectly(t *testing.T) {

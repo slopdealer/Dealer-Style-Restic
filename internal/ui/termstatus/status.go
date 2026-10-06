@@ -2,6 +2,7 @@ package termstatus
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -18,14 +19,6 @@ import (
 var _ ui.Terminal = &terminal{}
 
 const maxOutputBatchSize = 64 * 1024
-
-type queuedOutput struct {
-	err     bool
-	line    string
-	data    []byte
-	offset  int
-	started bool
-}
 
 // terminal is used to write messages and display status lines which can be
 // updated. When the output is redirected to a file, the status lines are not
@@ -74,11 +67,9 @@ type fder interface {
 }
 
 // Setup creates a new termstatus. The returned function must be called to shut
-// down its background goroutine. It closes OutputWriter and drains submitted
-// output before shutdown. If an output writer cannot make progress, the
-// remaining bytes cannot be delivered; a short-write error is reported. If a
-// record was partially written, its write diagnostics wait until its suffix
-// is written or the final shutdown attempt.
+// down its background goroutine. It closes OutputWriter and writes submitted
+// output before shutdown. Every message is written once: when a write fails,
+// the error is reported on stderr and the message is not written again.
 //
 // A goroutine is started to update the
 // terminal. It is terminated when ctx is cancelled. When stdout is redirected to
@@ -385,13 +376,24 @@ func findUnchangedLines(curr, last []string) []bool {
 
 // runWithoutStatus listens on the channels and just prints out the messages,
 // without status lines.
+//
+// Messages for a stream that is a regular file are collected and written
+// together: at most maxOutputBatchSize bytes, for one stream at a time, and
+// not longer than outputBatchWindow after the last message. A message for the
+// other stream, a status update, Flush and shutdown write what was collected
+// first, so the order of the output is the order of the calls. Every other
+// writer gets one Write per message, as before.
+//
+// Nothing is kept after a write: a message that could not be written is
+// reported and dropped, as in stock. Memory is bounded by one batch, and a
+// failing stdout never holds back what is printed to stderr.
 func (t *terminal) runWithoutStatus(ctx context.Context) {
 	var lastStatus []string
-	var pending []queuedOutput
-	var batchBuffer []byte
+	// batch holds the messages collected for one stream, batchErr says which
+	var batch []byte
+	var batchErr bool
 	var batchTimer *time.Timer
 	var batchTimerC <-chan time.Time
-	var pendingWriteErrors []error
 
 	stopBatchTimer := func() {
 		if batchTimer == nil {
@@ -420,154 +422,70 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 		}
 		batchTimerC = batchTimer.C
 	}
-	flushPending := func() bool {
-		for len(pending) > 0 {
-			item := &pending[0]
-			dst := t.wr
-			if item.err {
-				dst = t.errWriter
-			}
-
-			var n int
-			var err error
-			if item.data != nil {
-				remaining := item.data[item.offset:]
-				n, err = dst.Write(remaining)
-				if n < 0 || n > len(remaining) {
-					t.logWriteErr(fmt.Errorf("invalid write count %d", n))
-					return false
-				}
-				item.offset += n
-			} else {
-				n, err = io.WriteString(dst, item.line)
-				if n < 0 || n > len(item.line) {
-					t.logWriteErr(fmt.Errorf("invalid write count %d", n))
-					return false
-				}
-				item.line = item.line[n:]
-			}
-
-			if n > 0 {
-				item.started = true
-			}
-
-			if err != nil {
-				if item.started {
-					// Keep diagnostics behind a partially written record. A later
-					// write may recover its suffix, and stderr must not split it.
-					pendingWriteErrors = append(pendingWriteErrors, err)
-				} else {
-					t.logWriteErr(err)
-				}
-			}
-			if item.offset == len(item.data) && item.line == "" {
-				pending = pending[1:]
-				for _, writeErr := range pendingWriteErrors {
-					t.logWriteErr(writeErr)
-				}
-				pendingWriteErrors = nil
-				continue
-			}
-			if n == 0 {
-				if err == nil {
-					if item.started {
-						pendingWriteErrors = append(pendingWriteErrors, io.ErrShortWrite)
-					} else {
-						t.logWriteErr(io.ErrShortWrite)
-					}
-				}
-				return false
-			}
-			// A partial write with an error still made progress. Retry only its
-			// unwritten suffix, before allowing later output to reach either stream.
-		}
-		pending = nil
-		if batchBuffer != nil {
-			batchBuffer = batchBuffer[:0]
-		}
-		return true
-	}
-	flushAndStop := func(reportUndeliveredErrors bool) {
+	flushBatch := func() {
 		stopBatchTimer()
-		if !flushPending() && reportUndeliveredErrors {
-			for _, writeErr := range pendingWriteErrors {
-				t.logWriteErr(writeErr)
-			}
-			pendingWriteErrors = nil
-		}
-	}
-	queueOutput := func(line string, isErr, batchable bool) {
-		if batchable && len(line) <= maxOutputBatchSize {
-			if len(pending) > 0 {
-				last := &pending[len(pending)-1]
-				pendingLen := len(last.data) - last.offset
-				if last.data == nil || last.err != isErr || last.started || pendingLen+len(line) > maxOutputBatchSize || len(last.data)+len(line) > maxOutputBatchSize {
-					stopBatchTimer()
-					flushPending()
-				}
-			}
-
-			if len(pending) > 0 {
-				last := &pending[len(pending)-1]
-				pendingLen := len(last.data) - last.offset
-				if last.data != nil && last.err == isErr && !last.started && pendingLen+len(line) <= maxOutputBatchSize && len(last.data)+len(line) <= maxOutputBatchSize {
-					last.data = append(last.data, line...)
-					if len(pending) == 1 {
-						batchBuffer = last.data
-					}
-					startBatchTimer()
-					return
-				}
-			}
-			var data []byte
-			if len(pending) == 0 {
-				if batchBuffer == nil {
-					batchBuffer = make([]byte, 0, maxOutputBatchSize)
-				}
-				data = append(batchBuffer[:0], line...)
-				batchBuffer = data
-			} else {
-				data = append(make([]byte, 0, maxOutputBatchSize), line...)
-			}
-			pending = append(pending, queuedOutput{err: isErr, data: data})
-			startBatchTimer()
+		if len(batch) == 0 {
 			return
 		}
-
-		stopBatchTimer()
-		flushPending()
-		// Route even an otherwise empty queue through the retry path so a
-		// partial write cannot be overtaken by output for the other stream.
-		pending = append(pending, queuedOutput{err: isErr, line: line})
-		flushPending()
+		dst := t.wr
+		if batchErr {
+			dst = t.errWriter
+		}
+		t.writeBatch(dst, batch)
+		batch = batch[:0]
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			flushAndStop(true)
+			flushBatch()
 			return
 		case msg := <-t.msg:
 			if msg.barrier != nil {
-				flushAndStop(false)
+				flushBatch()
 				msg.barrier <- struct{}{}
 				continue
 			}
+
 			batchable := t.batchStdout
 			if msg.err {
 				batchable = t.batchStderr
 			}
-			queueOutput(msg.line, msg.err, batchable)
+			batchable = batchable && len(msg.line) <= maxOutputBatchSize
+			if len(batch) > 0 && (!batchable || batchErr != msg.err || len(batch)+len(msg.line) > maxOutputBatchSize) {
+				flushBatch()
+			}
+			if batchable {
+				if batch == nil {
+					batch = make([]byte, 0, maxOutputBatchSize)
+				}
+				batch = append(batch, msg.line...)
+				batchErr = msg.err
+				startBatchTimer()
+				continue
+			}
+
+			var dst io.Writer
+			if msg.err {
+				dst = t.errWriter
+			} else {
+				dst = t.wr
+			}
+
+			_, err := io.WriteString(dst, msg.line)
+			t.logWriteErr(err)
+
 		case <-batchTimerC:
 			batchTimer = nil
 			batchTimerC = nil
-			flushPending()
+			flushBatch()
 
 		case stat := <-t.status:
-			flushAndStop(false)
+			flushBatch()
 			if !slices.Equal(stat.lines, lastStatus) {
 				for _, line := range stat.lines {
 					// Ensure that each message ends with exactly one newline.
-					queueOutput(strings.TrimRight(line, "\n")+"\n", false, false)
+					_, err := fmt.Fprintln(t.wr, strings.TrimRight(line, "\n"))
+					t.logWriteErr(err)
 				}
 				// Copy the status slice to avoid aliasing
 				lastStatus = append([]string{}, stat.lines...)
@@ -576,11 +494,40 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 	}
 }
 
-// Flush waits until messages queued before the barrier have been written or an
-// output writer stops making progress. A short write before any bytes are
-// written is reported immediately. If a record was partially written, its
-// diagnostics wait until its suffix is written or the final shutdown attempt.
-// Remaining bytes stay queued for later output or the final shutdown attempt.
+// writeBatch writes the messages collected for one stream. A writer that works
+// gets them in one call. When that call fails, the outcome is the one of
+// writing line by line, which is what stock does with these messages: the
+// error is reported, the line in which the write stopped is given up, and
+// every later line is written once on its own, each failure reported. No byte
+// is written twice and nothing is kept for another attempt. As in stock, the
+// number of bytes a writer reports is not examined when it reports no error.
+func (t *terminal) writeBatch(dst io.Writer, batch []byte) {
+	n, err := dst.Write(batch)
+	if err == nil {
+		return
+	}
+	t.logWriteErr(err)
+
+	rest := batch[min(max(n, 0), len(batch)):]
+	// the line that was being written is lost, like a message in stock
+	i := bytes.IndexByte(rest, '\n')
+	if i < 0 {
+		return
+	}
+	rest = rest[i+1:]
+	for len(rest) > 0 {
+		end := bytes.IndexByte(rest, '\n') + 1
+		if end == 0 {
+			end = len(rest)
+		}
+		_, err := dst.Write(rest[:end])
+		t.logWriteErr(err)
+		rest = rest[end:]
+	}
+}
+
+// Flush waits until the messages queued before the barrier have been written.
+// A message whose write failed has been reported and is not written again.
 func (t *terminal) Flush() {
 	t.outputMu.Lock()
 	defer t.outputMu.Unlock()
