@@ -47,7 +47,7 @@ func mergeTestInput(count, generation int) *Index {
 		// each input and across merges, with multiple locations for one ID.
 		blob := pack.Blob{
 			BlobHandle: restic.BlobHandle{Type: restic.DataBlob + restic.BlobType(i%2), ID: mergeTestID(uint64(i % 113))},
-			Offset: uint(i % 19), Length: 33,
+			Offset:     uint(i % 19), Length: 33,
 		}
 		packID := mergeTestID(uint64(1000 + i%7))
 		if i%5 == 0 {

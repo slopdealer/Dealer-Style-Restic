@@ -45,10 +45,14 @@ func TestSavedStreamVerifyEquivalence(t *testing.T) {
 	r := &Repository{key: crypto.NewRandomKey()}
 	defer func() { r.getZstdDecoder().Close() }()
 	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(512<<10), zstd.WithEncoderCRC(true))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer enc.Close()
 	wide, err := zstd.NewWriter(nil, zstd.WithWindowSize(2<<20), zstd.WithEncoderCRC(true))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer wide.Close()
 	p := bytes.Repeat([]byte("a bounded verification example "), (4<<20)/31+1)
 	frame := enc.EncodeAll(p, nil)
@@ -56,7 +60,11 @@ func TestSavedStreamVerifyEquivalence(t *testing.T) {
 	late[len(late)-1] ^= 1
 	second := enc.EncodeAll([]byte("tail"), nil)
 	joined := append(append([]byte(nil), frame...), second...)
-	for _, tc := range []struct { name string; compressed []byte; id restic.ID }{
+	for _, tc := range []struct {
+		name       string
+		compressed []byte
+		id         restic.ID
+	}{
 		{"valid", frame, restic.Hash(p)},
 		{"wrong-content", frame, restic.Hash([]byte("wrong"))},
 		{"truncated", frame[:len(frame)-3], restic.Hash(p)},
@@ -71,38 +79,58 @@ func TestSavedStreamVerifyEquivalence(t *testing.T) {
 			before := append([]byte(nil), buf...)
 			got := r.verifyCiphertext(buf, len(p), tc.id)
 			want := eagerSaveVerifyTest(r, buf, len(p), tc.id)
-			if fmt.Sprint(got) != fmt.Sprint(want) { t.Fatalf("got %v, want %v", got, want) }
-			if !bytes.Equal(buf, before) { t.Fatal("verification modified ciphertext") }
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+			if !bytes.Equal(buf, before) {
+				t.Fatal("verification modified ciphertext")
+			}
 		})
 	}
 	buf := encryptSaveVerifyTest(r, frame)
 	buf[len(buf)-1] ^= 1
-	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err == nil || !strings.Contains(err.Error(), "decryption failed") { t.Fatalf("authentication: %v", err) }
+	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err == nil || !strings.Contains(err.Error(), "decryption failed") {
+		t.Fatalf("authentication: %v", err)
+	}
 	r.opts.NoExtraVerify = true
-	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err != nil { t.Fatalf("NoExtraVerify: %v", err) }
+	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err != nil {
+		t.Fatalf("NoExtraVerify: %v", err)
+	}
 }
 
 func TestSavedStreamVerifyDispatchAndConcurrent(t *testing.T) {
 	r := &Repository{key: crypto.NewRandomKey()}
 	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(512<<10))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer enc.Close()
 	p := make([]byte, 4<<20)
 	_, _ = rand.New(rand.NewSource(18)).Read(p)
 	frame := enc.EncodeAll(p, nil)
 	id := restic.Hash(p)
-	if handled, err := verifySavedCompressedHash(frame, id); !handled || err != nil { t.Fatalf("normal window dispatch %v: %v", handled, err) }
+	if handled, err := verifySavedCompressedHash(frame, id); !handled || err != nil {
+		t.Fatalf("normal window dispatch %v: %v", handled, err)
+	}
 	wide, err := zstd.NewWriter(nil, zstd.WithWindowSize(2<<20))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer wide.Close()
-	if handled, _ := verifySavedCompressedHash(wide.EncodeAll(p, nil), id); handled { t.Fatal("large window must fall back") }
+	if handled, _ := verifySavedCompressedHash(wide.EncodeAll(p, nil), id); handled {
+		t.Fatal("large window must fall back")
+	}
 	buf := encryptSaveVerifyTest(r, frame)
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range 3 { if err := r.verifyCiphertext(buf, len(p), id); err != nil { t.Error(err) } }
+			for range 3 {
+				if err := r.verifyCiphertext(buf, len(p), id); err != nil {
+					t.Error(err)
+				}
+			}
 		}()
 	}
 	wg.Wait()
@@ -110,7 +138,9 @@ func TestSavedStreamVerifyDispatchAndConcurrent(t *testing.T) {
 
 func TestSavedStreamCumulativeOutputLimit(t *testing.T) {
 	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(512<<10), zstd.WithEncoderCRC(true))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer enc.Close()
 	part := bytes.Repeat([]byte{19}, 128<<10)
 	frame := enc.EncodeAll(part, nil)
@@ -167,7 +197,7 @@ func TestSavedStreamExactLimitTerminalSettlement(t *testing.T) {
 // Complete saving includes encryption, extra verification, packer writes and
 // final uploader settlement. Each benchmark gets an independent repository.
 func BenchmarkB18CompleteSaveVerify(b *testing.B) {
-	for _, size := range []int{1<<20, 4<<20, 8<<20} {
+	for _, size := range []int{1 << 20, 4 << 20, 8 << 20} {
 		b.Run(fmt.Sprint(size), func(b *testing.B) {
 			TestUseLowSecurityKDFParameters(b)
 			r, _, _ := TestRepositoryWithVersion(b, 2)
@@ -178,11 +208,15 @@ func BenchmarkB18CompleteSaveVerify(b *testing.B) {
 			b.ResetTimer()
 			err := r.WithBlobUploader(context.Background(), func(ctx context.Context, u restic.BlobSaverWithAsync) error {
 				for range b.N {
-					if _, _, _, err := u.SaveBlob(ctx, restic.DataBlob, p, id, true); err != nil { return err }
+					if _, _, _, err := u.SaveBlob(ctx, restic.DataBlob, p, id, true); err != nil {
+						return err
+					}
 				}
 				return nil
 			})
-			if err != nil { b.Fatal(err) }
+			if err != nil {
+				b.Fatal(err)
+			}
 		})
 	}
 }

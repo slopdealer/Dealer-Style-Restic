@@ -15,8 +15,8 @@ type admissionTestLoader struct {
 	restic.LoaderUnpacked
 	entered chan struct{}
 	release chan struct{}
-	active atomic.Int64
-	peak atomic.Int64
+	active  atomic.Int64
+	peak    atomic.Int64
 }
 
 func (*admissionTestLoader) Connections() uint { return 32 }

@@ -46,8 +46,8 @@ func (p *gatedScanPrinter) ReportTotal(_ time.Time, _ archiver.ScanStats) {
 func TestProgressFinalScanPublicationSerialized(t *testing.T) {
 	printer := &gatedScanPrinter{
 		mockPrinter: &mockPrinter{Printer: restic.NewNoopPrinter()},
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
 	}
 	p := newProgress(printer, 0)
 	done := make(chan struct{})
@@ -108,4 +108,3 @@ func TestProgressIndependentScanAndArchiveAccounting(t *testing.T) {
 		t.Fatal("final scan result was not published")
 	}
 }
-

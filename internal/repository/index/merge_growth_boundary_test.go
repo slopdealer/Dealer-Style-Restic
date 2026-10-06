@@ -26,7 +26,7 @@ func TestMergeDuplicatesAtGrowthBoundary(t *testing.T) {
 			for i := range blobs {
 				blobs[i] = pack.Blob{
 					BlobHandle: restic.BlobHandle{Type: typ, ID: idFor(uint64(i))},
-					Offset: uint(i * 64), Length: 33,
+					Offset:     uint(i * 64), Length: 33,
 				}
 			}
 			packID := idFor(10000)
@@ -80,7 +80,7 @@ func TestMergeDuplicatesAtGrowthBoundary(t *testing.T) {
 			}
 			incoming := pack.Blob{
 				BlobHandle: restic.BlobHandle{Type: typ, ID: incomingID},
-				Offset: 256 * 64, Length: 33,
+				Offset:     256 * 64, Length: 33,
 			}
 			next := NewIndex()
 			next.StorePack(packID, pack.Blobs{incoming})

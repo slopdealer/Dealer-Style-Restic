@@ -18,13 +18,13 @@ import (
 
 type heldCallbackBlobUploader struct {
 	restic.BlobSaverWithAsync
-	started    chan struct{}
-	release    <-chan struct{}
-	firstErr   chan error
-	once       sync.Once
-	corrupt    bool
+	started     chan struct{}
+	release     <-chan struct{}
+	firstErr    chan error
+	once        sync.Once
+	corrupt     bool
 	corruptOnce sync.Once
-	corruptID  restic.ID
+	corruptID   restic.ID
 }
 
 type delayedFirstBlobUploader struct {
@@ -381,10 +381,10 @@ func testRepackWaitsForAsyncSaveError(t *testing.T, version uint) {
 		done <- repo.WithBlobUploader(context.Background(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
 			delayed := &heldCallbackBlobUploader{
 				BlobSaverWithAsync: uploader,
-				started:           uploaderStarted,
-				release:           release,
-				firstErr:          firstSaveErr,
-				corrupt:           true,
+				started:            uploaderStarted,
+				release:            release,
+				firstErr:           firstSaveErr,
+				corrupt:            true,
 			}
 			return repository.CopyBlobs(ctx, repo, repo, delayed, packs, keepBlobs, restic.NoopCounter, nil)
 		})
@@ -530,8 +530,8 @@ func testRepackCancelsPendingAsyncSave(t *testing.T, version uint) {
 		done <- repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
 			delayed := &heldCallbackBlobUploader{
 				BlobSaverWithAsync: uploader,
-				started:           uploaderStarted,
-				release:           release,
+				started:            uploaderStarted,
+				release:            release,
 			}
 			return repository.CopyBlobs(ctx, repo, repo, delayed, packs, keepBlobs, restic.NoopCounter, nil)
 		})

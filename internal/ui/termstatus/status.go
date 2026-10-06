@@ -106,14 +106,14 @@ func Setup(stdin io.ReadCloser, stdout, stderr io.Writer, quiet bool) (ui.Termin
 
 func new(rd io.ReadCloser, wr io.Writer, errWriter io.Writer, disableStatus bool) *terminal {
 	t := &terminal{
-		rd:               rd,
-		wr:               wr,
-		errWriter:        errWriter,
-		msg:              make(chan message),
-		status:           make(chan status),
-		closed:           make(chan struct{}),
-		batchStdout:      isRegularFile(wr),
-		batchStderr:      isRegularFile(errWriter),
+		rd:                rd,
+		wr:                wr,
+		errWriter:         errWriter,
+		msg:               make(chan message),
+		status:            make(chan status),
+		closed:            make(chan struct{}),
+		batchStdout:       isRegularFile(wr),
+		batchStderr:       isRegularFile(errWriter),
 		outputBatchWindow: 100 * time.Microsecond,
 	}
 

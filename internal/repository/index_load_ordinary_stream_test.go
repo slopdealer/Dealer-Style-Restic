@@ -7,8 +7,8 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
- "sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/restic/restic/internal/backend"
@@ -209,97 +209,149 @@ func TestOrdinaryIndexStreamWrapperBoundary(t *testing.T) {
 }
 
 func ordinaryStreamDecode(repo *Repository, ctx context.Context, id restic.ID) (*index.Index, error, error) {
- loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}
- idx, buf, err := loader.LoadIndexStream(ctx, id)
- if err != nil { return nil, err, nil }
- if idx != nil { return idx, nil, nil }
- idx, err = index.DecodeIndex(buf, id)
- return idx, nil, err
+	loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}
+	idx, buf, err := loader.LoadIndexStream(ctx, id)
+	if err != nil {
+		return nil, err, nil
+	}
+	if idx != nil {
+		return idx, nil, nil
+	}
+	idx, err = index.DecodeIndex(buf, id)
+	return idx, nil, err
 }
 
 func TestOrdinaryIndexStreamCompleteLoad(t *testing.T) {
- repo, _, _ := TestRepositoryWithVersion(t, restic.StableRepoVersion)
- blobID := restic.Hash([]byte("test blob"))
- packID := restic.Hash([]byte("test pack"))
- source := index.NewMasterIndex()
- blobs := make(pack.Blobs, 50000)
- for i := range blobs {
-  bid := restic.Hash([]byte(fmt.Sprint(i)))
-  if i == 0 { bid = blobID }
-  blobs[i] = pack.Blob{BlobHandle: restic.BlobHandle{ID: bid, Type: restic.DataBlob}, Offset: uint(i*33), Length:33}
- }
- if err := source.StorePack(context.Background(), packID, blobs, &internalRepository{repo}); err != nil { t.Fatal(err) }
- if err := source.Flush(context.Background(), &internalRepository{repo}); err != nil { t.Fatal(err) }
- for _, callback := range []bool{false, true} {
-  repo.DiscardIndex()
-  calls := 0
-  var cb func(restic.ID, *index.Index, error) error
-  if callback { cb = func(_ restic.ID, idx *index.Index, err error) error { calls++; if err != nil || idx == nil { t.Fatalf("idx=%v err=%v", idx, err) }; return nil } }
-  loader := &ordinaryStreamObserved{ordinaryIndexStreamRepository: &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}}
-  if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil { t.Fatal(err) }
-  if loader.streamed.Load() != 1 { t.Fatalf("large file missed streaming: files=%d bytes=%d stream=%d fallback=%d",loader.files.Load(),uint64(0),loader.streamed.Load(),uint64(0)) }
-  if len(repo.idx.Lookup(restic.BlobHandle{ID: blobID, Type: restic.DataBlob})) == 0 { t.Fatal("load lost blob") }
-  if callback && calls != 1 { t.Fatalf("callbacks=%d", calls) }
-  if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil { t.Fatal(err) }
-  if callback && calls != 1 { t.Fatalf("incremental callback repeated: %d", calls) }
- }
+	repo, _, _ := TestRepositoryWithVersion(t, restic.StableRepoVersion)
+	blobID := restic.Hash([]byte("test blob"))
+	packID := restic.Hash([]byte("test pack"))
+	source := index.NewMasterIndex()
+	blobs := make(pack.Blobs, 50000)
+	for i := range blobs {
+		bid := restic.Hash([]byte(fmt.Sprint(i)))
+		if i == 0 {
+			bid = blobID
+		}
+		blobs[i] = pack.Blob{BlobHandle: restic.BlobHandle{ID: bid, Type: restic.DataBlob}, Offset: uint(i * 33), Length: 33}
+	}
+	if err := source.StorePack(context.Background(), packID, blobs, &internalRepository{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Flush(context.Background(), &internalRepository{repo}); err != nil {
+		t.Fatal(err)
+	}
+	for _, callback := range []bool{false, true} {
+		repo.DiscardIndex()
+		calls := 0
+		var cb func(restic.ID, *index.Index, error) error
+		if callback {
+			cb = func(_ restic.ID, idx *index.Index, err error) error {
+				calls++
+				if err != nil || idx == nil {
+					t.Fatalf("idx=%v err=%v", idx, err)
+				}
+				return nil
+			}
+		}
+		loader := &ordinaryStreamObserved{ordinaryIndexStreamRepository: &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}}
+		if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil {
+			t.Fatal(err)
+		}
+		if loader.streamed.Load() != 1 {
+			t.Fatalf("large file missed streaming: files=%d bytes=%d stream=%d fallback=%d", loader.files.Load(), uint64(0), loader.streamed.Load(), uint64(0))
+		}
+		if len(repo.idx.Lookup(restic.BlobHandle{ID: blobID, Type: restic.DataBlob})) == 0 {
+			t.Fatal("load lost blob")
+		}
+		if callback && calls != 1 {
+			t.Fatalf("callbacks=%d", calls)
+		}
+		if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil {
+			t.Fatal(err)
+		}
+		if callback && calls != 1 {
+			t.Fatalf("incremental callback repeated: %d", calls)
+		}
+	}
 }
 
 // Test instrumentation belongs to the caller; production retains no counters.
 type ordinaryStreamObserved struct {
- *ordinaryIndexStreamRepository
- files, streamed atomic.Uint64
+	*ordinaryIndexStreamRepository
+	files, streamed atomic.Uint64
 }
+
 func (r *ordinaryStreamObserved) LoadIndexStream(ctx context.Context, id restic.ID) (*index.Index, []byte, error) {
- r.files.Add(1)
- idx,buf,err := r.ordinaryIndexStreamRepository.LoadIndexStream(ctx,id)
- if idx != nil { r.streamed.Add(1) }
- return idx,buf,err
+	r.files.Add(1)
+	idx, buf, err := r.ordinaryIndexStreamRepository.LoadIndexStream(ctx, id)
+	if idx != nil {
+		r.streamed.Add(1)
+	}
+	return idx, buf, err
 }
 
 func TestOrdinaryIndexStreamLargeTerminalErrors(t *testing.T) {
- repo,be := TestRepositoryWithBackend(t,nil,2,Options{})
- var document strings.Builder
- fmt.Fprintf(&document, `{"packs":[{"id":"%s","blobs":[`,restic.Hash([]byte("large pack")))
- for i:=0;i<50000;i++ {
-  if i>0 { document.WriteByte(',') }
-  fmt.Fprintf(&document,`{"id":"%s","type":"data","offset":%d,"length":33}`,restic.Hash([]byte(fmt.Sprint(i))),i*33)
- }
- document.WriteString(`]}]}`)
- plain:=[]byte(document.String())
- enc,err:=zstd.NewWriter(nil,zstd.WithEncoderConcurrency(1),zstd.WithEncoderCRC(true))
- if err!=nil { t.Fatal(err) }; defer enc.Close()
- valid:=append([]byte{2},enc.EncodeAll(plain,nil)...)
- if len(valid)<1024*1024 { t.Fatalf("large case too small: %d",len(valid)) }
- corrupt:=bytes.Clone(valid); corrupt[len(corrupt)-1]^=255
- trailing:=append([]byte{2},enc.EncodeAll(append(bytes.Clone(plain),[]byte("true")...),nil)...)
- split:=append([]byte{2},enc.EncodeAll(plain[:100],nil)...)
- split=append(split,enc.EncodeAll(plain[100:],nil)...)
- // An early malformed canonical field must not hide a later CRC failure.
- malformed := bytes.Clone(plain)
- malformed[2] = 'X'
- malformedCRC := append([]byte{2}, enc.EncodeAll(malformed,nil)...)
- malformedCRC[len(malformedCRC)-1] ^= 255
- if len(malformedCRC) < 1024*1024 { t.Fatal("malformed case missed streaming admission") }
- for n,payload:=range [][]byte{valid,corrupt,valid[:len(valid)-1],trailing,split,malformedCRC} {
-  t.Run(fmt.Sprint(n),func(t *testing.T){
-   nonce:=crypto.NewRandomNonce()
-   ciphertext:=repo.key.Seal(nonce,nonce,payload,nil)
-   id:=restic.Hash(ciphertext)
-   h:=backend.Handle{Type:backend.IndexFile,Name:id.String()}
-   if err:=be.Save(context.Background(),h,backend.NewByteReader(ciphertext,be.Hasher()));err!=nil { t.Fatal(err) }
-   loader:=&ordinaryIndexStreamRepository{internalRepository:&internalRepository{repo}}
-   if n==0 || n==4 {
-    idx,_,err:=loader.LoadIndexStream(context.Background(),id)
-    if err!=nil || idx==nil { t.Fatalf("large canonical stream missed: idx=%v err=%v",idx,err) }
-   }
-   got:=ordinaryStreamLoadResult(func()(*index.Index,error,error){return ordinaryStreamDecode(repo,context.Background(),id)})
-   want:=ordinaryStreamLoadResult(func()(*index.Index,error,error){
-    buf,err:=repo.LoadUnpacked(context.Background(),restic.IndexFile,id)
-    if err!=nil { return nil,err,nil }
-    idx,err:=index.DecodeIndex(buf,id);return idx,nil,err
-   })
-   if !reflect.DeepEqual(got,want) { t.Fatalf("terminal precedence differs: got=%+v want=%+v",got,want) }
-  })
- }
+	repo, be := TestRepositoryWithBackend(t, nil, 2, Options{})
+	var document strings.Builder
+	fmt.Fprintf(&document, `{"packs":[{"id":"%s","blobs":[`, restic.Hash([]byte("large pack")))
+	for i := 0; i < 50000; i++ {
+		if i > 0 {
+			document.WriteByte(',')
+		}
+		fmt.Fprintf(&document, `{"id":"%s","type":"data","offset":%d,"length":33}`, restic.Hash([]byte(fmt.Sprint(i))), i*33)
+	}
+	document.WriteString(`]}]}`)
+	plain := []byte(document.String())
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderCRC(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer enc.Close()
+	valid := append([]byte{2}, enc.EncodeAll(plain, nil)...)
+	if len(valid) < 1024*1024 {
+		t.Fatalf("large case too small: %d", len(valid))
+	}
+	corrupt := bytes.Clone(valid)
+	corrupt[len(corrupt)-1] ^= 255
+	trailing := append([]byte{2}, enc.EncodeAll(append(bytes.Clone(plain), []byte("true")...), nil)...)
+	split := append([]byte{2}, enc.EncodeAll(plain[:100], nil)...)
+	split = append(split, enc.EncodeAll(plain[100:], nil)...)
+	// An early malformed canonical field must not hide a later CRC failure.
+	malformed := bytes.Clone(plain)
+	malformed[2] = 'X'
+	malformedCRC := append([]byte{2}, enc.EncodeAll(malformed, nil)...)
+	malformedCRC[len(malformedCRC)-1] ^= 255
+	if len(malformedCRC) < 1024*1024 {
+		t.Fatal("malformed case missed streaming admission")
+	}
+	for n, payload := range [][]byte{valid, corrupt, valid[:len(valid)-1], trailing, split, malformedCRC} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			nonce := crypto.NewRandomNonce()
+			ciphertext := repo.key.Seal(nonce, nonce, payload, nil)
+			id := restic.Hash(ciphertext)
+			h := backend.Handle{Type: backend.IndexFile, Name: id.String()}
+			if err := be.Save(context.Background(), h, backend.NewByteReader(ciphertext, be.Hasher())); err != nil {
+				t.Fatal(err)
+			}
+			loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}
+			if n == 0 || n == 4 {
+				idx, _, err := loader.LoadIndexStream(context.Background(), id)
+				if err != nil || idx == nil {
+					t.Fatalf("large canonical stream missed: idx=%v err=%v", idx, err)
+				}
+			}
+			got := ordinaryStreamLoadResult(func() (*index.Index, error, error) { return ordinaryStreamDecode(repo, context.Background(), id) })
+			want := ordinaryStreamLoadResult(func() (*index.Index, error, error) {
+				buf, err := repo.LoadUnpacked(context.Background(), restic.IndexFile, id)
+				if err != nil {
+					return nil, err, nil
+				}
+				idx, err := index.DecodeIndex(buf, id)
+				return idx, nil, err
+			})
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("terminal precedence differs: got=%+v want=%+v", got, want)
+			}
+		})
+	}
 }

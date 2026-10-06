@@ -24,7 +24,7 @@ func decodeIndexWithoutReservation(buf []byte, id restic.ID) (*Index, error) {
 		for _, blob := range p.Blobs {
 			idx.store(packID, pack.Blob{
 				BlobHandle: restic.BlobHandle{Type: blob.Type, ID: blob.ID},
-				Offset: blob.Offset, Length: blob.Length,
+				Offset:     blob.Offset, Length: blob.Length,
 				UncompressedLength: blob.UncompressedLength,
 			})
 		}

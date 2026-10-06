@@ -35,9 +35,9 @@ type packerManager struct {
 	key     *crypto.Key
 	queueFn func(ctx context.Context, t restic.BlobType, p *packer) error
 
-	pm       sync.Mutex
-	packers  []*packer
-	packSize uint
+	pm          sync.Mutex
+	packers     []*packer
+	packSize    uint
 	hashOnWrite bool
 }
 

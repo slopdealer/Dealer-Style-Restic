@@ -127,14 +127,14 @@ type saveFileJob struct {
 }
 
 type fileChunkState struct {
-	readBuf []byte
-	bpos    uint
-	bmax    uint
-	closed  bool
-	guided  *parentCutReader
-	ctx     context.Context
-	chunkID restic.ID
-	hashed  bool
+	readBuf        []byte
+	bpos           uint
+	bmax           uint
+	closed         bool
+	guided         *parentCutReader
+	ctx            context.Context
+	chunkID        restic.ID
+	hashed         bool
 	ordinaryHashes *parentPairHashLane
 }
 

@@ -9,7 +9,7 @@ import (
 	"github.com/restic/restic/internal/restic"
 )
 
-type finderPayloadLoader struct { payload []byte }
+type finderPayloadLoader struct{ payload []byte }
 
 func (l *finderPayloadLoader) LoadBlob(_ context.Context, _ restic.BlobHandle, _ []byte) ([]byte, error) {
 	return l.payload, nil

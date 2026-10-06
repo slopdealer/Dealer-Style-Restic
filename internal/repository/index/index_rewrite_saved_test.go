@@ -25,5 +25,7 @@ func TestRewriteSavedConcurrentSettlement(t *testing.T) {
 	remove := restic.ID{1, 2}
 	obsolete.Insert(remove)
 	saved.preserveOutputs(obsolete)
-	if len(obsolete) != 1 || !obsolete.Has(remove) { t.Fatal("successful outputs removed, or obsolete input retained") }
+	if len(obsolete) != 1 || !obsolete.Has(remove) {
+		t.Fatal("successful outputs removed, or obsolete input retained")
+	}
 }

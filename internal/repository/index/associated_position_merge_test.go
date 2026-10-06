@@ -182,7 +182,7 @@ type mergeTestRepo struct {
 	restic.Unpacked[restic.FileType]
 	files  map[restic.ID][]byte
 	loaded map[restic.ID]int
-	saved restic.IDSet
+	saved  restic.IDSet
 	m      sync.Mutex
 }
 
@@ -212,7 +212,9 @@ func (r *mergeTestRepo) SaveUnpacked(_ context.Context, _ restic.FileType, buf [
 	defer r.m.Unlock()
 	id := restic.Hash(buf)
 	r.files[id] = append([]byte(nil), buf...)
-	if r.saved != nil { r.saved.Insert(id) }
+	if r.saved != nil {
+		r.saved.Insert(id)
+	}
 	return id, nil
 }
 func (r *mergeTestRepo) RemoveUnpacked(_ context.Context, _ restic.FileType, id restic.ID) error {
@@ -309,7 +311,9 @@ func TestRewriteKeepsUnread(t *testing.T) {
 			if _, ok := repo.files[id]; ok {
 				// A newly written output may hash to an old ID. Output grouping
 				// is unordered, so compare only inputs kept without rewriting.
-				if !repo.saved.Has(id) { survivors++ }
+				if !repo.saved.Has(id) {
+					survivors++
+				}
 			}
 		}
 		// packs and blob counts after the rewrite

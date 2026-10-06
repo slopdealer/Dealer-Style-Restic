@@ -42,10 +42,10 @@ type Progress struct {
 	scanStarted, scanFinished bool
 	archiveStarted            bool
 
-	currentFiles     map[string]struct{}
-	processed        Counter
-	total            Counter
-	errors           uint
+	currentFiles map[string]struct{}
+	processed    Counter
+	total        Counter
+	errors       uint
 
 	printer ProgressPrinter
 }

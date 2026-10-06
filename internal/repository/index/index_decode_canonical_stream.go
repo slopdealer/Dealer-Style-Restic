@@ -1,83 +1,105 @@
 package index
 
 import (
- "bufio"
- "bytes"
- "io"
- "math"
+	"bufio"
+	"bytes"
+	"io"
+	"math"
 
- "github.com/restic/restic/internal/repository/pack"
- "github.com/restic/restic/internal/restic"
+	"github.com/restic/restic/internal/repository/pack"
+	"github.com/restic/restic/internal/restic"
 )
 
 // DecodeCanonicalIndexStream validates canonical tokens while filling a
 // private index. It removes the second scan/decompression at the price of table
 // growth. Publication still waits for terminal stream validation.
 func DecodeCanonicalIndexStream(open func() (io.ReadCloser, error), id restic.ID) (*Index, bool) {
- return decodeCanonicalIndexStreamLimited(open,id,16*1024*1024*1024)
+	return decodeCanonicalIndexStreamLimited(open, id, 16*1024*1024*1024)
 }
 
-func decodeCanonicalIndexStreamLimited(open func() (io.ReadCloser,error), id restic.ID, maxBytes int64) (*Index,bool) {
- rd, err := open()
- if err != nil { return nil, false }
- defer rd.Close()
- limited := &io.LimitedReader{R: rd, N: maxBytes+1}
- p := canonicalStreamParser{rd: bufio.NewReaderSize(limited, 64*1024)}
- idx := NewIndex()
- if !p.document(idx) || limited.N == 0 { return nil, false }
- idx.ids = append(idx.ids, id)
- idx.final = true
- return idx, true
+func decodeCanonicalIndexStreamLimited(open func() (io.ReadCloser, error), id restic.ID, maxBytes int64) (*Index, bool) {
+	rd, err := open()
+	if err != nil {
+		return nil, false
+	}
+	defer rd.Close()
+	limited := &io.LimitedReader{R: rd, N: maxBytes + 1}
+	p := canonicalStreamParser{rd: bufio.NewReaderSize(limited, 64*1024)}
+	idx := NewIndex()
+	if !p.document(idx) || limited.N == 0 {
+		return nil, false
+	}
+	idx.ids = append(idx.ids, id)
+	idx.final = true
+	return idx, true
 }
 
 type canonicalStreamParser struct {
- rd *bufio.Reader
- buf []byte
- pos int
- packs int
- counts [restic.NumBlobTypes]int
+	rd     *bufio.Reader
+	buf    []byte
+	pos    int
+	packs  int
+	counts [restic.NumBlobTypes]int
 }
 
 // Tokens are at most 66 bytes. Retain one borrowed window and refill only at a
 // token boundary; this avoids a reader method for every digit and punctuation.
 func (p *canonicalStreamParser) available(n int) bool {
- if len(p.buf)-p.pos >= n { return true }
- _, _ = p.rd.Discard(p.pos)
- p.pos = 0
- p.buf, _ = p.rd.Peek(64*1024)
- return len(p.buf) >= n
+	if len(p.buf)-p.pos >= n {
+		return true
+	}
+	_, _ = p.rd.Discard(p.pos)
+	p.pos = 0
+	p.buf, _ = p.rd.Peek(64 * 1024)
+	return len(p.buf) >= n
 }
 
 func (p *canonicalStreamParser) take(s string) bool {
- if !p.available(len(s)) || !bytes.HasPrefix(p.buf[p.pos:], []byte(s)) { return false }
- p.pos += len(s)
- return true
+	if !p.available(len(s)) || !bytes.HasPrefix(p.buf[p.pos:], []byte(s)) {
+		return false
+	}
+	p.pos += len(s)
+	return true
 }
 
 func (p *canonicalStreamParser) id(dst *restic.ID) bool {
- if !p.take(`"`) || !p.available(65) { return false }
- b := p.buf[p.pos:p.pos+65]
- if b[64] != '"' || !canonicalHexID(b[:64], dst) { return false }
- p.pos += 65
- return true
+	if !p.take(`"`) || !p.available(65) {
+		return false
+	}
+	b := p.buf[p.pos : p.pos+65]
+	if b[64] != '"' || !canonicalHexID(b[:64], dst) {
+		return false
+	}
+	p.pos += 65
+	return true
 }
 
 func (p *canonicalStreamParser) number() (uint, bool) {
- var n uint64
- count := 0
- first := byte(0)
- for {
-  if !p.available(1) { return 0, false }
-  ch := p.buf[p.pos]
-  if ch < '0' || ch > '9' { break }
-  if count == 0 { first = ch }
-  count++
-  if count > 10 || count > 1 && first == '0' { return 0, false }
-  n = n*10 + uint64(ch-'0')
-  if n > math.MaxUint32 { return 0, false }
-  p.pos++
- }
- return uint(n), count > 0
+	var n uint64
+	count := 0
+	first := byte(0)
+	for {
+		if !p.available(1) {
+			return 0, false
+		}
+		ch := p.buf[p.pos]
+		if ch < '0' || ch > '9' {
+			break
+		}
+		if count == 0 {
+			first = ch
+		}
+		count++
+		if count > 10 || count > 1 && first == '0' {
+			return 0, false
+		}
+		n = n*10 + uint64(ch-'0')
+		if n > math.MaxUint32 {
+			return 0, false
+		}
+		p.pos++
+	}
+	return uint(n), count > 0
 }
 
 func (p *canonicalStreamParser) blob(idx *Index, packIndex uint32) bool {
@@ -181,9 +203,9 @@ func (p *canonicalStreamParser) document(idx *Index) bool {
 		return false
 	}
 	_, _ = p.rd.Discard(p.pos)
- p.pos = 0
- p.buf = nil
- var tail [8192]byte
- _, err := io.CopyBuffer(indexJSONWhitespaceWriter{}, p.rd, tail[:])
- return err == nil
+	p.pos = 0
+	p.buf = nil
+	var tail [8192]byte
+	_, err := io.CopyBuffer(indexJSONWhitespaceWriter{}, p.rd, tail[:])
+	return err == nil
 }
