@@ -16,7 +16,6 @@ import (
 	"github.com/restic/restic/internal/backend/cache"
 	"github.com/restic/restic/internal/checker"
 	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/global"
 	"github.com/restic/restic/internal/repository"
@@ -326,7 +325,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	var structure *checkStructureOverlap
 	// Keep terminal timing/signal progress on the sequential path. Detached
 	// progress is published only at the original Structure heading below.
-	if !gopts.NoLock && !debug.IsEnabled() &&
+	if !gopts.NoLock &&
 		(gopts.JSON || gopts.Verbosity == 0 || (!term.OutputIsTerminal() && !term.CanUpdateStatus())) {
 		structure = startCheckStructureOverlap(ctx, chkr.Structure)
 		defer structure.discard()

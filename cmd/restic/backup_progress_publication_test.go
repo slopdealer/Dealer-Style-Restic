@@ -26,8 +26,8 @@ func (t *b16ProgressTerminal) Error(line string) { t.errors <- line }
 func TestBackupProgressPublicationSemantics(t *testing.T) {
 	term := &b16ProgressTerminal{
 		MockTerminal: &ui.MockTerminal{},
-		output: make(chan string, 64),
-		errors: make(chan string, 8),
+		output:       make(chan string, 64),
+		errors:       make(chan string, 8),
 	}
 	printer := backup.NewJSONProgress(term, 3)
 	p := backup.NewProgress(printer, false, true, false)

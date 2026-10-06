@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 
-	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/global"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
@@ -14,12 +13,6 @@ func internalOpenWithLocked(ctx context.Context, gopts global.Options, dryRun bo
 }
 
 func internalOpenWithLockedWaitWork(ctx context.Context, gopts global.Options, dryRun bool, exclusive bool, printer restic.Printer, startWaitWork func(context.Context, *repository.Repository) func(bool)) (context.Context, *repository.Repository, func(), error) {
-	// Index loading and checker validation may emit debug logs. Preserve their
-	// normal output order by keeping the synchronous path when debug is enabled.
-	if startWaitWork != nil && debug.IsEnabled() {
-		startWaitWork = nil
-	}
-
 	repo, err := global.OpenRepository(ctx, gopts, printer)
 	if err != nil {
 		return nil, nil, nil, err

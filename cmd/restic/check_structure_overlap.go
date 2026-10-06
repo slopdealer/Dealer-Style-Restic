@@ -10,9 +10,9 @@ import (
 // are consumed before the command reaches its ordinary Structure heading.
 // Backpressure bounds queued diagnostics, not StreamTrees' live memory.
 type checkStructureOverlap struct {
-	cancel context.CancelFunc
-	errors chan error
-	done chan struct{}
+	cancel   context.CancelFunc
+	errors   chan error
+	done     chan struct{}
 	progress delayedTerminalCounter
 }
 
