@@ -756,6 +756,16 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			return err
 		},
 
+		leaveDir: func(_ *data.Node, target, _ string, _ []string) error {
+			// The traversal does not come back to a directory it has left, so
+			// its entry is not needed any more. Without it the directory counts
+			// as not fresh, which only means that files are verified as usual.
+			// freshDirs then holds the directories on the current path, not one
+			// path string for every directory of the snapshot.
+			delete(freshDirs, target)
+			return nil
+		},
+
 		visitNode: func(node *data.Node, target, location string) error {
 			debug.Log("first pass, visitNode: mkdir %q, leaveDir on second pass should restore metadata", location)
 			parentDir := filepath.Dir(target)
