@@ -539,29 +539,13 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	}
 
 	var indexLoad *backupIndexLoad
-	var startWaitWork func(context.Context, *repository.Repository) func(bool)
-	if !debug.IsEnabled() {
-		startWaitWork = func(lockCtx context.Context, repo *repository.Repository) func(bool) {
-			load := startBackupIndexLoadAfterSnapshots(lockCtx, repo, !opts.Stdin && !opts.Force)
-			indexLoad = load
-			return func(confirmed bool) {
-				if confirmed {
-					return
-				}
-				load.discard()
-				if indexLoad == load {
-					indexLoad = nil
-				}
-			}
-		}
-	}
-	ctx, repo, unlock, err := openWithAppendLockAndWaitWork(ctx, gopts, opts.DryRun, printer, startWaitWork)
+	ctx, repo, unlock, err := openWithAppendLockAndWaitWork(ctx, gopts, opts.DryRun, printer, backupIndexWaitWork(&indexLoad, !opts.Stdin && !opts.Force))
 	if err != nil {
 		return err
 	}
 	defer unlock()
 	defer func() {
-		if indexLoad != nil {
+		if indexLoad != nil && !indexLoad.used {
 			indexLoad.discard()
 		}
 	}()

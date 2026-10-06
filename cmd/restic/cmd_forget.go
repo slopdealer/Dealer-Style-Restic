@@ -195,10 +195,7 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 	var indexLoad *repositoryIndexLoad
 	var startWaitWork func(context.Context, *repository.Repository) func(bool)
 	if opts.Prune {
-		startWaitWork = func(ctx context.Context, repo *repository.Repository) func(bool) {
-			indexLoad = startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
-			return indexLoad.settle
-		}
+		startWaitWork = repositoryIndexWaitWork(&indexLoad, true)
 	}
 	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, opts.DryRun && gopts.NoLock, printer, startWaitWork)
 	if err != nil {

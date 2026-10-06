@@ -177,10 +177,7 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
 	var indexLoad *repositoryIndexLoad
-	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, opts.DryRun && gopts.NoLock, printer, func(ctx context.Context, repo *repository.Repository) func(bool) {
-		indexLoad = startRepositoryIndexLoad(ctx, repo)
-		return indexLoad.settle
-	})
+	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, opts.DryRun && gopts.NoLock, printer, repositoryIndexWaitWork(&indexLoad, false))
 	if err != nil {
 		return err
 	}

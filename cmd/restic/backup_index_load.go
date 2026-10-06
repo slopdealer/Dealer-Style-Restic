@@ -9,69 +9,36 @@ import (
 )
 
 // backupIndexLoad prepares the backup index while the append lock's required
-// settle delay is running. Its result is consumed only after lock validation.
-type backupIndexLoad struct {
-	repo      *repository.Repository
-	cancel    context.CancelFunc
-	result    chan error
-	progress  *delayedTerminalCounterFactory
-	snapshots *preparedSnapshots
-	done      bool
-}
-
-func startBackupIndexLoad(ctx context.Context, repo *repository.Repository) *backupIndexLoad {
-	return startBackupIndexLoadAfterSnapshots(ctx, repo, false)
-}
+// settle delay is running. It is the repository index load of the other
+// commands: its result is used only after the lock was confirmed and the
+// prepared state was compared with the repository as it is then.
+type backupIndexLoad = repositoryIndexLoad
 
 // startBackupIndexLoadAfterSnapshots lists the snapshot files for the parent
 // snapshot search before the index files when listSnapshots is set, keeping
 // the stock listing order (snapshots, then index).
 func startBackupIndexLoadAfterSnapshots(ctx context.Context, repo *repository.Repository, listSnapshots bool) *backupIndexLoad {
-	loadCtx, cancel := context.WithCancel(ctx)
-	load := &backupIndexLoad{
-		repo:     repo,
-		cancel:   cancel,
-		result:   make(chan error, 1),
-		progress: &delayedTerminalCounterFactory{},
-	}
-	if listSnapshots {
-		load.snapshots = newPreparedSnapshots()
-	}
-	go func() {
-		load.snapshots.list(loadCtx, repo)
-		load.result <- repo.LoadIndex(loadCtx, load.progress)
-	}()
-	return load
+	return startRepositoryIndexLoadAfterSnapshots(ctx, repo, listSnapshots)
+}
+
+// backupIndexWaitWork returns the wait work of backup. The snapshot files are
+// listed only when backup will search for a parent snapshot.
+func backupIndexWaitWork(target **backupIndexLoad, listSnapshots bool) func(context.Context, *repository.Repository) func(bool) {
+	return repositoryIndexWaitWork(target, listSnapshots)
+}
+
+// wait returns the index for backup once the lock is confirmed.
+func (load *repositoryIndexLoad) wait(printer restic.TerminalCounterFactory) error {
+	return load.consume(printer)
 }
 
 // parentSearchRepo returns repo with snapshot listings served from the
-// listing prepared before the index load.
-func (load *backupIndexLoad) parentSearchRepo(repo restic.ListerLoaderUnpacked) restic.ListerLoaderUnpacked {
+// listing taken after the lock was confirmed.
+func (load *repositoryIndexLoad) parentSearchRepo(repo restic.ListerLoaderUnpacked) restic.ListerLoaderUnpacked {
 	if load == nil || load.snapshots == nil {
 		return repo
 	}
-	return snapshotListerRepo{ListerLoaderUnpacked: repo, snapshots: load.snapshots.get(repo)}
-}
-
-func (load *backupIndexLoad) wait(printer restic.TerminalCounterFactory) error {
-	load.progress.activate(printer)
-	err := <-load.result
-	load.cancel()
-	load.done = true
-	if err != nil {
-		load.repo.DiscardIndex()
-	}
-	return err
-}
-
-func (load *backupIndexLoad) discard() {
-	if load == nil || load.done {
-		return
-	}
-	load.cancel()
-	<-load.result
-	load.repo.DiscardIndex()
-	load.done = true
+	return snapshotListerRepo{ListerLoaderUnpacked: repo, snapshots: load.snapshotLister(repo)}
 }
 
 // delayedTerminalCounterFactory records progress until the lock has been

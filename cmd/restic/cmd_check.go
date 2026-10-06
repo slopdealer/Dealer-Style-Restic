@@ -244,10 +244,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		printer.P("create exclusive lock for repository\n")
 	}
 	var indexLoad *checkerIndexLoad
-	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, func(ctx context.Context, repo *repository.Repository) func(bool) {
-		indexLoad = startCheckerIndexLoad(ctx, repo, opts.CheckUnused, &opts.SnapshotFilter, args)
-		return indexLoad.settle
-	})
+	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, checkerIndexWaitWork(&indexLoad, opts.CheckUnused, &opts.SnapshotFilter, args))
 	if err != nil {
 		return summary, err
 	}
@@ -262,8 +259,8 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 
 	var chkr *checker.Checker
 	if indexLoad != nil {
-		chkr = indexLoad.checkerForSnapshots()
 		err = indexLoad.loadSnapshots()
+		chkr = indexLoad.checkerForSnapshots()
 	} else {
 		chkr = checker.New(repo, opts.CheckUnused)
 		err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)

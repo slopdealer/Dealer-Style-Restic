@@ -378,11 +378,15 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 	var indexLoad *repositoryIndexLoad
 	var snapshotLoad *snapshotMetadataLoad
 	ctx, repo, unlock, err := openWithReadLockAndWaitWork(ctx, gopts, gopts.NoLock, termPrinter, func(ctx context.Context, repo *repository.Repository) func(bool) {
-		indexLoad = startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
-		snapshotLoad = startSnapshotMetadataLoad(ctx, repo, indexLoad, args[0])
+		load := startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
+		prepared := startSnapshotMetadataLoad(ctx, repo, load, args[0])
+		indexLoad, snapshotLoad = load, prepared
 		return func(confirmed bool) {
-			indexLoad.settle(confirmed)
-			snapshotLoad.settle(confirmed)
+			load.settle(confirmed)
+			prepared.settle(confirmed)
+			if !confirmed {
+				indexLoad, snapshotLoad = nil, nil
+			}
 		}
 	})
 	if err != nil {
@@ -438,7 +442,12 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 		}
 	}
 
-	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, snapshotLoad.get(repo), args[0])
+	var snapshotLoader restic.LoaderUnpacked = repo
+	if !indexLoad.rereadAfterConfirmation() {
+		// otherwise everything read during the lock wait was discarded
+		snapshotLoader = snapshotLoad.get(repo)
+	}
+	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, snapshotLoader, args[0])
 	if err != nil {
 		return err
 	}

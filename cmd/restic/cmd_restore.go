@@ -11,7 +11,6 @@ import (
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/filter"
 	"github.com/restic/restic/internal/global"
-	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/restorer"
 	"github.com/restic/restic/internal/ui"
@@ -148,10 +147,7 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 	debug.Log("restore %v to %v", snapshotIDString, opts.Target)
 
 	var indexLoad *repositoryIndexLoad
-	ctx, repo, unlock, err := openWithReadLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, func(ctx context.Context, repo *repository.Repository) func(bool) {
-		indexLoad = startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
-		return indexLoad.settle
-	})
+	ctx, repo, unlock, err := openWithReadLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, repositoryIndexWaitWork(&indexLoad, true))
 	if err != nil {
 		return err
 	}
