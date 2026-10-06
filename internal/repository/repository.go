@@ -31,27 +31,11 @@ const MinPackSize = 4 * 1024 * 1024
 const DefaultPackSize = 16 * 1024 * 1024
 const MaxPackSize = 128 * 1024 * 1024
 
-// CompressionAuto samples large data blobs before encoding the whole blob.
-// The windows are spread across the input so that one local region doesn't
-// decide whether the complete blob is compressed.
-const (
-	autoCompressionMinSampledSize = 512 * 1024
-	autoCompressionSampleWindow   = 2 * 1024
-	autoCompressionSampleWindows  = 16
-	autoCompressionSampleSize     = autoCompressionSampleWindow * autoCompressionSampleWindows
-)
-
-type compressionSample struct {
-	input   []byte
-	encoded []byte
-}
-
-var compressionSamplePool = sync.Pool{New: func() any {
-	return &compressionSample{
-		input:   make([]byte, autoCompressionSampleSize),
-		encoded: make([]byte, 0, autoCompressionSampleSize+1024),
-	}
-}}
+// Under CompressionAuto a data blob of at least this size is stored
+// uncompressed when the encoder's output for the whole blob is not smaller.
+// The decision is taken from that output and from nothing else: every blob is
+// encoded, so what is stored is never larger than the compressed form.
+const autoCompressionMinRawSize = 512 * 1024
 
 // Repository is used to access a repository in a backend.
 type Repository struct {
@@ -427,23 +411,17 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 		// cannot be compressed. This special case is only relevant for tests, normal operation does not
 		// generate zero-sized blobs.
 		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != restic.DataBlob) {
-			useCompression := true
-			sampledAutoData := t == restic.DataBlob && r.opts.Compression == CompressionAuto && len(data) >= autoCompressionMinSampledSize
-			if sampledAutoData {
-				useCompression = r.autoDataBlobLooksCompressible(data)
-			}
+			autoRawData := t == restic.DataBlob && r.opts.Compression == CompressionAuto && len(data) >= autoCompressionMinRawSize
 
-			if useCompression {
-				compressed := r.getZstdEncoder().EncodeAll(data, nil)
-				if sampledAutoData && len(compressed)+4 >= len(data) {
-					// A compressed pack entry carries a four-byte uncompressed
-					// length. Keep the original bytes when that header and payload
-					// would not save space.
-					uncompressedLength = 0
-				} else {
-					uncompressedLength = len(data)
-					data = compressed
-				}
+			compressed := r.getZstdEncoder().EncodeAll(data, nil)
+			if autoRawData && len(compressed)+4 >= len(data) {
+				// A compressed pack entry carries a four-byte uncompressed
+				// length. Keep the original bytes when that header and payload
+				// would not save space.
+				uncompressedLength = 0
+			} else {
+				uncompressedLength = len(data)
+				data = compressed
 			}
 		}
 	}
@@ -474,32 +452,6 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 	}
 
 	return pm.SaveBlob(ctx, t, id, ciphertext, uncompressedLength)
-}
-
-// autoDataBlobLooksCompressible estimates whether CompressionAuto should pay
-// to encode a large data blob. False positives only cost the full encoding;
-// false negatives store the original bytes, which remain readable by stock.
-func (r *Repository) autoDataBlobLooksCompressible(data []byte) bool {
-	sample := compressionSamplePool.Get().(*compressionSample)
-	defer func() {
-		clear(sample.input)
-		clear(sample.encoded[:cap(sample.encoded)])
-		sample.encoded = sample.encoded[:0]
-		if cap(sample.encoded) <= autoCompressionSampleSize+1024 {
-			compressionSamplePool.Put(sample)
-		}
-	}()
-
-	lastStart := len(data) - autoCompressionSampleWindow
-	for i := 0; i < autoCompressionSampleWindows; i++ {
-		start := i * lastStart / (autoCompressionSampleWindows - 1)
-		copy(sample.input[i*autoCompressionSampleWindow:(i+1)*autoCompressionSampleWindow], data[start:start+autoCompressionSampleWindow])
-	}
-
-	encoded := r.getZstdEncoder().EncodeAll(sample.input, sample.encoded[:0])
-	sample.encoded = encoded
-	// Require at least a one-percent sample reduction to justify the full pass.
-	return len(encoded)*100 < len(sample.input)*99
 }
 
 func (r *Repository) verifyCiphertext(buf []byte, uncompressedLength int, id restic.ID) error {
