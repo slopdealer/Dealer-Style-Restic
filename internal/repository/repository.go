@@ -31,12 +31,6 @@ const MinPackSize = 4 * 1024 * 1024
 const DefaultPackSize = 16 * 1024 * 1024
 const MaxPackSize = 128 * 1024 * 1024
 
-// Under CompressionAuto a data blob of at least this size is stored
-// uncompressed when the encoder's output for the whole blob is not smaller.
-// The decision is taken from that output and from nothing else: every blob is
-// encoded, so what is stored is never larger than the compressed form.
-const autoCompressionMinRawSize = 512 * 1024
-
 // Repository is used to access a repository in a backend.
 type Repository struct {
 	be    backend.Backend
@@ -411,18 +405,12 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 		// cannot be compressed. This special case is only relevant for tests, normal operation does not
 		// generate zero-sized blobs.
 		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != restic.DataBlob) {
-			autoRawData := t == restic.DataBlob && r.opts.Compression == CompressionAuto && len(data) >= autoCompressionMinRawSize
-
-			compressed := r.encodeBlob(data)
-			if autoRawData && len(compressed)+4 >= len(data) {
-				// A compressed pack entry carries a four-byte uncompressed
-				// length. Keep the original bytes when that header and payload
-				// would not save space.
-				uncompressedLength = 0
-			} else {
-				uncompressedLength = len(data)
-				data = compressed
-			}
+			// As in stock, what is stored is the encoder's output, whatever
+			// its size: a blob that does not compress is stored compressed
+			// too. `prune --repack-uncompressed` and the compression
+			// statistics count an uncompressed blob as work left to do.
+			uncompressedLength = len(data)
+			data = r.encodeBlob(data)
 		}
 	}
 
