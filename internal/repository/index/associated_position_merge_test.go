@@ -2,7 +2,9 @@ package index
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -182,8 +184,28 @@ type mergeTestRepo struct {
 	restic.Unpacked[restic.FileType]
 	files  map[restic.ID][]byte
 	loaded map[restic.ID]int
+	raw    map[restic.ID]int
 	saved  restic.IDSet
 	m      sync.Mutex
+}
+
+// LoadRaw returns a file as stored; like the repository's it fails when the
+// content does not hash to the name.
+func (r *mergeTestRepo) LoadRaw(_ context.Context, _ restic.FileType, id restic.ID) ([]byte, error) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	if r.raw == nil {
+		r.raw = map[restic.ID]int{}
+	}
+	r.raw[id]++
+	buf, ok := r.files[id]
+	if !ok {
+		return nil, fmt.Errorf("file %v does not exist", id.Str())
+	}
+	if restic.Hash(buf) != id {
+		return buf, restic.ErrInvalidData
+	}
+	return buf, nil
 }
 
 func (r *mergeTestRepo) Connections() uint { return 2 }
@@ -283,6 +305,7 @@ func TestRewriteKeepsUnread(t *testing.T) {
 		return repo, shared, excluded
 	}
 
+	rawReads := 0
 	run := func(skip bool) (map[restic.ID]int, map[restic.ID]int, int) {
 		repo, _, excluded := build()
 		before := len(repo.files)
@@ -305,6 +328,13 @@ func TestRewriteKeepsUnread(t *testing.T) {
 		reread := map[restic.ID]int{}
 		for id, n := range repo.loaded {
 			reread[id] = n
+		}
+		rawReads = 0
+		for id, n := range repo.raw {
+			if reread[id] != 0 || n != 1 {
+				t.Fatalf("index file %v: read raw %d times and decoded %d times", id.Str(), n, reread[id])
+			}
+			rawReads++
 		}
 		survivors := 0
 		for id := range kept {
@@ -337,9 +367,13 @@ func TestRewriteKeepsUnread(t *testing.T) {
 	if len(allLoaded) != 6 {
 		t.Fatalf("reference rewrite loaded %d files", len(allLoaded))
 	}
-	// files 0 and 1 are full with packs of their own: not read again
+	// files 0 and 1 are full with packs of their own: not decoded again, but
+	// read once as they are stored and compared with their names
 	if len(loaded) != 4 {
 		t.Fatalf("rewrite read %d index files again, want 4", len(loaded))
+	}
+	if rawReads != 2 {
+		t.Fatalf("rewrite compared %d kept index files with their names, want 2", rawReads)
 	}
 	if survivors != wantSurvivors {
 		t.Fatalf("kept %d old index files, reference kept %d", survivors, wantSurvivors)
@@ -350,6 +384,51 @@ func TestRewriteKeepsUnread(t *testing.T) {
 	for id, n := range wantPacks {
 		if gotPacks[id] != n {
 			t.Fatalf("pack %v: %d blobs, reference %d", id.Str(), gotPacks[id], n)
+		}
+	}
+}
+
+// TestRewriteFailsOnChangedKeptFile: a kept index file whose stored content no
+// longer hashes to its name, or which is gone, fails the rewrite with the
+// error of upstream's reload, and no index file is removed.
+func TestRewriteFailsOnChangedKeptFile(t *testing.T) {
+	origFull := Full
+	defer func() { Full = origFull }()
+	Full = func(idx *Index) bool { return true }
+
+	for _, gone := range []bool{false, true} {
+		repo := &mergeTestRepo{files: map[restic.ID][]byte{}, loaded: map[restic.ID]int{}}
+		var ids restic.IDs
+		for f := 0; f < 3; f++ {
+			idx := NewIndex()
+			blob := restic.BlobHandle{ID: restic.Hash([]byte{byte(f)}), Type: restic.DataBlob}
+			idx.StorePack(restic.Hash([]byte{byte(f), 1}), pack.Blobs{{BlobHandle: blob, Length: 60}})
+			idx.Finalize()
+			id, err := idx.SaveIndex(context.TODO(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		mi := NewMasterIndex()
+		if err := mi.Load(context.TODO(), repo, restic.NoopCounter, nil); err != nil {
+			t.Fatal(err)
+		}
+		if gone {
+			delete(repo.files, ids[1])
+		} else {
+			repo.files[ids[1]] = append([]byte("x"), repo.files[ids[1]]...)
+		}
+		files := len(repo.files)
+		err := mi.Rewrite(context.TODO(), repo, nil, nil, nil, MasterIndexRewriteOpts{})
+		if err == nil || !strings.Contains(err.Error(), "LoadUnpacked("+ids[1].Str()+"): ") {
+			t.Fatalf("gone=%v: rewrite returned %v, want the error of the reload of %v", gone, err, ids[1].Str())
+		}
+		if !gone && !strings.Contains(err.Error(), restic.ErrInvalidData.Error()) {
+			t.Fatalf("rewrite returned %v, want invalid data", err)
+		}
+		if len(repo.files) != files {
+			t.Fatalf("gone=%v: %d index files after the failed rewrite, %d before", gone, len(repo.files), files)
 		}
 	}
 }

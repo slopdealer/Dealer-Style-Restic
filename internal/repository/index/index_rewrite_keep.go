@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"slices"
 	"time"
 
@@ -97,4 +98,21 @@ func (mi *MasterIndex) rewriteKeepsUnread(indexes restic.IDSet, excludePacks res
 		}
 	}
 	return kept
+}
+
+// rawIndexFileLoader reads a file as it is stored and returns an error when
+// its content does not hash to its name, as the repository's LoadRaw does.
+type rawIndexFileLoader interface {
+	LoadRaw(ctx context.Context, t restic.FileType, id restic.ID) ([]byte, error)
+}
+
+// verifyKeptIndexFile reads an index file which Rewrite keeps without decoding
+// it again and checks that it is still the file that was loaded: its content
+// must hash to its name. This is the check with which upstream's reload of
+// the file begins; content that passes it is the content this process has
+// decoded before. A file that cannot be read, or that has changed, fails the
+// rewrite with the error of upstream's reload.
+func verifyKeptIndexFile(ctx context.Context, repo rawIndexFileLoader, id restic.ID) error {
+	_, err := repo.LoadRaw(ctx, restic.IndexFile, id)
+	return err
 }

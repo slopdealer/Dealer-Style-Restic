@@ -426,6 +426,11 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	// index files that stay as they are need not be read again; this is
 	// decided from the notes of the loaded files, which clear releases
 	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
+	// ... but each of them is read raw and compared with its name first
+	rawLoader, _ := repo.(rawIndexFileLoader)
+	if rawLoader == nil {
+		keptUnread = nil
+	}
 
 	// reset state which is not necessary for Rewrite and just consumes a lot of memory
 	// the index state would be invalid after Rewrite completes anyways
@@ -444,10 +449,6 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	wg.Go(func() error {
 		defer close(idxCh)
 		for id := range indexes {
-			if keptUnread.Has(id) {
-				p.Add(1)
-				continue
-			}
 			select {
 			case idxCh <- id:
 			case <-wgCtx.Done():
@@ -465,6 +466,13 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	loader := func() error {
 		defer rewriteWg.Done()
 		for id := range idxCh {
+			if keptUnread.Has(id) {
+				if err := verifyKeptIndexFile(wgCtx, rawLoader, id); err != nil {
+					return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), err)
+				}
+				p.Add(1)
+				continue
+			}
 			idx, loadErr, err := loadIndexFile(wgCtx, repo, id)
 			if loadErr != nil {
 				return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), loadErr)
