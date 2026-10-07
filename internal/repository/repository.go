@@ -1790,6 +1790,9 @@ type packBlobIterator struct {
 	ensureOrdinary func() error
 	decode         []byte
 	blobHash       hash.Hash
+	// see check_decode_limit.go
+	hashLimit  uint64
+	hashWriter limitedHashWriter
 }
 
 type packBlobValue struct {
@@ -1809,6 +1812,7 @@ func newPackBlobIterator(packID restic.ID, rd discardReader, currentOffset uint,
 		blobs:         blobs,
 		key:           key,
 		dec:           dec,
+		hashLimit:     checkDecodedSizeLimit,
 	}
 }
 
@@ -1882,7 +1886,7 @@ func (b *packBlobIterator) NextHash() (packBlobValue, error) {
 
 		err = b.dec.Reset(bytes.NewReader(plaintext))
 		if err == nil {
-			_, err = io.Copy(b.blobHash, b.dec)
+			err = b.hashDecoded(plaintext)
 		}
 		if err != nil {
 			err = fmt.Errorf("decompressing blob %v from pack %v failed: %w", h, b.packID.String(), err)
