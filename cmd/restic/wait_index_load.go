@@ -21,10 +21,10 @@ import (
 // Each of the two listings is taken where the command takes it in stock and
 // no earlier: the snapshot files when the command selects its snapshots, the
 // index files when it loads the index, which for restore, backup and forget
-// is after it has read the snapshots it selected. With any backend, also one
-// whose listings lag behind what was written, this build therefore knows at
-// each of these points what stock knows there; what was read during the wait
-// only saves the downloads.
+// is after it has read the snapshots it selected. So this build lists at each
+// of these points what stock lists there, also on a backend whose listings lag
+// behind what was written. What that listing proves and what it does not is
+// the contract stated at the end of this file.
 //
 //   - The command always works with the snapshot listing taken after
 //     confirmation.
@@ -355,3 +355,16 @@ func (load *repositoryIndexLoad) discard() {
 	load.reports.Drop()
 	load.repo.DiscardIndex()
 }
+
+// The contract of the index kept from the lock wait, in full (this note
+// stands at the end of the file so that no line of code moves).
+//
+// The kept index is validated by a listing, name and size, taken where stock
+// lists. It is NOT validated by reading the files again. On a backend whose
+// listing can still show a file after it was deleted (the directory cache of
+// a network mount, an eventually consistent store), an index file that a
+// concurrent prune deleted is therefore not noticed when its content was
+// read during the wait: the index in memory is kept. Stock notices such a
+// file only when it has no copy of it in its local cache, where it fails
+// loudly on reading the file; with the file in its cache, which is the
+// default, stock uses the cached content and behaves as this build does.
