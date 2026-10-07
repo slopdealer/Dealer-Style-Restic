@@ -432,11 +432,12 @@ func (c *Checker) ReadPacksWithPreparedSizes(ctx context.Context, prepared *Prep
 	})
 
 	// push packs to ch
+	extraSlot := c.repo.extraCheckWorker()
 	for pbs := range c.repo.listPacksFromIndex(ctx, packSet) {
 		size := packs[pbs.PackID]
 		debug.Log("listed %v", pbs.PackID)
 		task := checkTask{id: pbs.PackID, size: size, blobs: pbs.Blobs}
-		if smallCheckTask(task.blobs) || capacityCheckTask(task.blobs, size) {
+		if extraCheckTask(extraSlot, task.blobs, size) {
 			// Never let a busy extra worker stall pack enumeration; the
 			// configured workers can always take this task instead.
 			select {
