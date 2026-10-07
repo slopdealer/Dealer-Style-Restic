@@ -234,12 +234,13 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
 	}
 
 	hasDuplicates := false
+	packRun := prunePackRun{packs: indexPack}
 	// iterate over all blobs in index to generate packInfo
 	err = listBlobsWithSlot(ctx, idx, usedBlobs, func(blob restic.PackBlob, slot index.Slot) {
 		packID := blob.PackID()
 		h := blob.Handle()
 
-		ip := indexPack[packID]
+		ip := packRun.get(packID)
 
 		// Set blob type if not yet set
 		if ip.tpe == restic.NumBlobTypes {
@@ -280,9 +281,8 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
 		if !blob.IsCompressed() {
 			ip.uncompressed = true
 		}
-		// update indexPack
-		indexPack[packID] = ip
 	})
+	packRun.flush()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -305,7 +305,7 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
 				return
 			}
 
-			ip := indexPack[packID]
+			ip := packRun.get(packID)
 			size := uint64(blob.CiphertextLength())
 			switch {
 			case ip.usedBlobs > 0, ip.duplicateBlobs == ip.unusedBlobs, count == 0:
@@ -333,9 +333,8 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
 				}
 				usedBlobs.SetAt(bh, slot, count)
 			}
-			// update indexPack
-			indexPack[packID] = ip
 		})
+		packRun.flush()
 		if err != nil {
 			return nil, nil, err
 		}
