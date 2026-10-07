@@ -210,8 +210,16 @@ func TestLockWaitIsNeverShortened(t *testing.T) {
 					p := &schedProc{spec: &schedProcSpec{kind: kind}, run: &schedRun{spec: spec}}
 					c := &schedCommand{p: p, repo: repo}
 					work := c.waitWork()
-					unlock, lockCtx, lockErr := repository.LockRepoWithWaitWork(ctx, repo, kind.exclusive(), schedRetryLock, func(string) {}, func(string, ...any) {},
-						func(lockCtx context.Context) func(bool) { return work(lockCtx, repo) })
+					var unlock func()
+					var lockCtx context.Context
+					var lockErr error
+					if work == nil {
+						// check has no wait work and takes the plain lock call
+						unlock, lockCtx, lockErr = repository.LockRepo(ctx, repo, kind.exclusive(), schedRetryLock, func(string) {}, func(string, ...any) {})
+					} else {
+						unlock, lockCtx, lockErr = repository.LockRepoWithWaitWork(ctx, repo, kind.exclusive(), schedRetryLock, func(string) {}, func(string, ...any) {},
+							func(lockCtx context.Context) func(bool) { return work(lockCtx, repo) })
+					}
 					returnedAt := probe.now()
 					probe.mu.Lock()
 					probe.returned = true

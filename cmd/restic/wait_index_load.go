@@ -16,7 +16,14 @@ import (
 // reads nothing before the check.
 //
 // Nothing read during the wait is therefore used as it is. Once the lock is
-// confirmed, the snapshot files and then the index files are listed again:
+// confirmed, the snapshot files and then the index files are listed again.
+// Each of the two listings is taken where the command takes it in stock and
+// no earlier: the snapshot files when the command selects its snapshots, the
+// index files when it loads the index, which for restore, backup and forget
+// is after it has read the snapshots it selected. With any backend, also one
+// whose listings lag behind what was written, this build therefore knows at
+// each of these points what stock knows there; what was read during the wait
+// only saves the downloads.
 //
 //   - The command always works with the snapshot listing taken after
 //     confirmation.
@@ -49,35 +56,14 @@ const (
 
 var errLockWaitSnapshotListing = errors.New("the snapshot listing taken during the lock wait failed")
 
-// lockWaitValidation is the comparison made after the lock is confirmed.
-type lockWaitValidation struct {
-	done chan struct{}
-	// snapshots is the listing taken after confirmation. It is nil when the
-	// command prepares no snapshot listing.
-	snapshots *preparedSnapshots
-	verdict   lockWaitVerdict
-	// added: with extendLockWaitReads, the index files (ID to size) that are
-	// listed now and were not when the index was loaded
-	added map[restic.ID]int64
-}
-
-// startLockWaitValidation must only be called once the lock is confirmed.
-// join waits for the reads started during the wait and returns their error.
-func startLockWaitValidation(ctx context.Context, repo *repository.Repository, waited *preparedSnapshots, join func() error) *lockWaitValidation {
-	v := &lockWaitValidation{done: make(chan struct{})}
-	if waited != nil {
-		v.snapshots = newPreparedSnapshots()
-	}
-	go func() {
-		defer close(v.done)
-		// Snapshots are listed before the index here too.
-		v.snapshots.list(ctx, repo)
-		waitErr := join()
-		v.verdict, v.added = validateLockWaitReads(ctx, repo, waited, v.snapshots, waitErr)
-	}()
-	return v
-}
-
+// validateLockWaitReads compares what was read during the wait with the
+// repository as it is now. It lists the index files, so it must be called
+// where the command loads the index, and only once the lock is confirmed.
+// waited and confirmed are the snapshot listings of the wait and of the
+// command (nil when the command prepares none), waitErr is the error of the
+// reads of the wait. With extendLockWaitReads the second result holds the
+// index files (ID to size) that are listed now and were not when the index
+// was loaded.
 func validateLockWaitReads(ctx context.Context, repo *repository.Repository, waited, confirmed *preparedSnapshots, waitErr error) (lockWaitVerdict, map[restic.ID]int64) {
 	if waitErr != nil {
 		return rereadLockWaitReads, nil
@@ -142,18 +128,22 @@ func snapshotsRemoved(ctx context.Context, before, after restic.Lister) (bool, e
 // second lock check succeeded and the prepared state was validated against
 // the repository as it is then.
 type repositoryIndexLoad struct {
-	ctx        context.Context // the lock's context
-	loadCtx    context.Context
-	repo       *repository.Repository
-	cancel     context.CancelFunc
-	result     chan error
-	progress   *delayedTerminalCounterFactory
-	snapshots  *preparedSnapshots  // listed during the wait; only compared
-	validation *lockWaitValidation // exists once the lock is confirmed
-	err        error
-	done       bool
-	used       bool
-	reread     bool
+	ctx       context.Context // the lock's context
+	loadCtx   context.Context
+	repo      *repository.Repository
+	cancel    context.CancelFunc
+	result    chan error
+	progress  *delayedTerminalCounterFactory
+	snapshots *preparedSnapshots // listed during the wait; only compared
+	// confirmed is the listing the command took after the lock was confirmed
+	confirmed *preparedSnapshots
+	verdict   lockWaitVerdict
+	waitErr   error
+	err       error
+	joined    bool
+	done      bool
+	used      bool
+	reread    bool
 }
 
 func startRepositoryIndexLoad(ctx context.Context, repo *repository.Repository) *repositoryIndexLoad {
@@ -190,15 +180,19 @@ func startRepositoryIndexLoadAfterSnapshots(ctx context.Context, repo *repositor
 	return load
 }
 
-// snapshotLister returns the snapshot listing taken after the lock was
-// confirmed, or fallback if none was prepared or the listing failed. In the
-// latter case the command lists again and reports the error as stock does.
+// snapshotLister lists the snapshot files and returns the listing, or
+// fallback if the load prepares none or the listing failed. In the latter
+// case the command lists again and reports the error as stock does. The
+// command calls it where it lists the snapshot files in stock; it must not be
+// called before the lock is confirmed.
 func (load *repositoryIndexLoad) snapshotLister(fallback restic.Lister) restic.Lister {
 	if load == nil || load.snapshots == nil {
 		return fallback
 	}
-	load.confirm()
-	return load.validation.snapshots.get(fallback)
+	listed := newPreparedSnapshots()
+	listed.list(load.ctx, load.repo)
+	load.confirmed = listed
+	return listed.get(fallback)
 }
 
 // preparedSnapshots holds a snapshot file listing taken before the index
@@ -273,49 +267,45 @@ func (load *repositoryIndexLoad) settle(confirmed bool) {
 	}
 	if !confirmed {
 		load.discard()
-		return
 	}
-	load.confirm()
+	// A confirmed lock starts nothing here: the listings that decide about
+	// what was read are taken where the command takes them.
 }
 
-// confirm starts the comparison with the repository as it is now. It must not
-// be called before the lock is confirmed.
-func (load *repositoryIndexLoad) confirm() {
-	if load.validation != nil {
-		return
-	}
-	load.validation = startLockWaitValidation(load.loadCtx, load.repo, load.snapshots, func() error {
-		return <-load.result
-	})
-}
-
-// join waits for every goroutine of this load.
+// join waits for the reads of the wait.
 func (load *repositoryIndexLoad) join() {
-	if load.done {
+	if load.joined {
 		return
 	}
-	if load.validation != nil {
-		<-load.validation.done
-	} else {
-		<-load.result
-	}
-	load.done = true
+	load.waitErr = <-load.result
+	load.joined = true
 }
 
+// consume returns the index to the command. The command calls it where it
+// loads the index in stock: the index files are listed here.
 func (load *repositoryIndexLoad) consume(printer restic.TerminalCounterFactory) error {
 	load.used = true
 	if load.done {
 		return load.err
 	}
-	load.confirm()
 	load.join()
-	switch load.validation.verdict {
+	load.done = true
+	confirmed := load.confirmed
+	if load.snapshots != nil && confirmed == nil {
+		// The command has not listed the snapshot files. They are listed for
+		// the comparison only, before the index files as always.
+		confirmed = newPreparedSnapshots()
+		confirmed.list(load.ctx, load.repo)
+	}
+	var added map[restic.ID]int64
+	load.verdict, added = validateLockWaitReads(load.ctx, load.repo, load.snapshots, confirmed, load.waitErr)
+	switch load.verdict {
 	case keepLockWaitReads:
 		load.progress.activate(printer)
 	case extendLockWaitReads:
 		load.progress.activate(printer)
 		// only the added index files are read
-		load.err = load.repo.LoadAddedIndexFiles(load.ctx, load.validation.added)
+		load.err = load.repo.LoadAddedIndexFiles(load.ctx, added)
 	default:
 		load.reread = true
 		load.repo.DiscardIndex()
@@ -343,5 +333,6 @@ func (load *repositoryIndexLoad) discard() {
 	}
 	load.cancel()
 	load.join()
+	load.done = true
 	load.repo.DiscardIndex()
 }
