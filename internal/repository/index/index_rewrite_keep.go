@@ -19,13 +19,16 @@ import (
 type indexFileNote struct {
 	packs  restic.IDs
 	counts [restic.NumBlobTypes]uint
+	// size is the size with which the file was listed when it was loaded, or
+	// -1 for a file this process has written
+	size int64
 }
 
 // noteIndexFile remembers the packs and blob counts of the index file id.
 // idx must hold exactly the content of that file.
-func (mi *MasterIndex) noteIndexFile(id restic.ID, idx *Index) {
+func (mi *MasterIndex) noteIndexFile(id restic.ID, idx *Index, size int64) {
 	idx.m.RLock()
-	note := indexFileNote{packs: slices.Clone(idx.packs)}
+	note := indexFileNote{packs: slices.Clone(idx.packs), size: size}
 	for typ := range idx.byType {
 		note.counts[typ] = idx.byType[typ].len()
 	}
@@ -115,4 +118,23 @@ type rawIndexFileLoader interface {
 func verifyKeptIndexFile(ctx context.Context, repo rawIndexFileLoader, id restic.ID) error {
 	_, err := repo.LoadRaw(ctx, restic.IndexFile, id)
 	return err
+}
+
+// LoadedFileSizes returns the index files whose content makes up the index
+// held in memory, each with the size with which it was listed when it was
+// loaded. The size is -1 for a file that was not loaded from a listing.
+func (mi *MasterIndex) LoadedFileSizes() map[restic.ID]int64 {
+	ids := mi.IDs()
+
+	mi.idxMutex.RLock()
+	defer mi.idxMutex.RUnlock()
+	sizes := make(map[restic.ID]int64, len(ids))
+	for id := range ids {
+		if note, ok := mi.fileNotes[id]; ok {
+			sizes[id] = note.size
+		} else {
+			sizes[id] = -1
+		}
+	}
+	return sizes
 }

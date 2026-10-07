@@ -242,39 +242,22 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	if !gopts.NoLock {
 		printer.P("create exclusive lock for repository\n")
 	}
-	var indexLoad *checkerIndexLoad
-	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, checkerIndexWaitWork(&indexLoad, opts.CheckUnused, &opts.SnapshotFilter, args))
+	// check starts no reads during the lock's settle delay: what it reports
+	// must be what is stored once the lock is confirmed (wait_index_load.go).
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, gopts.NoLock, printer)
 	if err != nil {
 		return summary, err
 	}
 	defer unlock()
-	if indexLoad != nil {
-		defer func() {
-			if !indexLoad.used {
-				indexLoad.discard()
-			}
-		}()
-	}
 
-	var chkr *checker.Checker
-	if indexLoad != nil {
-		err = indexLoad.loadSnapshots()
-		chkr = indexLoad.checkerForSnapshots()
-	} else {
-		chkr = checker.New(repo, opts.CheckUnused)
-		err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
-	}
+	chkr := checker.New(repo, opts.CheckUnused)
+	err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
 	if err != nil {
 		return summary, err
 	}
 
 	printer.P("load indexes\n")
-	var hints, errs []error
-	if indexLoad != nil {
-		hints, errs = indexLoad.consume(printer)
-	} else {
-		hints, errs = chkr.LoadIndex(ctx, printer)
-	}
+	hints, errs := chkr.LoadIndex(ctx, printer)
 	if ctx.Err() != nil {
 		return summary, ctx.Err()
 	}
@@ -332,12 +315,11 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	}
 
 	printer.P("check all packs\n")
-	if indexLoad != nil {
-		packs := indexLoad.packs
-		indexLoad.packs = nil
-		if opts.ReadData || opts.ReadDataSubset != "" {
-			readPackSizes = packs.ForReadPacks()
-		}
+	if opts.ReadData || opts.ReadDataSubset != "" {
+		// the pack sizes the index implies are computed once, for this pass
+		// and for the pass that reads the packs
+		packs := chkr.PreparePackSizes(ctx)
+		readPackSizes = packs.ForReadPacks()
 		go chkr.PacksWithPreparedSizes(ctx, packs, errChan)
 	} else {
 		go chkr.Packs(ctx, errChan)

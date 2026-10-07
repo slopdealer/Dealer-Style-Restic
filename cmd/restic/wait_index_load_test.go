@@ -145,39 +145,3 @@ func TestRepositoryIndexLoadCancelsAndDrainsOnFailedLockConfirmation(t *testing.
 	default:
 	}
 }
-
-func TestCheckerIndexLoadCancelsAndDrainsOnFailedLockConfirmation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan checkerIndexLoadResult, 1)
-	workDone := make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		close(workDone)
-		result <- checkerIndexLoadResult{}
-	}()
-
-	load := &checkerIndexLoad{
-		repo:     &repository.Repository{},
-		cancel:   cancel,
-		result:   result,
-		progress: &delayedTerminalCounterFactory{},
-	}
-	load.settle(false)
-
-	if !load.done || load.used {
-		t.Fatalf("failed lock settlement state = done:%v used:%v, want done and unused", load.done, load.used)
-	}
-	if ctx.Err() != context.Canceled {
-		t.Fatalf("wait-work context error = %v, want context.Canceled", ctx.Err())
-	}
-	select {
-	case <-workDone:
-	default:
-		t.Fatal("failed lock settlement returned before checker index work drained")
-	}
-	select {
-	case <-result:
-		t.Fatal("checker index result was not discarded")
-	default:
-	}
-}

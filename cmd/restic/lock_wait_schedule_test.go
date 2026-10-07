@@ -13,8 +13,8 @@ package main
 // What is real and what is a model:
 //   - real: the lock code (repository.LockRepo / LockRepoWithWaitWork), the
 //     wait work of each command and what the command does with it after the
-//     lock call (backupIndexWaitWork, repositoryIndexWaitWork,
-//     checkerIndexWaitWork and their methods), the repository (index, packs,
+//     lock call (backupIndexWaitWork, repositoryIndexWaitWork and their
+//     methods; check has no wait work), the repository (index, packs,
 //     deduplication), prune (runPruneWithRepoAndIndexLoad) and the checker;
 //   - model: the rest of each command. backup stores a fixed list of blobs, a
 //     tree and a snapshot; restore reads every blob of the newest snapshot;
@@ -753,7 +753,6 @@ type schedCommand struct {
 
 	backupLoad *backupIndexLoad
 	indexLoad  *repositoryIndexLoad
-	checkLoad  *checkerIndexLoad
 
 	snapshots map[restic.ID]*data.Snapshot
 	chkr      *checker.Checker
@@ -769,10 +768,8 @@ func (c *schedCommand) waitWork() func(context.Context, *repository.Repository) 
 		return repositoryIndexWaitWork(&c.indexLoad, true) // cmd_restore.go, cmd_forget.go
 	case schedPrune:
 		return repositoryIndexWaitWork(&c.indexLoad, false) // cmd_prune.go
-	case schedCheck:
-		return checkerIndexWaitWork(&c.checkLoad, false, &data.SnapshotFilter{}, nil) // cmd_check.go
 	}
-	return nil // forget without --prune
+	return nil // forget without --prune; check reads nothing during the wait
 }
 
 // read is what the command reads between the lock call and its changes, in
@@ -820,22 +817,12 @@ func (c *schedCommand) read(ctx context.Context) error {
 			err = repo.LoadIndex(ctx, noProgress)
 		}
 	case schedCheck:
-		if c.checkLoad != nil {
-			err = c.checkLoad.loadSnapshots()
-			c.chkr = c.checkLoad.checkerForSnapshots()
-		} else {
-			c.chkr = checker.New(repo, false)
-			err = c.chkr.LoadSnapshots(ctx, &data.SnapshotFilter{}, nil)
-		}
+		c.chkr = checker.New(repo, false)
+		err = c.chkr.LoadSnapshots(ctx, &data.SnapshotFilter{}, nil)
 		if err != nil {
 			return fmt.Errorf("loading snapshots: %w", err)
 		}
-		var errs []error
-		if c.checkLoad != nil {
-			_, errs = c.checkLoad.consume(noProgress)
-		} else {
-			_, errs = c.chkr.LoadIndex(ctx, noProgress)
-		}
+		_, errs := c.chkr.LoadIndex(ctx, noProgress)
 		if len(errs) > 0 {
 			err = fmt.Errorf("loading the index: %v", errs)
 		}
@@ -887,13 +874,7 @@ func (c *schedCommand) change(ctx context.Context) error {
 		return nil
 	case schedCheck:
 		errChan := make(chan error)
-		if c.checkLoad != nil {
-			packs := c.checkLoad.packs
-			c.checkLoad.packs = nil
-			go c.chkr.PacksWithPreparedSizes(ctx, packs, errChan)
-		} else {
-			go c.chkr.Packs(ctx, errChan)
-		}
+		go c.chkr.Packs(ctx, errChan)
 		for err := range errChan {
 			c.checkErrs = append(c.checkErrs, err)
 		}
@@ -916,9 +897,6 @@ func (c *schedCommand) discard() {
 	}
 	if c.indexLoad != nil && !c.indexLoad.used {
 		c.indexLoad.discard()
-	}
-	if c.checkLoad != nil && !c.checkLoad.used {
-		c.checkLoad.discard()
 	}
 }
 

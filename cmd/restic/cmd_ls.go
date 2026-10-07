@@ -445,7 +445,7 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 	var snapshotLoader restic.LoaderUnpacked = repo
 	if !indexLoad.rereadAfterConfirmation() {
 		// otherwise everything read during the lock wait was discarded
-		snapshotLoader = snapshotLoad.get(repo)
+		snapshotLoader = snapshotLoad.get(ctx, repo, snapshotLister)
 	}
 	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, snapshotLoader, args[0])
 	if err != nil {

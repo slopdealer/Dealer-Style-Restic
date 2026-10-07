@@ -281,7 +281,7 @@ func TestLockWaitIsNeverShortened(t *testing.T) {
 						if sc.competitorAt != 0 && !repository.IsAlreadyLocked(lockErr) {
 							t.Errorf("lock refused with %v, want an already-locked error", lockErr)
 						}
-						if c.backupLoad != nil || c.indexLoad != nil || c.checkLoad != nil {
+						if c.backupLoad != nil || c.indexLoad != nil {
 							t.Errorf("a refused lock attempt left prepared state behind in the command")
 						}
 					}

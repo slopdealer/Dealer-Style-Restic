@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 
-	"github.com/restic/restic/internal/checker"
-	"github.com/restic/restic/internal/data"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
@@ -23,13 +21,23 @@ import (
 //   - The command always works with the snapshot listing taken after
 //     confirmation.
 //   - The index loaded during the wait is kept only if every index file it was
-//     built from is still listed. Index files are named by the hash of their
-//     content, so the same names mean the same content, and the index in memory
-//     is then exactly what a load after confirmation would produce. Index files
-//     added in the meantime are loaded in addition.
-//   - If a snapshot file or an index file read during the wait is gone, or if
-//     any read during the wait failed, everything read during the wait is
-//     discarded and read again as stock does: snapshots, then the index.
+//     built from is still listed, with the size it was listed with when it was
+//     loaded. Index files added in the meantime are loaded in addition.
+//   - If a snapshot file or an index file read during the wait is gone or has
+//     another size, or if any read during the wait failed, everything read
+//     during the wait is discarded and read again as stock does: snapshots,
+//     then the index.
+//
+// A name is the hash of the content that was read during the wait. It does
+// not say what is stored under that name now: a file that was damaged in
+// between keeps its name. The size catches a file that was cut short or
+// replaced by one of another length; it does not catch damage that leaves the
+// length alone, which only reading the file again does. Commands that work
+// with the index accept that for the index files: stock reads them through
+// the cache as well and does not see such damage either unless the cache is
+// off. check does not: its purpose is to read what is stored, so check starts
+// no reads during the wait and reads the snapshots and the index after the
+// lock is confirmed, as stock does.
 type lockWaitVerdict int
 
 const (
@@ -94,9 +102,9 @@ func validateLockWaitReads(ctx context.Context, repo *repository.Repository, wai
 	if err != nil {
 		return rereadLockWaitReads, nil
 	}
-	loaded := repo.LoadedIndexIDs()
-	for id := range loaded {
-		if _, ok := listed[id]; !ok {
+	for id, size := range repo.LoadedIndexFiles() {
+		// kept only when it is listed now as it was listed when it was loaded
+		if now, ok := listed[id]; !ok || size < 0 || now != size {
 			return rereadLockWaitReads, nil
 		}
 		delete(listed, id)
@@ -335,189 +343,5 @@ func (load *repositoryIndexLoad) discard() {
 	}
 	load.cancel()
 	load.join()
-	load.repo.DiscardIndex()
-}
-
-type checkerIndexLoadResult struct {
-	hints []error
-	errs  []error
-	packs *repository.PreparedPackSizes
-	// failed is set when the snapshot listing taken during the wait failed
-	failed bool
-}
-
-// checkerIndexLoad prepares check's checker-specific index pass during the
-// settle delay. The snapshot files are listed first, keeping the stock
-// listing order. After the lock is confirmed the prepared pass is kept only
-// if the snapshot and index files are still the ones read during the wait;
-// otherwise check loads everything again exactly as stock does. Progress
-// remains buffered until the command consumes the prepared result.
-type checkerIndexLoad struct {
-	ctx         context.Context // the lock's context
-	loadCtx     context.Context
-	repo        *repository.Repository
-	checker     *checker.Checker
-	trackUnused bool
-	filter      *data.SnapshotFilter
-	args        []string
-	cancel      context.CancelFunc
-	result      chan checkerIndexLoadResult
-	progress    *delayedTerminalCounterFactory
-	snapshots   *preparedSnapshots  // listed during the wait; only compared
-	validation  *lockWaitValidation // exists once the lock is confirmed
-	value       checkerIndexLoadResult
-	packs       *repository.PreparedPackSizes
-	done        bool
-	used        bool
-	reread      bool
-}
-
-func startCheckerIndexLoad(ctx context.Context, repo *repository.Repository, trackUnused bool, snapshotFilter *data.SnapshotFilter, args []string) *checkerIndexLoad {
-	loadCtx, cancel := context.WithCancel(ctx)
-	chkr := checker.New(repo, trackUnused)
-	load := &checkerIndexLoad{
-		ctx:         ctx,
-		loadCtx:     loadCtx,
-		repo:        repo,
-		checker:     chkr,
-		trackUnused: trackUnused,
-		filter:      snapshotFilter,
-		args:        args,
-		cancel:      cancel,
-		result:      make(chan checkerIndexLoadResult, 1),
-		progress:    &delayedTerminalCounterFactory{},
-		snapshots:   newPreparedSnapshots(),
-	}
-	go func() {
-		load.snapshots.list(loadCtx, repo)
-		if load.snapshots.err != nil {
-			load.result <- checkerIndexLoadResult{failed: true}
-			return
-		}
-		hints, errs := chkr.LoadIndex(loadCtx, load.progress)
-		var packs *repository.PreparedPackSizes
-		if len(errs) == 0 && loadCtx.Err() == nil {
-			packs = chkr.PreparePackSizes(loadCtx)
-		}
-		load.result <- checkerIndexLoadResult{hints: hints, errs: errs, packs: packs}
-	}()
-	return load
-}
-
-// checkerIndexWaitWork returns the wait work of check. See
-// repositoryIndexWaitWork for target.
-func checkerIndexWaitWork(target **checkerIndexLoad, trackUnused bool, snapshotFilter *data.SnapshotFilter, args []string) func(context.Context, *repository.Repository) func(bool) {
-	return func(ctx context.Context, repo *repository.Repository) func(bool) {
-		load := startCheckerIndexLoad(ctx, repo, trackUnused, snapshotFilter, args)
-		*target = load
-		return func(confirmed bool) {
-			load.settle(confirmed)
-			if !confirmed && *target == load {
-				*target = nil
-			}
-		}
-	}
-}
-
-func (load *checkerIndexLoad) settle(confirmed bool) {
-	if load == nil || load.done {
-		return
-	}
-	if !confirmed {
-		load.discard()
-		return
-	}
-	load.confirm()
-}
-
-// confirm starts the comparison with the repository as it is now. It must not
-// be called before the lock is confirmed.
-func (load *checkerIndexLoad) confirm() {
-	if load.validation != nil {
-		return
-	}
-	load.validation = startLockWaitValidation(load.loadCtx, load.repo, load.snapshots, func() error {
-		load.value = <-load.result
-		if load.value.failed || len(load.value.errs) > 0 || load.value.packs == nil {
-			// Errors met during the wait are not reported: the index is
-			// read again after confirmation and reported from there.
-			return errLockWaitSnapshotListing
-		}
-		return nil
-	})
-}
-
-func (load *checkerIndexLoad) join() {
-	if load.done {
-		return
-	}
-	if load.validation != nil {
-		<-load.validation.done
-	} else {
-		<-load.result
-	}
-	load.done = true
-}
-
-// decide waits for the comparison made after the lock was confirmed and
-// discards the prepared index pass unless it is still exact.
-func (load *checkerIndexLoad) decide() {
-	if load.done {
-		return
-	}
-	load.confirm()
-	load.join()
-	// An added index file would need the checker's per-file bookkeeping to
-	// be extended; check simply runs its index pass again in that case.
-	if load.validation.verdict != keepLockWaitReads {
-		load.reread = true
-		load.value = checkerIndexLoadResult{}
-		load.repo.DiscardIndex()
-		// the blob set of a checker is bound to the index it was created on
-		load.checker = checker.New(load.repo, load.trackUnused)
-	}
-}
-
-// loadSnapshots hands the snapshot listing taken after the lock was confirmed
-// to the checker and returns the error of that listing at the position of
-// stock's LoadSnapshots call.
-func (load *checkerIndexLoad) loadSnapshots() error {
-	load.decide()
-	listed := load.validation.snapshots
-	if listed.err != nil {
-		// list again and report the error as stock does
-		return load.checker.LoadSnapshots(load.ctx, load.filter, load.args)
-	}
-	return load.checker.LoadSnapshotsFromList(load.ctx, listed.lister, load.filter, load.args)
-}
-
-// checkerForSnapshots returns the checker to continue with. It is valid after
-// loadSnapshots.
-func (load *checkerIndexLoad) checkerForSnapshots() *checker.Checker {
-	return load.checker
-}
-
-func (load *checkerIndexLoad) consume(printer restic.TerminalCounterFactory) ([]error, []error) {
-	load.decide()
-	load.used = true
-	defer load.cancel()
-	if load.reread {
-		return load.checker.LoadIndex(load.ctx, printer)
-	}
-	load.progress.activate(printer)
-	value := load.value
-	load.value = checkerIndexLoadResult{}
-	load.packs = value.packs
-	return value.hints, value.errs
-}
-
-func (load *checkerIndexLoad) discard() {
-	if load == nil {
-		return
-	}
-	load.cancel()
-	load.join()
-	load.packs = nil
-	load.value = checkerIndexLoadResult{}
 	load.repo.DiscardIndex()
 }

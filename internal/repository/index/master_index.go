@@ -309,12 +309,15 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 		return err
 	}
 	var numIndexFiles uint64
-	err = indexList.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
+	// the sizes with which the files to load are listed, for their notes
+	listedSizes := make(map[restic.ID]int64)
+	err = indexList.List(ctx, restic.IndexFile, func(id restic.ID, size int64) error {
 		if loadedIDs.Has(id) {
 			// skip already loaded indexes
 			return nil
 		}
 		numIndexFiles++
+		listedSizes[id] = size
 		return nil
 	})
 	if err != nil {
@@ -341,7 +344,11 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 		if idx == nil {
 			return nil
 		}
-		mi.noteIndexFile(id, idx)
+		size, listed := listedSizes[id]
+		if !listed {
+			size = -1
+		}
+		mi.noteIndexFile(id, idx, size)
 		if cb == nil && len(loadedIDs) == 0 && firstOwned == nil {
 			firstOwned = idx
 		}
@@ -692,7 +699,7 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r restic.SaverUnpacked[res
 		if err != nil {
 			return err
 		}
-		mi.noteIndexFile(sid, idx)
+		mi.noteIndexFile(sid, idx, -1)
 
 		debug.Log("Saved index %d as %v", i, sid)
 	}

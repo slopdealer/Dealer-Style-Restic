@@ -16,6 +16,15 @@ func (r *Repository) LoadedIndexIDs() restic.IDSet {
 	return r.idx.IDs()
 }
 
+// LoadedIndexFiles returns the index files of LoadedIndexIDs, each with the
+// size with which it was listed when it was loaded (-1 when it was not loaded
+// from a listing). A name is the hash of the content that was read, but it
+// says nothing about what is stored under that name now; a caller that
+// compares names compares these sizes with a new listing as well.
+func (r *Repository) LoadedIndexFiles() map[restic.ID]int64 {
+	return r.idx.LoadedFileSizes()
+}
+
 // LoadAddedIndexFiles loads the index files in added (ID to size, as listed)
 // into the index held in memory. The result is what LoadIndex produces for
 // the loaded and the added files together, but the files that are already

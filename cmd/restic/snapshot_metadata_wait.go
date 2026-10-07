@@ -14,6 +14,10 @@ type snapshotMetadataLoad struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	loader restic.LoaderUnpacked
+	// the snapshot file that was read, and its size
+	id       restic.ID
+	size     int64
+	prepared bool
 }
 
 func startSnapshotMetadataLoad(ctx context.Context, repo *repository.Repository, load *repositoryIndexLoad, request string) *snapshotMetadataLoad {
@@ -35,6 +39,7 @@ func startSnapshotMetadataLoad(ctx context.Context, repo *repository.Repository,
 		id, size, ok := snapshotMetadataTarget(ctx, load.snapshots.lister, request)
 		if ok {
 			p.loader = repo.PrepareSnapshot(ctx, id, size)
+			p.id, p.size, p.prepared = id, size, p.loader != restic.LoaderUnpacked(repo)
 		}
 	}()
 	return p
@@ -57,11 +62,29 @@ func snapshotMetadataTarget(ctx context.Context, list restic.Lister, request str
 	return target, size, err == nil && matches == 1 && size > 0 && size <= repository.PreparedSnapshotLimit
 }
 
-func (p *snapshotMetadataLoad) get(fallback restic.LoaderUnpacked) restic.LoaderUnpacked {
+// get returns the loader that serves the snapshot read during the wait, or
+// fallback. The snapshot is served only if confirmed, the listing taken after
+// the lock was confirmed, lists it with the size it was read with: its name is
+// the hash of what was read, the size is what is known about the file as it
+// is stored now.
+func (p *snapshotMetadataLoad) get(ctx context.Context, fallback restic.LoaderUnpacked, confirmed restic.Lister) restic.LoaderUnpacked {
 	if p == nil {
 		return fallback
 	}
 	<-p.done
+	if !p.prepared {
+		return p.loader
+	}
+	same := false
+	err := confirmed.List(ctx, restic.SnapshotFile, func(id restic.ID, size int64) error {
+		if id == p.id && size == p.size {
+			same = true
+		}
+		return nil
+	})
+	if err != nil || !same {
+		return fallback
+	}
 	return p.loader
 }
 
