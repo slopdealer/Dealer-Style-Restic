@@ -122,7 +122,11 @@ func estimatePreparedNodeBytes(node *data.Node) uint64 {
 		size += uint64(unsafe.Sizeof(*node.Subtree))
 	}
 	size += uint64(cap(node.ExtendedAttributes)) * uint64(unsafe.Sizeof(data.ExtendedAttribute{}))
-	for _, attr := range node.ExtendedAttributes {
+	// Duplicate JSON fields can shorten a reused xattr slice without clearing
+	// its backing tail. Those invisible attributes still retain their values,
+	// so the whole backing array is counted, not only its visible part.
+	attrs := node.ExtendedAttributes
+	for _, attr := range attrs[:cap(attrs)] {
 		addString(attr.Name)
 		size += uint64(cap(attr.Value)) * 2
 	}

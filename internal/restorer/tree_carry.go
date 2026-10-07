@@ -127,11 +127,7 @@ func estimateCarriedNodeBytes(node *data.Node) uint64 {
 			size += 256
 		}
 	}
-	// Duplicate JSON fields can shorten a reused xattr slice without clearing
-	// its backing tail. Those invisible attributes still retain their values.
-	attrs := node.ExtendedAttributes
-	for _, attr := range attrs[len(attrs):cap(attrs)] {
-		size += uint64(len(attr.Name))*2 + uint64(cap(attr.Value))*2
-	}
+	// The hidden tail of a reused xattr slice is already counted by
+	// estimatePreparedNodeBytes.
 	return size
 }
