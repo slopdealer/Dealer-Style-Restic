@@ -148,12 +148,12 @@ func (be *Backend) retry(ctx context.Context, msg string, f func() error) error 
 		backoff.WithContext(b, ctx),
 		func(err error, d time.Duration) {
 			if be.Report != nil {
-				be.Report(msg, err, d)
+				report(ctx, func() { be.Report(msg, err, d) })
 			}
 		},
 		func(retries int) {
 			if be.Success != nil {
-				be.Success(msg, retries)
+				report(ctx, func() { be.Success(msg, retries) })
 			}
 		},
 	)

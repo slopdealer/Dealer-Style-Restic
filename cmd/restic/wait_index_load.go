@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	"github.com/restic/restic/internal/backend/retry"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
@@ -34,6 +35,14 @@ import (
 //     another size, or if any read during the wait failed, everything read
 //     during the wait is discarded and read again as stock does: snapshots,
 //     then the index.
+//   - Nothing is heard of the reads of the wait unless they are used. What
+//     the backend's retries report for them (errors, retries, successes) is
+//     held back. It is shown where the command loads the index when the
+//     index of the wait is kept, in place of what stock's load would report
+//     there, and dropped when the lock is refused or the reads are discarded:
+//     stock makes no such reads then, or makes its own, which report for
+//     themselves. The snapshot listing of the wait is only compared, never
+//     used, so its reports are always dropped.
 //
 // A name is the hash of the content that was read during the wait. It does
 // not say what is stored under that name now: a file that was damaged in
@@ -135,6 +144,8 @@ type repositoryIndexLoad struct {
 	result    chan error
 	progress  *delayedTerminalCounterFactory
 	snapshots *preparedSnapshots // listed during the wait; only compared
+	// reports holds what the retries of the index load of the wait report
+	reports *retry.HeldReports
 	// confirmed is the listing the command took after the lock was confirmed
 	confirmed *preparedSnapshots
 	verdict   lockWaitVerdict
@@ -167,15 +178,19 @@ func startRepositoryIndexLoadAfterSnapshots(ctx context.Context, repo *repositor
 	if listSnapshots {
 		load.snapshots = newPreparedSnapshots()
 	}
+	indexCtx, reports := retry.WithHeldReports(loadCtx)
+	load.reports = reports
 	go func() {
-		load.snapshots.list(loadCtx, repo)
+		listCtx, listReports := retry.WithHeldReports(loadCtx)
+		load.snapshots.list(listCtx, repo)
+		listReports.Drop()
 		if load.snapshots != nil && load.snapshots.err != nil {
 			// The index is not listed after a failed snapshot listing: the
 			// snapshots are listed again later, and the index must follow.
 			load.result <- errLockWaitSnapshotListing
 			return
 		}
-		load.result <- repo.LoadIndex(loadCtx, load.progress)
+		load.result <- repo.LoadIndex(indexCtx, load.progress)
 	}()
 	return load
 }
@@ -301,12 +316,15 @@ func (load *repositoryIndexLoad) consume(printer restic.TerminalCounterFactory) 
 	load.verdict, added = validateLockWaitReads(load.ctx, load.repo, load.snapshots, confirmed, load.waitErr)
 	switch load.verdict {
 	case keepLockWaitReads:
+		load.reports.Release()
 		load.progress.activate(printer)
 	case extendLockWaitReads:
+		load.reports.Release()
 		load.progress.activate(printer)
 		// only the added index files are read
 		load.err = load.repo.LoadAddedIndexFiles(load.ctx, added)
 	default:
+		load.reports.Drop()
 		load.reread = true
 		load.repo.DiscardIndex()
 		load.err = load.repo.LoadIndex(load.ctx, printer)
@@ -334,5 +352,6 @@ func (load *repositoryIndexLoad) discard() {
 	load.cancel()
 	load.join()
 	load.done = true
+	load.reports.Drop()
 	load.repo.DiscardIndex()
 }
