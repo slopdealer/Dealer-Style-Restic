@@ -700,7 +700,7 @@ func (mi *MasterIndex) saveFullIndex(ctx context.Context, r restic.SaverUnpacked
 
 // ListPacks returns the blobs of the specified pack files grouped by pack file.
 func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
-	return mi.listPacks(ctx, packs, false)
+	return mi.listPacksFallback(ctx, packs)
 }
 
 func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collect bool) <-chan PackBlobs {
@@ -728,6 +728,15 @@ func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collec
 				}
 				return
 			}
+		}
+
+		if collect && len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
+			return
+		}
+
+		if collect {
+			mi.publishRepackFallback(ctx, packs, out)
+			return
 		}
 
 		// only resort a part of the index to keep the memory overhead bounded
