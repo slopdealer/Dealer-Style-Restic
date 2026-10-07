@@ -413,7 +413,7 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != restic.DataBlob) {
 			autoRawData := t == restic.DataBlob && r.opts.Compression == CompressionAuto && len(data) >= autoCompressionMinRawSize
 
-			compressed := r.getZstdEncoder().EncodeAll(data, nil)
+			compressed := r.encodeBlob(data)
 			if autoRawData && len(compressed)+4 >= len(data) {
 				// A compressed pack entry carries a four-byte uncompressed
 				// length. Keep the original bytes when that header and payload
