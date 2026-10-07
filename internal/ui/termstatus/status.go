@@ -5,15 +5,27 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	tty "github.com/restic/restic/internal/terminal"
 	"github.com/restic/restic/internal/ui"
 )
 
 var _ ui.Terminal = &terminal{}
+
+const maxOutputBatchSize = 64 * 1024
+
+type queuedOutput struct {
+	err     bool
+	line    string
+	data    []byte
+	offset  int
+	started bool
+}
 
 // terminal is used to write messages and display status lines which can be
 // updated. When the output is redirected to a file, the status lines are not
@@ -30,9 +42,13 @@ type terminal struct {
 	inputIsTerminal  bool
 	outputIsTerminal bool
 	canUpdateStatus  bool
+	batchStdout      bool
+	batchStderr      bool
 
-	outputWriter     io.WriteCloser
-	outputWriterOnce sync.Once
+	outputWriter      io.WriteCloser
+	outputWriterOnce  sync.Once
+	outputMu          sync.Mutex
+	outputBatchWindow time.Duration
 
 	// will be closed when the goroutine which runs Run() terminates, so it'll
 	// yield a default value immediately
@@ -57,8 +73,12 @@ type fder interface {
 	Fd() uintptr
 }
 
-// Setup creates a new termstatus.
-// The returned function must be called to shut down the termstatus.
+// Setup creates a new termstatus. The returned function must be called to shut
+// down its background goroutine. It closes OutputWriter and drains submitted
+// output before shutdown. If an output writer cannot make progress, the
+// remaining bytes cannot be delivered; a short-write error is reported. If a
+// record was partially written, its write diagnostics wait until its suffix
+// is written or the final shutdown attempt.
 //
 // A goroutine is started to update the
 // terminal. It is terminated when ctx is cancelled. When stdout is redirected to
@@ -85,9 +105,7 @@ func Setup(stdin io.ReadCloser, stdout, stderr io.Writer, quiet bool) (ui.Termin
 	})
 
 	return term, func() {
-		if term.outputWriter != nil {
-			_ = term.outputWriter.Close()
-		}
+		term.closeOutputWriter()
 		term.Flush()
 		// shutdown termstatus
 		cancel()
@@ -97,12 +115,15 @@ func Setup(stdin io.ReadCloser, stdout, stderr io.Writer, quiet bool) (ui.Termin
 
 func new(rd io.ReadCloser, wr io.Writer, errWriter io.Writer, disableStatus bool) *terminal {
 	t := &terminal{
-		rd:        rd,
-		wr:        wr,
-		errWriter: errWriter,
-		msg:       make(chan message),
-		status:    make(chan status),
-		closed:    make(chan struct{}),
+		rd:               rd,
+		wr:               wr,
+		errWriter:        errWriter,
+		msg:              make(chan message),
+		status:           make(chan status),
+		closed:           make(chan struct{}),
+		batchStdout:      isRegularFile(wr),
+		batchStderr:      isRegularFile(errWriter),
+		outputBatchWindow: 100 * time.Microsecond,
 	}
 
 	if disableStatus {
@@ -131,6 +152,18 @@ func new(rd io.ReadCloser, wr io.Writer, errWriter io.Writer, disableStatus bool
 	}
 
 	return t
+}
+
+// isRegularFile reports whether w is a regular file. Batching is limited to
+// ordinary redirected files so custom writers and pipes retain per-message
+// Write behavior.
+func isRegularFile(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && info.Mode().IsRegular()
 }
 
 // InputIsTerminal returns whether the input is a terminal.
@@ -172,10 +205,42 @@ func (t *terminal) CanUpdateStatus() bool {
 // OutputWriter returns a output writer that is safe for concurrent use with
 // other output methods. Output is only shown after a line break.
 func (t *terminal) OutputWriter() io.Writer {
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+
 	t.outputWriterOnce.Do(func() {
-		t.outputWriter = newLineWriter(t.Print)
+		t.outputWriter = newTerminalLineWriter(func(line string) {
+			t.enqueueOutput(line, false)
+		}, &t.outputMu, t.batchStdout, t.outputBatchWindow)
 	})
 	return t.outputWriter
+}
+
+// flushOutputWriterLocked flushes complete lines buffered before the next
+// terminal event. The caller must hold outputMu.
+func (t *terminal) flushOutputWriterLocked() {
+	if w, ok := t.outputWriter.(*lineWriter); ok {
+		w.flush()
+	}
+}
+
+// closeOutputWriter serializes shutdown with concurrent OutputWriter writes.
+func (t *terminal) closeOutputWriter() {
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+
+	if w, ok := t.outputWriter.(*lineWriter); ok {
+		w.m.Lock()
+		defer w.m.Unlock()
+		_ = w.closeLocked()
+	}
+}
+
+func (t *terminal) enqueueOutput(line string, isErr bool) {
+	select {
+	case t.msg <- message{line: line, err: isErr}:
+	case <-t.closed:
+	}
 }
 
 // OutputRaw returns the raw output writer. Should only be used if there is no
@@ -322,32 +387,187 @@ func findUnchangedLines(curr, last []string) []bool {
 // without status lines.
 func (t *terminal) runWithoutStatus(ctx context.Context) {
 	var lastStatus []string
+	var pending []queuedOutput
+	var batchBuffer []byte
+	var batchTimer *time.Timer
+	var batchTimerC <-chan time.Time
+	var pendingWriteErrors []error
+
+	stopBatchTimer := func() {
+		if batchTimer == nil {
+			return
+		}
+		if !batchTimer.Stop() {
+			select {
+			case <-batchTimer.C:
+			default:
+			}
+		}
+		batchTimer = nil
+		batchTimerC = nil
+	}
+	startBatchTimer := func() {
+		if batchTimer == nil {
+			batchTimer = time.NewTimer(t.outputBatchWindow)
+		} else {
+			if !batchTimer.Stop() {
+				select {
+				case <-batchTimer.C:
+				default:
+				}
+			}
+			batchTimer.Reset(t.outputBatchWindow)
+		}
+		batchTimerC = batchTimer.C
+	}
+	flushPending := func() bool {
+		for len(pending) > 0 {
+			item := &pending[0]
+			dst := t.wr
+			if item.err {
+				dst = t.errWriter
+			}
+
+			var n int
+			var err error
+			if item.data != nil {
+				remaining := item.data[item.offset:]
+				n, err = dst.Write(remaining)
+				if n < 0 || n > len(remaining) {
+					t.logWriteErr(fmt.Errorf("invalid write count %d", n))
+					return false
+				}
+				item.offset += n
+			} else {
+				n, err = io.WriteString(dst, item.line)
+				if n < 0 || n > len(item.line) {
+					t.logWriteErr(fmt.Errorf("invalid write count %d", n))
+					return false
+				}
+				item.line = item.line[n:]
+			}
+
+			if n > 0 {
+				item.started = true
+			}
+
+			if err != nil {
+				if item.started {
+					// Keep diagnostics behind a partially written record. A later
+					// write may recover its suffix, and stderr must not split it.
+					pendingWriteErrors = append(pendingWriteErrors, err)
+				} else {
+					t.logWriteErr(err)
+				}
+			}
+			if item.offset == len(item.data) && item.line == "" {
+				pending = pending[1:]
+				for _, writeErr := range pendingWriteErrors {
+					t.logWriteErr(writeErr)
+				}
+				pendingWriteErrors = nil
+				continue
+			}
+			if n == 0 {
+				if err == nil {
+					if item.started {
+						pendingWriteErrors = append(pendingWriteErrors, io.ErrShortWrite)
+					} else {
+						t.logWriteErr(io.ErrShortWrite)
+					}
+				}
+				return false
+			}
+			// A partial write with an error still made progress. Retry only its
+			// unwritten suffix, before allowing later output to reach either stream.
+		}
+		pending = nil
+		if batchBuffer != nil {
+			batchBuffer = batchBuffer[:0]
+		}
+		return true
+	}
+	flushAndStop := func(reportUndeliveredErrors bool) {
+		stopBatchTimer()
+		if !flushPending() && reportUndeliveredErrors {
+			for _, writeErr := range pendingWriteErrors {
+				t.logWriteErr(writeErr)
+			}
+			pendingWriteErrors = nil
+		}
+	}
+	queueOutput := func(line string, isErr, batchable bool) {
+		if batchable && len(line) <= maxOutputBatchSize {
+			if len(pending) > 0 {
+				last := &pending[len(pending)-1]
+				pendingLen := len(last.data) - last.offset
+				if last.data == nil || last.err != isErr || last.started || pendingLen+len(line) > maxOutputBatchSize || len(last.data)+len(line) > maxOutputBatchSize {
+					stopBatchTimer()
+					flushPending()
+				}
+			}
+
+			if len(pending) > 0 {
+				last := &pending[len(pending)-1]
+				pendingLen := len(last.data) - last.offset
+				if last.data != nil && last.err == isErr && !last.started && pendingLen+len(line) <= maxOutputBatchSize && len(last.data)+len(line) <= maxOutputBatchSize {
+					last.data = append(last.data, line...)
+					if len(pending) == 1 {
+						batchBuffer = last.data
+					}
+					startBatchTimer()
+					return
+				}
+			}
+			var data []byte
+			if len(pending) == 0 {
+				if batchBuffer == nil {
+					batchBuffer = make([]byte, 0, maxOutputBatchSize)
+				}
+				data = append(batchBuffer[:0], line...)
+				batchBuffer = data
+			} else {
+				data = append(make([]byte, 0, maxOutputBatchSize), line...)
+			}
+			pending = append(pending, queuedOutput{err: isErr, data: data})
+			startBatchTimer()
+			return
+		}
+
+		stopBatchTimer()
+		flushPending()
+		// Route even an otherwise empty queue through the retry path so a
+		// partial write cannot be overtaken by output for the other stream.
+		pending = append(pending, queuedOutput{err: isErr, line: line})
+		flushPending()
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			flushAndStop(true)
 			return
 		case msg := <-t.msg:
 			if msg.barrier != nil {
+				flushAndStop(false)
 				msg.barrier <- struct{}{}
 				continue
 			}
-
-			var dst io.Writer
+			batchable := t.batchStdout
 			if msg.err {
-				dst = t.errWriter
-			} else {
-				dst = t.wr
+				batchable = t.batchStderr
 			}
-
-			_, err := io.WriteString(dst, msg.line)
-			t.logWriteErr(err)
+			queueOutput(msg.line, msg.err, batchable)
+		case <-batchTimerC:
+			batchTimer = nil
+			batchTimerC = nil
+			flushPending()
 
 		case stat := <-t.status:
+			flushAndStop(false)
 			if !slices.Equal(stat.lines, lastStatus) {
 				for _, line := range stat.lines {
 					// Ensure that each message ends with exactly one newline.
-					_, err := fmt.Fprintln(t.wr, strings.TrimRight(line, "\n"))
-					t.logWriteErr(err)
+					queueOutput(strings.TrimRight(line, "\n")+"\n", false, false)
 				}
 				// Copy the status slice to avoid aliasing
 				lastStatus = append([]string{}, stat.lines...)
@@ -356,8 +576,16 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 	}
 }
 
-// Flush waits for all pending messages to be printed.
+// Flush waits until messages queued before the barrier have been written or an
+// output writer stops making progress. A short write before any bytes are
+// written is reported immediately. If a record was partially written, its
+// diagnostics wait until its suffix is written or the final shutdown attempt.
+// Remaining bytes stay queued for later output or the final shutdown attempt.
 func (t *terminal) Flush() {
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+	t.flushOutputWriterLocked()
+
 	ch := make(chan struct{})
 	defer close(ch)
 	select {
@@ -371,15 +599,16 @@ func (t *terminal) Flush() {
 }
 
 func (t *terminal) print(line string, isErr bool) {
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+	t.flushOutputWriterLocked()
+
 	// make sure the line ends with a line break
 	if len(line) == 0 || line[len(line)-1] != '\n' {
 		line += "\n"
 	}
 
-	select {
-	case t.msg <- message{line: line, err: isErr}:
-	case <-t.closed:
-	}
+	t.enqueueOutput(line, isErr)
 }
 
 // Print writes a line to the terminal.
@@ -420,6 +649,9 @@ func (t *terminal) SetStatus(lines []string) {
 	}
 
 	lines = sanitizeLines(lines, width)
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+	t.flushOutputWriterLocked()
 
 	select {
 	case t.status <- status{lines: lines}:

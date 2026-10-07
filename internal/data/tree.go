@@ -147,7 +147,7 @@ func LoadTree(ctx context.Context, loader restic.BlobLoader, content restic.ID) 
 	if err != nil {
 		return nil, err
 	}
-	return NewTreeNodeIterator(bytes.NewReader(rd))
+	return newDirectTreeIterator(rd)
 }
 
 type TreeFinder struct {
@@ -245,14 +245,53 @@ func SaveTree(ctx context.Context, saver restic.BlobSaver, nodes TreeNodeIterato
 
 type TreeJSONBuilder struct {
 	buf        bytes.Buffer
+	encoder    *json.Encoder
 	lastName   string
 	countNodes int
+
+	// reference is immutable parent plaintext. While fragments match, buf is
+	// only node scratch; matched records the prefix we can recover on mismatch.
+	reference []byte
+	matched   int
 }
 
 func NewTreeJSONBuilder() *TreeJSONBuilder {
 	tb := &TreeJSONBuilder{}
 	_, _ = tb.buf.WriteString(`{"nodes":[`)
 	return tb
+}
+
+// NewTreeJSONBuilderWithReference compares the ordinary encoded fragments with
+// immutable reference bytes. Identical prefixes need no accumulated output
+// buffer; the first mismatch restores the prefix and resumes ordinary building.
+// The caller owns and bounds the reference's lifetime through Finalize and save.
+func NewTreeJSONBuilderWithReference(reference []byte) *TreeJSONBuilder {
+	builder := NewTreeJSONBuilder()
+	if len(reference) != 0 {
+		builder.reference = reference
+		builder.settleReference()
+	}
+	return builder
+}
+
+func (builder *TreeJSONBuilder) settleReference() {
+	if builder.reference == nil {
+		return
+	}
+	fragment := builder.buf.Bytes()
+	remaining := builder.reference[builder.matched:]
+	if len(fragment) <= len(remaining) && bytes.Equal(fragment, remaining[:len(fragment)]) {
+		builder.matched += len(fragment)
+		builder.buf.Reset()
+		return
+	}
+	// Copy before replacing buf: fragment aliases its old allocation.
+	var output bytes.Buffer
+	output.Grow(builder.matched + len(fragment))
+	_, _ = output.Write(builder.reference[:builder.matched])
+	_, _ = output.Write(fragment)
+	builder.buf = output
+	builder.reference = nil
 }
 
 func (builder *TreeJSONBuilder) AddNode(node *Node) error {
@@ -264,12 +303,39 @@ func (builder *TreeJSONBuilder) AddNode(node *Node) error {
 	}
 	builder.lastName = node.Name
 
-	val, err := json.Marshal(node)
-	if err != nil {
+	// The scalar serializer produces compact JSON with the default escaping.
+	// Insert that trusted representation directly, avoiding Encoder's second
+	// syntax scan. Normalize a value copy just as Node.MarshalJSON does.
+	normalized := *node
+	normalized.ModTime = fixTime(normalized.ModTime)
+	normalized.AccessTime = fixTime(normalized.AccessTime)
+	normalized.ChangeTime = fixTime(normalized.ChangeTime)
+	if encoded, ok := appendScalarNodeJSON(builder.buf.AvailableBuffer(), normalized); ok {
+		if builder.reference != nil && cap(encoded) > cap(builder.buf.AvailableBuffer()) {
+			// Preserve the scalar encoder's reservation in the node scratch.
+			// Copying only its length into a smaller Buffer would repeat the
+			// reservation allocation for every identically sized node.
+			builder.buf.Grow(cap(encoded))
+		}
+		_, _ = builder.buf.Write(encoded)
+		builder.countNodes++
+		builder.settleReference()
+		return nil
+	}
+
+	// Encode writes the serializer's buffered output directly into the tree,
+	// avoiding a separately allocated Marshal result for each node. Keep the
+	// default escaping and Node.MarshalJSON behavior, then remove only the
+	// newline which Encode adds after a successful node.
+	if builder.encoder == nil {
+		builder.encoder = json.NewEncoder(&builder.buf)
+	}
+	if err := builder.encoder.Encode(node); err != nil {
 		return err
 	}
-	_, _ = builder.buf.Write(val)
+	builder.buf.Truncate(builder.buf.Len() - 1)
 	builder.countNodes++
+	builder.settleReference()
 	return nil
 }
 
@@ -277,9 +343,17 @@ func (builder *TreeJSONBuilder) Finalize() ([]byte, error) {
 	// append a newline so that the data is always consistent (json.Encoder
 	// adds a newline after each object)
 	_, _ = builder.buf.WriteString("]}\n")
+	builder.settleReference()
 	buf := builder.buf.Bytes()
+	if builder.reference != nil {
+		// A shorter current tree may match only a prefix of the parent. Return
+		// precisely the current bytes; callers still compare the complete tree.
+		buf = builder.reference[:builder.matched]
+	}
+	builder.reference = nil
 	// drop reference to buffer
 	builder.buf = bytes.Buffer{}
+	builder.encoder = nil
 	return buf, nil
 }
 

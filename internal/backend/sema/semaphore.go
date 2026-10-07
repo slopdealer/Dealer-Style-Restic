@@ -27,5 +27,15 @@ func (s semaphore) GetToken() {
 	debug.Log("acquired token")
 }
 
+// TryGetToken returns whether a token was immediately available.
+func (s semaphore) TryGetToken() bool {
+	select {
+	case s.ch <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
 // ReleaseToken returns a token.
 func (s semaphore) ReleaseToken() { <-s.ch }

@@ -56,6 +56,134 @@ type failLockLoadingBackend struct {
 	backend.Backend
 }
 
+func TestNewLockRejectsLockThatAppearsBeforeConfirmation(t *testing.T) {
+	be := newSecondScanLockBackend(mem.New())
+	repo, _ := TestRepositoryWithBackend(t, be, 0, Options{})
+	TestSetLockTimeout(t, 5*time.Millisecond)
+	be.arm()
+
+	type lockResult struct {
+		lock *lockHandle
+		err  error
+	}
+	result := make(chan lockResult, 1)
+	go func() {
+		lock, err := newLock(context.Background(), &internalRepository{repo}, true)
+		result <- lockResult{lock: lock, err: err}
+	}()
+
+	var ownLock backend.Handle
+	select {
+	case ownLock = <-be.savedLockFiles:
+	case <-time.After(time.Second):
+		t.Fatal("new lock was not saved")
+	}
+	select {
+	case <-be.secondScan:
+	case <-time.After(time.Second):
+		close(be.continueScan)
+		t.Fatal("newLock did not reach its confirmation scan")
+	}
+
+	hostname, err := os.Hostname()
+	rtest.OK(t, err)
+	competitor := Lock{
+		Time:      time.Now(),
+		PID:       os.Getpid(),
+		Hostname:  hostname,
+		Exclusive: true,
+	}
+	competitorID, saveErr := restic.SaveJSONUnpacked(context.Background(), &internalRepository{repo}, restic.LockFile, &competitor)
+	close(be.continueScan)
+	rtest.OK(t, saveErr)
+
+	got := <-result
+	rtest.Assert(t, IsAlreadyLocked(got.err), "expected competing lock to reject confirmation, got lock %v and error %v", got.lock, got.err)
+	rtest.Assert(t, ownLock.Name != competitorID.String(), "test lock IDs unexpectedly match: %s", ownLock.Name)
+
+	remainingLockID := checkSingleLock(t, repo)
+	rtest.Equals(t, competitorID, remainingLockID)
+}
+
+func TestNewLockWaitWorkIsDiscardedBeforeUnlockOnConflict(t *testing.T) {
+	be := newSecondScanLockBackend(mem.New())
+	repo, _ := TestRepositoryWithBackend(t, be, 0, Options{})
+	TestSetLockTimeout(t, 5*time.Millisecond)
+	be.arm()
+
+	started := make(chan struct{})
+	workDone := make(chan struct{})
+	settled := make(chan bool, 1)
+	type lockResult struct {
+		lock *lockHandle
+		err  error
+	}
+	result := make(chan lockResult, 1)
+	go func() {
+		lock, err := newLockWithWaitWork(context.Background(), &internalRepository{repo}, true, func(ctx context.Context) func(bool) {
+			workCtx, cancel := context.WithCancel(ctx)
+			go func() {
+				close(started)
+				<-workCtx.Done()
+				close(workDone)
+			}()
+			return func(confirmed bool) {
+				if !confirmed {
+					cancel()
+					<-workDone
+				}
+				settled <- confirmed
+			}
+		})
+		result <- lockResult{lock: lock, err: err}
+	}()
+
+	var ownLock backend.Handle
+	select {
+	case ownLock = <-be.savedLockFiles:
+	case <-time.After(time.Second):
+		close(be.continueScan)
+		t.Fatal("new lock was not saved")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(be.continueScan)
+		t.Fatal("wait work did not start after lock creation")
+	}
+	select {
+	case <-be.secondScan:
+	case <-time.After(time.Second):
+		close(be.continueScan)
+		t.Fatal("newLock did not reach its confirmation scan")
+	}
+
+	hostname, err := os.Hostname()
+	rtest.OK(t, err)
+	competitor := Lock{Time: time.Now(), PID: os.Getpid(), Hostname: hostname, Exclusive: true}
+	competitorID, saveErr := restic.SaveJSONUnpacked(context.Background(), &internalRepository{repo}, restic.LockFile, &competitor)
+	close(be.continueScan)
+	rtest.OK(t, saveErr)
+
+	got := <-result
+	rtest.Assert(t, got.lock == nil && IsAlreadyLocked(got.err), "expected competing lock to reject confirmation, got lock %v and error %v", got.lock, got.err)
+	rtest.Assert(t, ownLock.Name != competitorID.String(), "test lock IDs unexpectedly match: %s", ownLock.Name)
+	select {
+	case confirmed := <-settled:
+		rtest.Assert(t, !confirmed, "wait work was confirmed after a competing lock appeared")
+	case <-time.After(time.Second):
+		t.Fatal("wait work was not settled before newLock returned")
+	}
+	select {
+	case <-workDone:
+	default:
+		t.Fatal("wait work was not joined before newLock returned")
+	}
+
+	remainingLockID := checkSingleLock(t, repo)
+	rtest.Equals(t, competitorID, remainingLockID)
+}
+
 func (be *failLockLoadingBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
 	if h.Type == backend.LockFile {
 		return fmt.Errorf("error loading lock")

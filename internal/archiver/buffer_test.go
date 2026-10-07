@@ -1,6 +1,7 @@
 package archiver
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -54,5 +55,48 @@ func TestBufferPoolLargeBuffers(t *testing.T) {
 
 	if !success {
 		t.Error("large buffer was incorrectly returned to pool")
+	}
+}
+
+func TestBufferPoolBoundedRetention(t *testing.T) {
+	pool := newBufferPool(1024)
+	if got := len(pool.pool); got != 0 {
+		t.Fatalf("empty pool retained %d buffers, want 0", got)
+	}
+
+	one := pool.Get()
+	one.Release()
+	if got := len(pool.pool); got != 1 {
+		t.Fatalf("pool retained %d buffers after one release, want 1", got)
+	}
+	_ = pool.Get()
+
+	bufs := []*buffer{pool.Get(), pool.Get(), pool.Get()}
+	for _, buf := range bufs {
+		buf.Release()
+	}
+	if got := len(pool.pool); got != maxPooledBuffers {
+		t.Fatalf("pool retained %d buffers, want %d", got, maxPooledBuffers)
+	}
+}
+
+func TestBufferPoolConcurrentReleaseDoesNotBlock(t *testing.T) {
+	pool := newBufferPool(1024)
+	bufs := make([]*buffer, maxPooledBuffers*4)
+	for i := range bufs {
+		bufs[i] = pool.Get()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(len(bufs))
+	for _, buf := range bufs {
+		go func() {
+			defer wg.Done()
+			buf.Release()
+		}()
+	}
+	wg.Wait()
+	if got := len(pool.pool); got != maxPooledBuffers {
+		t.Fatalf("pool retained %d buffers after concurrent releases, want %d", got, maxPooledBuffers)
 	}
 }

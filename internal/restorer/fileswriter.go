@@ -63,7 +63,7 @@ func newFilesWriter(count int, allowRecursiveDelete bool) *filesWriter {
 }
 
 func openFile(path string) (*os.File, error) {
-	f, err := fs.OpenFile(path, fs.O_WRONLY|fs.O_NOFOLLOW, 0600)
+	f, err := fs.OpenRegularFileNoPoller(path, fs.O_WRONLY|fs.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func openFile(path string) (*os.File, error) {
 }
 
 func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete bool) (*os.File, error) {
-	f, err := fs.OpenFile(path, fs.O_CREATE|fs.O_WRONLY|fs.O_NOFOLLOW, 0600)
+	f, err := fs.OpenRegularFileNoPoller(path, fs.O_CREATE|fs.O_WRONLY|fs.O_NOFOLLOW, 0600)
 	if err != nil && fs.IsAccessDenied(err) {
 		// If file is readonly, clear the readonly flag by resetting the
 		// permissions of the file and try again
@@ -89,7 +89,7 @@ func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete
 		if err = fs.ResetPermissions(path); err != nil {
 			return nil, err
 		}
-		if f, err = fs.OpenFile(path, fs.O_WRONLY|fs.O_NOFOLLOW, 0600); err != nil {
+		if f, err = fs.OpenRegularFileNoPoller(path, fs.O_WRONLY|fs.O_NOFOLLOW, 0600); err != nil {
 			return nil, err
 		}
 	} else if err != nil && (errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EISDIR)) {
@@ -138,7 +138,7 @@ func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete
 			}
 		}
 		// create a new file, pass O_EXCL to make sure there are no surprises
-		f, err = fs.OpenFile(path, fs.O_CREATE|fs.O_WRONLY|fs.O_EXCL|fs.O_NOFOLLOW, 0600)
+		f, err = fs.OpenRegularFileNoPoller(path, fs.O_CREATE|fs.O_WRONLY|fs.O_EXCL|fs.O_NOFOLLOW, 0600)
 		if err != nil {
 			return nil, err
 		}

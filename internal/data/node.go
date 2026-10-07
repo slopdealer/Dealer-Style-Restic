@@ -169,6 +169,10 @@ func (node Node) MarshalJSON() ([]byte, error) {
 	node.AccessTime = fixTime(node.AccessTime)
 	node.ChangeTime = fixTime(node.ChangeTime)
 
+	if encoded, ok := scalarNodeJSON(node); ok {
+		return encoded, nil
+	}
+
 	type nodeJSON Node
 	nj := nodeJSON(node)
 	name := strconv.Quote(node.Name)

@@ -18,6 +18,7 @@ type MasterIndex struct {
 	idx          []*Index
 	pendingBlobs map[restic.BlobHandle]uint
 	idxMutex     sync.RWMutex
+	fileNotes    map[restic.ID]indexFileNote // see index_rewrite_keep.go
 }
 
 // NewMasterIndex creates a new master index.
@@ -65,6 +66,20 @@ func (mi *MasterIndex) LookupSize(bh restic.BlobHandle) (uint, bool) {
 	for _, idx := range mi.idx {
 		if size, found := idx.LookupSize(bh); found {
 			return size, found
+		}
+	}
+
+	return 0, false
+}
+
+// LookupIndexSize queries the indexes for the ID and excludes pending blobs.
+func (mi *MasterIndex) LookupIndexSize(bh restic.BlobHandle) (uint, bool) {
+	mi.idxMutex.RLock()
+	defer mi.idxMutex.RUnlock()
+
+	for _, idx := range mi.idx {
+		if size, found := idx.LookupSize(bh); found {
+			return size, true
 		}
 	}
 
@@ -304,6 +319,9 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 	}
 	p.SetMax(numIndexFiles)
 
+	// With no callback the decoded indexes are exclusively owned by this load.
+	// Remember the first one, but do not change assembly until all loads succeed.
+	var firstOwned *Index
 	err = ForAllIndexes(ctx, indexList, r, func(id restic.ID, idx *Index, err error) error {
 		if loadedIDs.Has(id) {
 			// skip already loaded indexes
@@ -320,6 +338,10 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 		if idx == nil {
 			return nil
 		}
+		mi.noteIndexFile(id, idx)
+		if cb == nil && len(loadedIDs) == 0 && firstOwned == nil {
+			firstOwned = idx
+		}
 		mi.Insert(idx)
 		return nil
 	})
@@ -328,6 +350,8 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 		return err
 	}
 
+	mi.adoptLoadedIndex(firstOwned)
+	firstOwned = nil
 	return mi.MergeFinalIndexes()
 }
 
@@ -409,10 +433,17 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	debug.Log("start rebuilding index of %d indexes, excludePacks: %v", len(indexes), excludePacks)
 	wg, wgCtx := errgroup.WithContext(ctx)
 
+	// index files that stay as they are need not be read again
+	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
+
 	idxCh := make(chan restic.ID)
 	wg.Go(func() error {
 		defer close(idxCh)
 		for id := range indexes {
+			if keptUnread.Has(id) {
+				p.Add(1)
+				continue
+			}
 			select {
 			case idxCh <- id:
 			case <-wgCtx.Done():
@@ -430,11 +461,10 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	loader := func() error {
 		defer rewriteWg.Done()
 		for id := range idxCh {
-			buf, err := repo.LoadUnpacked(wgCtx, restic.IndexFile, id)
-			if err != nil {
-				return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), err)
+			idx, loadErr, err := loadIndexFile(wgCtx, repo, id)
+			if loadErr != nil {
+				return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), loadErr)
 			}
-			idx, err := DecodeIndex(buf, id)
 			if err != nil {
 				return err
 			}
@@ -528,6 +558,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	})
 
 	var savers errgroup.Group
+	var savedOutputs rewriteSavedIndexes
 	// encoding an index can take quite some time such that this can be CPU- or IO-bound
 	// do not add repo.Connections() here as there are already the loader goroutines.
 	savers.SetLimit(runtime.GOMAXPROCS(0))
@@ -538,7 +569,10 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 			if len(idx.packs) == 0 {
 				return nil
 			}
-			_, err := idx.SaveIndex(wgCtx, repo)
+			id, err := idx.SaveIndex(wgCtx, repo)
+			if err == nil {
+				savedOutputs.record(id)
+			}
 			return err
 		})
 	}
@@ -550,6 +584,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	if err != nil {
 		return fmt.Errorf("failed to rewrite indexes: %w", err)
 	}
+	savedOutputs.preserveOutputs(obsolete)
 
 	p = restic.NoopCounter
 	if opts.DeleteProgress != nil {
@@ -645,6 +680,7 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r restic.SaverUnpacked[res
 		if err != nil {
 			return err
 		}
+		mi.noteIndexFile(sid, idx)
 
 		debug.Log("Saved index %d as %v", i, sid)
 	}
@@ -664,9 +700,36 @@ func (mi *MasterIndex) saveFullIndex(ctx context.Context, r restic.SaverUnpacked
 
 // ListPacks returns the blobs of the specified pack files grouped by pack file.
 func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
+	return mi.listPacks(ctx, packs, false)
+}
+
+func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collect bool) <-chan PackBlobs {
 	out := make(chan PackBlobs)
 	go func() {
 		defer close(out)
+		if collect && len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
+			grouped, complete := mi.collectSelectedPacks(ctx, packs, listPacksCollectPackLimit, listPacksCollectBlobLimit)
+			if ctx.Err() != nil {
+				return
+			}
+			if complete {
+				for i := range byte(16) {
+					for id, blobs := range grouped {
+						if id[0]&0xf != i {
+							continue
+						}
+						delete(grouped, id)
+						select {
+						case out <- PackBlobs{PackID: id, Blobs: blobs}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+				return
+			}
+		}
+
 		// only resort a part of the index to keep the memory overhead bounded
 		for i := range byte(16) {
 			packBlob := make(map[restic.ID]pack.Blobs)

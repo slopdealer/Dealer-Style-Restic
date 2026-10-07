@@ -26,6 +26,7 @@ type packer struct {
 	*pack.Packer
 	tmpfile *os.File
 	bufWr   *bufio.Writer
+	hashWr  *hashing.Writer
 }
 
 // packerManager keeps a list of open packs and creates new on demand.
@@ -37,6 +38,7 @@ type packerManager struct {
 	pm       sync.Mutex
 	packers  []*packer
 	packSize uint
+	hashOnWrite bool
 }
 
 const defaultPackerCount = 2
@@ -62,11 +64,13 @@ func (r *packerManager) Flush(ctx context.Context) error {
 		return err
 	}
 
-	for _, packer := range pendingPackers {
+	for i, packer := range pendingPackers {
 		debug.Log("manually flushing pending pack")
 		err := r.queueFn(ctx, r.tpe, packer)
 		if err != nil {
-			return err
+			// The queue rejected this pack and every pack after it. They are no
+			// longer present in r.packers, so close their temporary files here.
+			return errors.Join(err, closePackers(pendingPackers[i:]))
 		}
 	}
 	return nil
@@ -76,7 +80,21 @@ func (r *packerManager) Flush(ctx context.Context) error {
 // purpose of this method is to reduce information leaks if a small file is backed up
 // and the blobs end up in separate pack files. If the file only consists of two blobs
 // this would leak the size of the individual blobs.
-func (r *packerManager) mergePackers() ([]*packer, error) {
+func (r *packerManager) mergePackers() (pending []*packer, retErr error) {
+	// A merge error makes the partially merged packers unusable. Keep the
+	// original ownership list so every temporary file is closed if that
+	// transition fails.
+	originalPackers := append([]*packer(nil), r.packers...)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		for i := range r.packers {
+			r.packers[i] = nil
+		}
+		_ = closePackers(originalPackers)
+	}()
+
 	pendingPackers := []*packer{}
 	var p *packer
 	for i, packer := range r.packers {
@@ -102,6 +120,11 @@ func (r *packerManager) mergePackers() ([]*packer, error) {
 			if err != nil {
 				return nil, err
 			}
+			// This packer's payload and blob metadata now belong to p. It is no
+			// longer needed by either the manager or the uploader.
+			if err := closePacker(packer); err != nil {
+				return nil, err
+			}
 		} else {
 			pendingPackers = append(pendingPackers, p)
 			p = packer
@@ -111,6 +134,21 @@ func (r *packerManager) mergePackers() ([]*packer, error) {
 		pendingPackers = append(pendingPackers, p)
 	}
 	return pendingPackers, nil
+}
+
+func closePacker(p *packer) error {
+	if p == nil || p.tmpfile == nil {
+		return nil
+	}
+	return errors.Wrap(p.tmpfile.Close(), "close tempfile")
+}
+
+func closePackers(packers []*packer) error {
+	var err error
+	for _, p := range packers {
+		err = errors.Join(err, closePacker(p))
+	}
+	return err
 }
 
 func (r *packerManager) SaveBlob(ctx context.Context, t restic.BlobType, id restic.ID, ciphertext []byte, uncompressedLength int) (int, error) {
@@ -126,7 +164,8 @@ func (r *packerManager) SaveBlob(ctx context.Context, t restic.BlobType, id rest
 	// Add only appends bytes in memory to avoid being a scaling bottleneck
 	size, err := packer.Add(t, id, ciphertext, uncompressedLength)
 	if err != nil {
-		return 0, err
+		r.forgetPacker(packer)
+		return 0, errors.Join(err, closePacker(packer))
 	}
 
 	// if the pack and header is not full enough, put back to the list
@@ -142,7 +181,7 @@ func (r *packerManager) SaveBlob(ctx context.Context, t restic.BlobType, id rest
 	// else write the pack to the backend
 	err = r.queueFn(ctx, t, packer)
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(err, closePacker(packer))
 	}
 
 	return size + packer.HeaderOverhead(), nil
@@ -206,12 +245,19 @@ func (r *packerManager) newPacker() (pck *packer, err error) {
 		return nil, errors.WithStack(err)
 	}
 
-	bufWr := bufio.NewWriter(tmpfile)
+	var hashWr *hashing.Writer
+	var wr io.Writer = tmpfile
+	if r.hashOnWrite {
+		hashWr = hashing.NewWriter(tmpfile, sha256.New())
+		wr = hashWr
+	}
+	bufWr := bufio.NewWriter(wr)
 	p := pack.NewPacker(r.key, bufWr)
 	pck = &packer{
 		Packer:  p,
 		tmpfile: tmpfile,
 		bufWr:   bufWr,
+		hashWr:  hashWr,
 	}
 
 	return pck, nil
@@ -219,6 +265,13 @@ func (r *packerManager) newPacker() (pck *packer, err error) {
 
 // savePacker stores p in the backend.
 func (r *Repository) savePacker(ctx context.Context, t restic.BlobType, p *packer) error {
+	closed := false
+	defer func() {
+		if !closed {
+			_ = closePacker(p)
+		}
+	}()
+
 	debug.Log("save packer for %v with %d blobs (%d bytes)\n", t, p.Packer.Count(), p.Packer.Size())
 	err := p.Packer.Finalize()
 	if err != nil {
@@ -229,31 +282,37 @@ func (r *Repository) savePacker(ctx context.Context, t restic.BlobType, p *packe
 		return err
 	}
 
-	// calculate sha256 hash in a second pass
-	var rd io.Reader
-	rd, err = backend.NewFileReader(p.tmpfile, nil)
-	if err != nil {
-		return err
-	}
 	beHasher := r.be.Hasher()
-	var beHr *hashing.Reader
-	if beHasher != nil {
-		beHr = hashing.NewReader(rd, beHasher)
-		rd = beHr
-	}
-
-	hr := hashing.NewReader(rd, sha256.New())
-	_, err = io.Copy(io.Discard, hr)
-	if err != nil {
-		return err
-	}
-
-	id := restic.IDFromHash(hr.Sum(nil))
-	h := backend.Handle{Type: backend.PackFile, Name: id.String(), IsMetadata: t.IsMetadata()}
 	var beHash []byte
-	if beHr != nil {
-		beHash = beHr.Sum(nil)
+	var id restic.ID
+	if p.hashWr != nil && beHasher == nil {
+		// The writer has seen every finalized pack byte, including the header.
+		id = restic.IDFromHash(p.hashWr.Sum(nil))
+	} else {
+		// Backends with their own checksum still need the upload hash. Compute
+		// both checksums while reading, as before.
+		var rd io.Reader
+		rd, err = backend.NewFileReader(p.tmpfile, nil)
+		if err != nil {
+			return err
+		}
+		var beHr *hashing.Reader
+		if beHasher != nil {
+			beHr = hashing.NewReader(rd, beHasher)
+			rd = beHr
+		}
+
+		hr := hashing.NewReader(rd, sha256.New())
+		_, err = io.Copy(io.Discard, hr)
+		if err != nil {
+			return err
+		}
+		id = restic.IDFromHash(hr.Sum(nil))
+		if beHr != nil {
+			beHash = beHr.Sum(nil)
+		}
 	}
+	h := backend.Handle{Type: backend.PackFile, Name: id.String(), IsMetadata: t.IsMetadata()}
 	rrd, err := backend.NewFileReader(p.tmpfile, beHash)
 	if err != nil {
 		return err
@@ -267,9 +326,10 @@ func (r *Repository) savePacker(ctx context.Context, t restic.BlobType, p *packe
 
 	debug.Log("saved as %v", h)
 
-	err = p.tmpfile.Close()
+	err = closePacker(p)
+	closed = true
 	if err != nil {
-		return errors.Wrap(err, "close tempfile")
+		return err
 	}
 
 	// update blobs in the index

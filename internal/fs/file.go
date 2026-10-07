@@ -13,6 +13,12 @@ func MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(fixpath(path), perm)
 }
 
+// Mkdir creates a directory named path. Unlike MkdirAll, it fails if path
+// already exists.
+func Mkdir(path string, perm os.FileMode) error {
+	return os.Mkdir(fixpath(path), perm)
+}
+
 // Remove removes the named file or directory.
 // If there is an error, it will be of type *PathError.
 func Remove(name string) error {
@@ -48,6 +54,17 @@ func Lstat(name string) (os.FileInfo, error) {
 // If there is an error, it will be of type *PathError.
 func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
 	return os.OpenFile(fixpath(name), sanitizeFlags(flag), perm)
+}
+
+// OpenRegularFileNoPoller opens a file for synchronous regular-file I/O
+// without registering it with the runtime poller. The opened path can refer
+// to a different file type than an earlier Stat observed, so callers must
+// immediately call Stat and confirm that the result is regular before doing
+// any I/O. In particular, callers must not rely on deadline support for the
+// returned file. Use OpenFile when the file type is not checked this way.
+func OpenRegularFileNoPoller(name string, flag int, perm os.FileMode) (*os.File, error) {
+	f, _, err := openFileNoPoller(fixpath(name), sanitizeFlags(flag), perm, false)
+	return f, err
 }
 
 // IsAccessDenied checks if the error is due to permission error.

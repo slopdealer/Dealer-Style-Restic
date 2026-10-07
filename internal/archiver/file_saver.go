@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/restic/chunker"
 	"github.com/restic/restic/internal/data"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
@@ -16,10 +17,19 @@ import (
 
 const chunkReadBufSize = 512 * 1024 // matches chunker internal read buffer size
 
+type knownBlobSaverAsync interface {
+	LookupStoredBlobSize(bh restic.BlobHandle) (uint, bool)
+	SaveKnownBlobAsync(ctx context.Context, id restic.ID, cb func(newID restic.ID, known bool, sizeInRepo int, err error))
+}
+
 // fileSaver concurrently saves incoming files to the repo.
 type fileSaver struct {
-	saveFilePool *bufferPool
-	uploader     restic.BlobSaverAsync
+	saveFilePool  *bufferPool
+	smallFilePool *bufferPool
+	uploader      restic.BlobSaverAsync
+	knownSaver    knownBlobSaverAsync
+	hashBuffers   chan []byte
+	pairHashes    *parentPairHashLane
 
 	chunkerFactory restic.ChunkerFactory
 
@@ -38,11 +48,20 @@ func newFileSaver(ctx context.Context, wg *errgroup.Group, uploader restic.BlobS
 
 	s := &fileSaver{
 		uploader:       uploader,
-		saveFilePool:   newBufferPool(chunkerFactory.MaxChunkSize()),
+		saveFilePool:   newBufferPool(min(2*1024*1024, chunkerFactory.MaxChunkSize())),
+		smallFilePool:  newBufferPool(min(64*1024, chunkerFactory.MaxChunkSize())),
 		chunkerFactory: chunkerFactory,
 		ch:             ch,
 
 		CompleteBlob: func(uint64) {},
+	}
+	if knownSaver, ok := uploader.(knownBlobSaverAsync); ok {
+		s.knownSaver = knownSaver
+		if fileWorkers > 0 {
+			s.pairHashes = &parentPairHashLane{active: make(chan struct{}, 1)}
+			s.hashBuffers = make(chan []byte, 1)
+			s.hashBuffers <- nil // allocate only on the first admitted chunk
+		}
 	}
 
 	for range fileWorkers {
@@ -67,11 +86,16 @@ type fileCompleteFunc func(*data.Node, ItemStats)
 // successfully. complete is always called. If completeReading is called, then
 // this will always happen before calling complete. The callbacks must not block.
 func (s *fileSaver) Save(ctx context.Context, snPath string, target string, file fs.File, start func(), completeReading func(), complete fileCompleteFunc) futureNode {
+	return s.saveWithParent(ctx, snPath, target, file, nil, start, completeReading, complete)
+}
+
+func (s *fileSaver) saveWithParent(ctx context.Context, snPath string, target string, file fs.File, parent *data.Node, start func(), completeReading func(), complete fileCompleteFunc) futureNode {
 	fn, ch := newFutureNode()
 	job := saveFileJob{
 		snPath: snPath,
 		target: target,
 		file:   file,
+		parent: parent,
 		ch:     ch,
 
 		start:           start,
@@ -94,6 +118,7 @@ type saveFileJob struct {
 	snPath string
 	target string
 	file   fs.File
+	parent *data.Node
 	ch     chan<- futureNodeResult
 
 	start           func()
@@ -106,6 +131,11 @@ type fileChunkState struct {
 	bpos    uint
 	bmax    uint
 	closed  bool
+	guided  *parentCutReader
+	ctx     context.Context
+	chunkID restic.ID
+	hashed  bool
+	ordinaryHashes *parentPairHashLane
 }
 
 func (s *fileChunkState) reset() {
@@ -117,6 +147,17 @@ func (s *fileChunkState) reset() {
 // readNextChunk reads from rd and returns the next chunk of data. io.EOF is
 // returned when all chunks have been read.
 func (s *fileChunkState) readNextChunk(rd io.Reader, chnker restic.Chunker, data []byte) ([]byte, error) {
+	s.hashed = false
+	if s.guided != nil {
+		return s.guided.read(s.ctx, s, rd, chnker, data)
+	}
+	if s.ordinaryHashes != nil {
+		return s.readNextChunkHashed(rd, chnker, data)
+	}
+	return s.readNextChunkOrdinary(rd, chnker, data)
+}
+
+func (s *fileChunkState) readNextChunkOrdinary(rd io.Reader, chnker restic.Chunker, data []byte) ([]byte, error) {
 	data = data[:0]
 	for {
 		if s.bpos >= s.bmax {
@@ -165,6 +206,10 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 		target: target,
 	}
 	var lock sync.Mutex
+	var hashing sync.WaitGroup
+	// Reading failures must also join jobs that still refer to this file's
+	// completion state. Jobs submit uploads, but never wait for their callbacks.
+	defer hashing.Wait()
 	remaining := 0
 	isCompleted := false
 
@@ -220,30 +265,41 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 	chnker.Reset()
 	chunkState.reset()
 
+	// Size is only a reservation hint. The chunker and actual EOF still decide
+	// content. Two stable sizes avoid discarding a buffer on every file-size
+	// transition. Overflow belongs to this file and is released at its end.
+	pool := s.saveFilePool
+	if node.Size <= uint64(s.smallFilePool.defaultSize) {
+		pool = s.smallFilePool
+	}
+	buf := pool.Get()
+	defer buf.Release()
+	if g := chunkState.guided; g != nil {
+		defer g.reclaim(buf)
+	}
+
 	node.Content = []restic.ID{}
 	node.Size = 0
 	var idx int
 	for {
-		buf := s.saveFilePool.Get()
 		chunkData, err := chunkState.readNextChunk(f, chnker, buf.Data)
 		if err == io.EOF {
-			buf.Release()
 			break
 		}
 		if err != nil {
-			buf.Release()
 			_ = f.Close()
 			completeError(err)
 			return
 		}
 
-		// put result buffer back for later reuse
+		// The assembly remains private to this file. Uploaders receive only the
+		// detached payload below, so the next chunk may reuse this storage.
 		buf.Data = chunkData
-		node.Size += uint64(len(chunkData))
+		chunkSize := len(chunkData)
+		node.Size += uint64(chunkSize)
 
 		// test if the context has been cancelled, return the error
 		if ctx.Err() != nil {
-			buf.Release()
 			_ = f.Close()
 			completeError(ctx.Err())
 			return
@@ -256,8 +312,7 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 		node.Content = append(node.Content, restic.ID{})
 		lock.Unlock()
 
-		s.uploader.SaveBlobAsync(ctx, restic.DataBlob, chunkData, restic.ID{}, false, func(newID restic.ID, known bool, sizeInRepo int, err error) {
-			defer buf.Release()
+		completeChunk := func(newID restic.ID, known bool, sizeInRepo int, err error) {
 			if err != nil {
 				completeError(err)
 				return
@@ -266,14 +321,22 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 			lock.Lock()
 			if !known {
 				fnr.stats.DataBlobs++
-				fnr.stats.DataSize += uint64(len(chunkData))
+				fnr.stats.DataSize += uint64(chunkSize)
 				fnr.stats.DataSizeInRepo += uint64(sizeInRepo)
 			}
 			node.Content[pos] = newID
 			lock.Unlock()
 
 			completeBlob()
-		})
+		}
+		zero := s.knownSaver != nil && chunkSize == chunker.MinSize && restic.ZeroPrefixLen(chunkData) == chunker.MinSize
+		if chunkState.hashed {
+			s.saveChunkWithID(ctx, chunkData, chunkState.chunkID, completeChunk)
+		} else if !zero && s.tryHashChunk(ctx, chunkData, completeChunk, &hashing) {
+			// The bounded worker owns a copy, including through unknown uploads.
+		} else {
+			s.saveChunkInline(ctx, chunkData, zero, completeChunk)
+		}
 		idx++
 
 		// test if the context has been cancelled, return the error
@@ -283,7 +346,7 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 			return
 		}
 
-		s.CompleteBlob(uint64(len(chunkData)))
+		s.CompleteBlob(uint64(chunkSize))
 	}
 
 	err = f.Close()
@@ -292,8 +355,10 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 		return
 	}
 
-	fnr.node = node
+	// No job may start using completion state after the EOF settlement below.
+	hashing.Wait()
 	lock.Lock()
+	fnr.node = node
 	// require one additional completeFuture() call to ensure that the future only completes
 	// after reaching the end of this method
 	remaining += idx + 1
@@ -318,6 +383,12 @@ func (s *fileSaver) worker(ctx context.Context, jobs <-chan saveFileJob) {
 			}
 		}
 
+		chunkState.guided = nil
+		chunkState.ctx = ctx
+		chunkState.ordinaryHashes = s.pairHashes
+		if job.parent != nil && len(job.parent.Content) >= 3 && s.knownSaver != nil {
+			chunkState.guided = &parentCutReader{parent: job.parent, lookup: s.knownSaver.LookupStoredBlobSize, factory: s.chunkerFactory, hashes: s.pairHashes}
+		}
 		s.saveFile(ctx, chnker, chunkState, job.snPath, job.target, job.file, job.start, func() {
 			if job.completeReading != nil {
 				job.completeReading()

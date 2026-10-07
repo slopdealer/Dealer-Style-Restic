@@ -45,10 +45,30 @@ var lockerInst = &locker{
 // LockRepo acquires a repository lock. The returned context is cancelled when
 // Unlock is called; cancelling the original context stops lock refresh.
 func LockRepo(ctx context.Context, repo *Repository, exclusive bool, retryLock time.Duration, printRetry func(msg string), logger func(format string, args ...any)) (func(), context.Context, error) {
-	return lockerInst.Lock(ctx, repo, exclusive, retryLock, printRetry, logger)
+	return lockerInst.lockWithWaitWork(ctx, repo, exclusive, retryLock, printRetry, logger, nil)
+}
+
+// LockRepoWithWaitWork acquires a repository lock and starts optional work
+// after each lock file is created. The returned callback is called with true
+// only after the required competing-lock check succeeds. On false, it must
+// finish and discard work started for that attempt before returning.
+func LockRepoWithWaitWork(ctx context.Context, repo *Repository, exclusive bool, retryLock time.Duration, printRetry func(msg string), logger func(format string, args ...any), startWaitWork func(context.Context) func(bool)) (func(), context.Context, error) {
+	return lockerInst.lockWithWaitWork(ctx, repo, exclusive, retryLock, printRetry, logger, startWaitWork)
 }
 
 func (l *locker) Lock(ctx context.Context, r *Repository, exclusive bool, retryLock time.Duration, printRetry func(msg string), logger func(format string, args ...any)) (func(), context.Context, error) {
+	return l.lockWithWaitWork(ctx, r, exclusive, retryLock, printRetry, logger, nil)
+}
+
+func (l *locker) lockWithWaitWork(ctx context.Context, r *Repository, exclusive bool, retryLock time.Duration, printRetry func(msg string), logger func(format string, args ...any), startWaitWork func(context.Context) func(bool)) (func(), context.Context, error) {
+	lockCtx, cancelLockCtx := context.WithCancel(ctx)
+	keepLockCtx := false
+	defer func() {
+		if !keepLockCtx {
+			cancelLockCtx()
+		}
+	}()
+
 	var lock *lockHandle
 	var err error
 
@@ -60,7 +80,7 @@ func (l *locker) Lock(ctx context.Context, r *Repository, exclusive bool, retryL
 
 retryLoop:
 	for {
-		lock, err = newLock(ctx, repo, exclusive)
+		lock, err = newLockWithWaitWork(lockCtx, repo, exclusive, startWaitWork)
 		if err != nil && IsAlreadyLocked(err) {
 
 			if !retryMessagePrinted {
@@ -77,7 +97,7 @@ retryLoop:
 			case <-retryTimeout:
 				debug.Log("repo already locked, timeout expired")
 				// Last lock attempt
-				lock, err = newLock(ctx, repo, exclusive)
+				lock, err = newLockWithWaitWork(lockCtx, repo, exclusive, startWaitWork)
 				break retryLoop
 			case <-retrySleepCh:
 				retrySleep = minDuration(retrySleep*2, l.retrySleepMax)
@@ -95,19 +115,19 @@ retryLoop:
 	}
 	debug.Log("create lock %p (exclusive %v)", lock, exclusive)
 
-	ctx, cancel := context.WithCancel(ctx)
 	unlocker := &unlocker{
 		lock:   lock,
-		cancel: cancel,
+		cancel: cancelLockCtx,
 	}
 	unlocker.refreshWG.Add(2)
 	refreshChan := make(chan struct{})
 	forceRefreshChan := make(chan refreshLockRequest)
 
-	go l.refreshLocks(ctx, repo.be, unlocker, refreshChan, forceRefreshChan, logger)
-	go l.monitorLockRefresh(ctx, unlocker, refreshChan, forceRefreshChan, logger)
+	go l.refreshLocks(lockCtx, repo.be, unlocker, refreshChan, forceRefreshChan, logger)
+	go l.monitorLockRefresh(lockCtx, unlocker, refreshChan, forceRefreshChan, logger)
 
-	return unlocker.Unlock, ctx, nil
+	keepLockCtx = true
+	return unlocker.Unlock, lockCtx, nil
 }
 
 func minDuration(a, b time.Duration) time.Duration {

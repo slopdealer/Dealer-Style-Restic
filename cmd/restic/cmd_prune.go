@@ -176,11 +176,22 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	}
 
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun && gopts.NoLock, printer)
+	var indexLoad *repositoryIndexLoad
+	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, opts.DryRun && gopts.NoLock, printer, func(ctx context.Context, repo *repository.Repository) func(bool) {
+		indexLoad = startRepositoryIndexLoad(ctx, repo)
+		return indexLoad.settle
+	})
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if indexLoad != nil {
+		defer func() {
+			if !indexLoad.used {
+				indexLoad.discard()
+			}
+		}()
+	}
 
 	if opts.UnsafeNoSpaceRecovery != "" {
 		repoID := repo.Config().ID
@@ -190,16 +201,25 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 		opts.unsafeRecovery = true
 	}
 
-	return runPruneWithRepo(ctx, opts, gopts, repo, restic.NewIDSet(), printer)
+	return runPruneWithRepoAndIndexLoad(ctx, opts, gopts, repo, restic.NewIDSet(), printer, indexLoad)
 }
 
 func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots restic.IDSet, printer restic.Printer) error {
+	return runPruneWithRepoAndIndexLoad(ctx, opts, gopts, repo, ignoreSnapshots, printer, nil)
+}
+
+func runPruneWithRepoAndIndexLoad(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots restic.IDSet, printer restic.Printer, indexLoad *repositoryIndexLoad) error {
 	if repo.Cache() == nil && !gopts.JSON {
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}
 
 	// loading the index before the snapshots is ok, as we use an exclusive lock here
-	err := repo.LoadIndex(ctx, printer)
+	var err error
+	if indexLoad != nil {
+		err = indexLoad.consume(printer)
+	} else {
+		err = repo.LoadIndex(ctx, printer)
+	}
 	if err != nil {
 		return err
 	}

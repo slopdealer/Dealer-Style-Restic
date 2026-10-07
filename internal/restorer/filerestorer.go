@@ -36,8 +36,12 @@ type fileBlobInfo struct {
 
 // information about a data pack required to restore one or more files
 type packInfo struct {
-	id    restic.ID              // the pack id
-	files map[*fileInfo]struct{} // set of files that use blobs from this pack
+	id              restic.ID              // the pack id
+	files           map[*fileInfo]struct{} // set of files that use blobs from this pack
+	largeNeededBlob bool
+	// set by restoreFiles only: files holds exactly the files with an
+	// unmatched blob whose first index entry is this pack
+	associationsPlanned bool
 }
 
 type blobsLoaderFn func(ctx context.Context, packID restic.ID, blobs []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error
@@ -51,17 +55,20 @@ type fileRestorer struct {
 	startWarmup startWarmupFn
 
 	workerCount int
-	filesWriter *filesWriter
-	zeroChunk   restic.ID
-	sparse      bool
-	progress    ProgressReporter
+	// one ordinary worker more than configured may run (ordinary_extra_worker.go)
+	additionalWorker bool
+	filesWriter      *filesWriter
+	zeroChunk        restic.ID
+	sparse           bool
+	progress         ProgressReporter
 
 	allowRecursiveDelete bool
 
-	dst   string
-	files []*fileInfo
-	Error func(string, error) error
-	Info  func(string)
+	dst     string
+	files   []*fileInfo
+	errorMu sync.Mutex
+	Error   func(string, error) error
+	Info    func(string)
 }
 
 func newFileRestorer(dst string,
@@ -157,13 +164,17 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 			pack, ok := packs[packID]
 			if !ok {
 				pack = &packInfo{
-					id:    packID,
-					files: make(map[*fileInfo]struct{}),
+					id:                  packID,
+					files:               make(map[*fileInfo]struct{}),
+					associationsPlanned: true,
 				}
 				packs[packID] = pack
 				packOrder = append(packOrder, packID)
 			}
 			pack.files[file] = struct{}{}
+			if !restic.BoundedRestoreBlob(blob.PlaintextLength(), blob.CiphertextLength(), blob.IsCompressed()) {
+				pack.largeNeededBlob = true
+			}
 			if blob.Handle().ID.Equal(r.zeroChunk) {
 				file.sparse = r.sparse
 			}
@@ -219,28 +230,84 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 
 	// close all files when finished
 	defer r.filesWriter.flush()
-	worker := func() error {
-		for pack := range downloadCh {
-			if err := r.downloadPack(ctx, pack); err != nil {
-				return err
-			}
+	extraCh := make(chan *packInfo)
+	// Ordinary allocation permits also cover exceptional duplicate recovery by
+	// the bounded worker. Acquisition observes cancellation.
+	ordinaryWorkers := r.workerCount
+	if r.additionalWorker {
+		ordinaryWorkers += extraOrdinaryRestoreWorkers(r.workerCount)
+	}
+	permits := make(chan struct{}, ordinaryWorkers)
+	// Without an additional worker there is no budget and the pack streams are
+	// exactly the configured workers' streams as before.
+	var holdBudget restic.RestoreHoldBudget
+	if ordinaryWorkers > r.workerCount {
+		holdBudget = newOrdinaryRestoreHoldBudget(r.workerCount)
+	}
+	acquire := func(ctx context.Context) (func(), error) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		return nil
+		select {
+		case permits <- struct{}{}:
+			if ctx.Err() != nil {
+				<-permits
+				return nil, ctx.Err()
+			}
+			return func() { <-permits }, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	for i := 0; i < r.workerCount; i++ {
-		wg.Go(worker)
+	worker := func(ch <-chan *packInfo, bounded, additional bool) func() error {
+		return func() error {
+			for pack := range ch {
+				workCtx := ctx
+				release := func() {}
+				if bounded {
+					workCtx = restic.WithSmallRestoreLoad(ctx, acquire)
+				} else {
+					var err error
+					if holdBudget != nil {
+						// The repository puts these streams on the backend's additional load slot.
+						workCtx = context.WithValue(ctx, restic.RestoreHoldKey{}, restic.RestoreHoldUse{Budget: holdBudget, Wait: additional})
+					}
+					release, err = acquire(ctx)
+					if err != nil {
+						return err
+					}
+				}
+				err := r.downloadPack(workCtx, pack)
+				release()
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 	}
+	for i := 0; i < ordinaryWorkers; i++ {
+		wg.Go(worker(downloadCh, false, i >= r.workerCount))
+	}
+	wg.Go(worker(extraCh, true, false))
 
 	// the main restore loop
 	wg.Go(func() error {
 		defer close(downloadCh)
+		defer close(extraCh)
 		for _, id := range packOrder {
 			pack := packs[id]
 			// allow garbage collection of packInfo
 			delete(packs, id)
+			var boundedCh chan *packInfo
+			if !pack.largeNeededBlob {
+				boundedCh = extraCh
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
+			case boundedCh <- pack:
+				debug.Log("Scheduled bounded download pack %s", pack.id.Str())
 			case downloadCh <- pack:
 				debug.Log("Scheduled download pack %s", pack.id.Str())
 			}
@@ -275,9 +342,13 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 				blobInfo.blob = blob
 				blobs[blob.ID] = blobInfo
 			}
-			blobInfo.files[file] = append(blobInfo.files[file], fileOffset)
+			blobInfo.files[file] = appendRestoreOffset(blobInfo.files[file], fileOffset)
 		}
 		if fileBlobs, ok := file.blobs.(restic.IDs); ok {
+			if blob, ok := plannedSingleton(pack, fileBlobs); ok {
+				addBlob(blob, 0)
+				continue
+			}
 			err := r.forEachBlob(fileBlobs, func(blob restic.PackBlob, idx int, fileOffset int64) {
 				if blob.PackID().Equal(pack.id) && !file.state.HasMatchingBlob(idx) {
 					addBlob(blob.Handle(), fileOffset)
@@ -300,6 +371,10 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 		}
 	}
 
+	// The mapping now owns every association needed by callbacks and error
+	// reporting. The planning set has no further consumer in this worker.
+	pack.files = nil
+
 	// track already processed blobs for precise error reporting
 	processedBlobs := restic.NewBlobSet()
 	err := r.downloadBlobs(ctx, pack.id, blobs, processedBlobs)
@@ -312,6 +387,10 @@ func (r *fileRestorer) sanitizeError(file *fileInfo, err error) error {
 		// Context errors are permanent.
 		return err
 	default:
+		// Command error callbacks include unsynchronized counters. Data workers
+		// must serialize callback ownership, including the bounded worker.
+		r.errorMu.Lock()
+		defer r.errorMu.Unlock()
 		return r.Error(file.location, err)
 	}
 }
@@ -351,6 +430,10 @@ func (r *fileRestorer) downloadBlobs(ctx context.Context, packID restic.ID,
 		func(h restic.BlobHandle, blobData []byte, err error) error {
 			processedBlobs.Insert(h)
 			blob := blobs[h.ID]
+			// The loader calls once per blob. Settle writes, diagnostics and
+			// progress before retiring its associations, including error returns.
+			// reportError already excludes every callback-settled blob.
+			defer delete(blobs, h.ID)
 			if err != nil {
 				for file := range blob.files {
 					if errFile := r.sanitizeError(file, err); errFile != nil {

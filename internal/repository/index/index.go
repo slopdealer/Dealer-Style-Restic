@@ -150,6 +150,7 @@ func (idx *Index) Preallocate(t restic.BlobType, numEntries int) {
 	defer idx.m.Unlock()
 
 	idx.byType[t].preallocate(numEntries)
+	idx.byType[t].reserveIndexSlots(numEntries)
 }
 
 // StorePack remembers the ids of all blobs of a given pack
@@ -369,28 +370,132 @@ func (idx *Index) Encode(w io.Writer) error {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
-	list, err := idx.generatePackList()
-	if err != nil {
-		return err
+	// Keep only references for the complete index. Materialize blobJSON values
+	// for one pack at a time so SaveIndex doesn't overlap its output buffer with
+	// a second full-index representation.
+	type packEntries struct {
+		id     restic.ID
+		byType [restic.NumBlobTypes][]*indexEntry
 	}
 
-	enc := json.NewEncoder(w)
-	idxJSON := jsonIndex{
-		Packs: list,
+	byPack := make(map[restic.ID]*packEntries, len(idx.packs))
+	ordered := make([]*packEntries, 0, len(idx.packs))
+	for typ := range idx.byType {
+		m := &idx.byType[typ]
+		for e := range m.values() {
+			packID := idx.packs[e.packIndex]
+			if packID.IsNull() {
+				panic("null pack id")
+			}
+
+			entries := byPack[packID]
+			if entries == nil {
+				entries = &packEntries{id: packID}
+				byPack[packID] = entries
+				ordered = append(ordered, entries)
+			}
+			entries.byType[typ] = append(entries.byType[typ], e)
+		}
 	}
-	return enc.Encode(idxJSON)
+
+	if err := writeIndexBytes(w, []byte(`{"packs":[`)); err != nil {
+		return err
+	}
+	packWriter := &jsonPackWriter{w: w, first: true}
+	enc := json.NewEncoder(packWriter)
+	blobs := make([]blobJSON, 0)
+	for _, entries := range ordered {
+		for typ, typedEntries := range entries.byType {
+			for _, e := range typedEntries {
+				blobs = append(blobs, blobJSON{
+					ID:                 e.id,
+					Type:               restic.BlobType(typ),
+					Offset:             uint(e.offset),
+					Length:             uint(e.length),
+					UncompressedLength: uint(e.uncompressedLength),
+				})
+			}
+		}
+
+		if err := enc.Encode(packJSON{ID: entries.id, Blobs: blobs}); err != nil {
+			return err
+		}
+		blobs = blobs[:0]
+		for typ := range entries.byType {
+			entries.byType[typ] = nil
+		}
+		delete(byPack, entries.id)
+	}
+
+	return writeIndexBytes(w, []byte("]}\n"))
+}
+
+// jsonPackWriter removes the newline from each json.Encoder.Encode call and
+// separates the encoded packs with commas inside the surrounding packs array.
+type jsonPackWriter struct {
+	w     io.Writer
+	first bool
+}
+
+func (w *jsonPackWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	inputLen := len(p)
+
+	if !w.first {
+		if err := writeIndexBytes(w.w, []byte(",")); err != nil {
+			return 0, err
+		}
+	}
+	if p[len(p)-1] == '\n' {
+		p = p[:len(p)-1]
+	}
+	if err := writeIndexBytes(w.w, p); err != nil {
+		return 0, err
+	}
+	w.first = false
+	return inputLen, nil
+}
+
+func writeIndexBytes(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if n < 0 || n > len(p) {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+// indexStreamSaver is implemented by repository backends that can compress an
+// index while it is being encoded. Keep the regular SaverUnpacked interface as
+// a fallback for callers that only provide the byte-slice API.
+type indexStreamSaver interface {
+	SaveIndexStream(context.Context, func(io.Writer) error) (restic.ID, error)
 }
 
 // SaveIndex saves an index in the repository.
 func (idx *Index) SaveIndex(ctx context.Context, repo restic.SaverUnpacked[restic.FileType]) (restic.ID, error) {
-	buf := bytes.NewBuffer(nil)
-
-	err := idx.Encode(buf)
-	if err != nil {
-		return restic.ID{}, err
+	var id restic.ID
+	var err error
+	if saver, ok := repo.(indexStreamSaver); ok {
+		id, err = saver.SaveIndexStream(ctx, idx.Encode)
+	} else {
+		buf := bytes.NewBuffer(nil)
+		if err := idx.Encode(buf); err != nil {
+			return restic.ID{}, err
+		}
+		id, err = repo.SaveUnpacked(ctx, restic.IndexFile, buf.Bytes())
 	}
 
-	id, err := repo.SaveUnpacked(ctx, restic.IndexFile, buf.Bytes())
 	ierr := idx.SetID(id)
 	if ierr != nil {
 		// logic bug
@@ -497,24 +602,9 @@ func (idx *Index) merge(idx2 *Index) error {
 		m2 := &idx2.byType[typ]
 		m := &idx.byType[typ]
 
-		// helper func to test if identical entry is contained in idx
-		hasIdenticalEntry := func(e2 *indexEntry) (found bool) {
-			for e := range m.valuesWithID(e2.id) {
-				b := idx.toPackedBlob(e, restic.BlobType(typ))
-				b2 := idx2.toPackedBlob(e2, restic.BlobType(typ))
-				if *b == *b2 {
-					found = true
-					break
-				}
-			}
-			return found
-		}
-
 		for e2 := range m2.values() {
-			if !hasIdenticalEntry(e2) {
-				// packIndex needs to be changed as idx2.pack was appended to idx.pack, see above
-				m.add(e2.id, e2.packIndex+uint32(packlen), e2.offset, e2.length, e2.uncompressedLength)
-			}
+			// The appended pack table resolves both existing and incoming entries.
+			m.addIfMissing(e2, e2.packIndex+uint32(packlen), idx.packs)
 		}
 	}
 
@@ -535,6 +625,28 @@ func DecodeIndex(buf []byte, id restic.ID) (idx *Index, err error) {
 	}
 
 	idx = NewIndex()
+	// The typed document already determines the destination sizes. Reserve
+	// before insertion to avoid rehashing entries as this per-file table grows.
+	// Malformed types and lengths retain the original insertion-time panic order.
+	var counts [restic.NumBlobTypes]int
+	canReserve := uint64(len(idxJSON.Packs)) <= math.MaxUint32
+	for _, p := range idxJSON.Packs {
+		for _, blob := range p.Blobs {
+			if blob.Type >= restic.NumBlobTypes || blob.Offset > math.MaxUint32 || blob.Length > math.MaxUint32 || blob.UncompressedLength > math.MaxUint32 {
+				canReserve = false
+				continue
+			}
+			counts[blob.Type]++
+		}
+	}
+	if canReserve {
+		for typ, count := range counts {
+			idx.byType[typ].preallocate(count)
+		}
+		if len(idxJSON.Packs) > 0 {
+			idx.packs = make(restic.IDs, 0, len(idxJSON.Packs))
+		}
+	}
 	for _, p := range idxJSON.Packs {
 		packID := idx.addToPacks(p.ID)
 

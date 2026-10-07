@@ -7,7 +7,6 @@ import (
 	"github.com/restic/restic/internal/errors"
 
 	sscrypt "github.com/elithrar/simple-scrypt"
-	"golang.org/x/crypto/scrypt"
 )
 
 const saltLength = 64
@@ -71,7 +70,7 @@ func KDF(p Params, salt []byte, password string) (*Key, error) {
 	derKeys := &Key{}
 
 	keybytes := macKeySize + aesKeySize
-	scryptKeys, err := scrypt.Key([]byte(password), salt, p.N, p.R, p.P, keybytes)
+	scryptKeys, err := parallelScryptKey([]byte(password), salt, p.N, p.R, p.P, keybytes)
 	if err != nil {
 		return nil, errors.Wrap(err, "scrypt.Key")
 	}

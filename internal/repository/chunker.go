@@ -6,12 +6,17 @@ import (
 )
 
 type baseChunker struct {
-	bc  *chunker.BaseChunker
-	pol chunker.Pol
+	bc      *chunker.BaseChunker
+	pol     chunker.Pol
+	initial chunker.BaseChunker
 }
 
 func (c *baseChunker) Reset() {
-	c.bc.Reset(c.pol)
+	// BaseChunker contains only value fields and fixed arrays. Keep a private
+	// initialized snapshot so resetting a file neither allocates nor consults
+	// the dependency's global polynomial-table cache. Mutable state remains
+	// private to this worker; no file bytes are retained by the snapshot.
+	*c.bc = c.initial
 }
 
 func (c *baseChunker) NextSplitPoint(buf []byte) int {
@@ -31,7 +36,8 @@ func newChunkerFactory(r *Repository) *chunkerFactory {
 }
 
 func (f *chunkerFactory) NewChunker() restic.Chunker {
-	return &baseChunker{bc: chunker.NewBase(f.pol), pol: f.pol}
+	bc := chunker.NewBase(f.pol)
+	return &baseChunker{bc: bc, pol: f.pol, initial: *bc}
 }
 
 func (f *chunkerFactory) MaxChunkSize() int {
@@ -43,5 +49,5 @@ func (f *chunkerFactory) ZeroChunk() restic.ID {
 }
 
 func (r *Repository) ChunkerFactory() restic.ChunkerFactory {
-	return newChunkerFactory(r)
+	return newSegmentedChunkerFactory(newChunkerFactory(r))
 }

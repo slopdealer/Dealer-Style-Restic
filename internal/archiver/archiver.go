@@ -96,10 +96,11 @@ type Archiver struct {
 	FS           fs.FS
 	Options      Options
 
-	fileSaver *fileSaver
-	treeSaver *treeSaver
-	mu        sync.Mutex
-	summary   *Summary
+	fileSaver   *fileSaver
+	treeSaver   *treeSaver
+	parentTrees parentTreeBudget
+	mu          sync.Mutex
+	summary     *Summary
 
 	// Error is called for all errors that occur during backup.
 	Error ErrorFunc
@@ -281,18 +282,27 @@ func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta toNoder, ig
 // loadSubtree tries to load the subtree referenced by node. In case of an error, nil is returned.
 // If there is no node to load, then nil is returned without an error.
 func (arch *Archiver) loadSubtree(ctx context.Context, node *data.Node) (data.TreeNodeIterator, error) {
+	tree, _, err := arch.loadSubtreeForReuse(ctx, node, false)
+	return tree, err
+}
+
+func (arch *Archiver) loadSubtreeForReuse(ctx context.Context, node *data.Node, retain bool) (data.TreeNodeIterator, *parentTreeBytes, error) {
 	if node == nil || node.Type != data.NodeTypeDir || node.Subtree == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	tree, err := data.LoadTree(ctx, arch.Repo, *node.Subtree)
+	tree, payload, err := data.LoadParentTreeWithPayload(ctx, arch.Repo, *node.Subtree)
 	if err != nil {
 		debug.Log("unable to load tree %v: %v", node.Subtree.Str(), err)
 		// a tree in the repository is not readable -> warn the user
-		return nil, arch.wrapLoadTreeError(*node.Subtree, err)
+		return nil, nil, arch.wrapLoadTreeError(*node.Subtree, err)
 	}
 
-	return tree, nil
+	var parent *parentTreeBytes
+	if retain {
+		parent = arch.parentTrees.retain(*node.Subtree, payload)
+	}
+	return tree, parent, nil
 }
 
 func (arch *Archiver) wrapLoadTreeError(id restic.ID, err error) error {
@@ -307,6 +317,11 @@ func (arch *Archiver) wrapLoadTreeError(id restic.ID, err error) error {
 // saveDir stores a directory in the repo and returns the node. snPath is the
 // path within the current snapshot.
 func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, meta fs.File, previous data.TreeNodeIterator, complete fileCompleteFunc) (d futureNode, err error) {
+	return arch.saveDirWithParent(ctx, snPath, dir, meta, previous, complete, nil)
+}
+
+func (arch *Archiver) saveDirWithParent(ctx context.Context, snPath string, dir string, meta fs.File, previous data.TreeNodeIterator, complete fileCompleteFunc, parent *parentTreeBytes) (d futureNode, err error) {
+	defer func() { parent.release() }()
 	debug.Log("%v %v", snPath, dir)
 
 	treeNode, names, err := arch.dirToNodeAndEntries(snPath, dir, meta)
@@ -316,7 +331,7 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 
 	nodes := make([]futureNode, 0, len(names))
 
-	finder := data.NewTreeFinder(previous)
+	finder := parentTreeFinder(previous, parent)
 	defer finder.Close()
 
 	var lastExcluded string
@@ -362,7 +377,8 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 		nodes = append(nodes, fn)
 	}
 
-	fn := arch.treeSaver.Save(ctx, snPath, dir, treeNode, nodes, complete)
+	fn := arch.treeSaver.saveWithParent(ctx, snPath, dir, treeNode, nodes, complete, parent)
+	parent = nil // the job owns retention now
 
 	return fn, nil
 }
@@ -577,7 +593,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		closeFile = false
 
 		// Save will close the file, we don't need to do that
-		fn = arch.fileSaver.Save(ctx, snPath, target, meta, func() {
+		fn = arch.fileSaver.saveWithParent(ctx, snPath, target, meta, previous, func() {
 			arch.StartFile(snPath)
 		}, func() {
 			arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
@@ -589,7 +605,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		debug.Log("  %v dir", target)
 
 		snItem := snPath + "/"
-		oldSubtree, err := arch.loadSubtree(ctx, previous)
+		oldSubtree, parent, err := arch.loadSubtreeForReuse(ctx, previous, true)
 		if err != nil {
 			err = arch.error(abstarget, err)
 		}
@@ -597,10 +613,10 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 			return futureNode{}, false, err
 		}
 
-		fn, err = arch.saveDir(ctx, snPath, target, meta, oldSubtree,
+		fn, err = arch.saveDirWithParent(ctx, snPath, target, meta, oldSubtree,
 			func(node *data.Node, stats ItemStats) {
 				arch.trackItem(snItem, previous, node, stats, time.Since(start))
-			})
+			}, parent)
 		if err != nil {
 			debug.Log("SaveDir for %v returned error: %v", snPath, err)
 			return futureNode{}, false, err
@@ -666,6 +682,11 @@ func join(elem ...string) string {
 // saveTree stores a Tree in the repo, returned is the tree. snPath is the path
 // within the current snapshot.
 func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, previous data.TreeNodeIterator, complete fileCompleteFunc) (futureNode, int, error) {
+	return arch.saveTreeWithParent(ctx, snPath, atree, previous, complete, nil)
+}
+
+func (arch *Archiver) saveTreeWithParent(ctx context.Context, snPath string, atree *tree, previous data.TreeNodeIterator, complete fileCompleteFunc, parent *parentTreeBytes) (futureNode, int, error) {
+	defer func() { parent.release() }()
 
 	var node *data.Node
 	if snPath != "/" {
@@ -687,7 +708,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 	nodeNames := atree.NodeNames()
 	nodes := make([]futureNode, 0, len(nodeNames))
 
-	finder := data.NewTreeFinder(previous)
+	finder := parentTreeFinder(previous, parent)
 	defer finder.Close()
 
 	// iterate over the nodes of atree in lexicographic (=deterministic) order
@@ -732,7 +753,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 		if err != nil {
 			return futureNode{}, 0, err
 		}
-		oldSubtree, err := arch.loadSubtree(ctx, oldNode)
+		oldSubtree, childParent, err := arch.loadSubtreeForReuse(ctx, oldNode, true)
 		if err != nil {
 			err = arch.error(join(snPath, name), err)
 		}
@@ -741,9 +762,9 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 		}
 
 		// not a leaf node, archive subtree
-		fn, _, err := arch.saveTree(ctx, join(snPath, name), &subatree, oldSubtree, func(n *data.Node, is ItemStats) {
+		fn, _, err := arch.saveTreeWithParent(ctx, join(snPath, name), &subatree, oldSubtree, func(n *data.Node, is ItemStats) {
 			arch.trackItem(snItem, oldNode, n, is, time.Since(start))
-		})
+		}, childParent)
 		if err != nil {
 			err = arch.error(join(snPath, name), err)
 			if err == nil {
@@ -756,7 +777,8 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 		nodes = append(nodes, fn)
 	}
 
-	fn := arch.treeSaver.Save(ctx, snPath, atree.FileInfoPath, node, nodes, complete)
+	fn := arch.treeSaver.saveWithParent(ctx, snPath, atree.FileInfoPath, node, nodes, complete, parent)
+	parent = nil
 	return fn, len(nodes), nil
 }
 
@@ -841,23 +863,30 @@ type SnapshotOptions struct {
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
 func (arch *Archiver) loadParentTree(ctx context.Context, sn *data.Snapshot) data.TreeNodeIterator {
-	if sn == nil {
-		return nil
-	}
+	tree, _ := arch.loadParentTreeForReuse(ctx, sn, false)
+	return tree
+}
 
+func (arch *Archiver) loadParentTreeForReuse(ctx context.Context, sn *data.Snapshot, retain bool) (data.TreeNodeIterator, *parentTreeBytes) {
+	if sn == nil {
+		return nil, nil
+	}
 	if sn.Tree == nil {
 		debug.Log("snapshot %v has empty tree %v", *sn.ID())
-		return nil
+		return nil, nil
 	}
-
 	debug.Log("load parent tree %v", *sn.Tree)
-	tree, err := data.LoadTree(ctx, arch.Repo, *sn.Tree)
+	tree, payload, err := data.LoadParentTreeWithPayload(ctx, arch.Repo, *sn.Tree)
 	if err != nil {
 		debug.Log("unable to load tree %v: %v", *sn.Tree, err)
 		_ = arch.error("/", arch.wrapLoadTreeError(*sn.Tree, err))
-		return nil
+		return nil, nil
 	}
-	return tree
+	var parent *parentTreeBytes
+	if retain {
+		parent = arch.parentTrees.retain(*sn.Tree, payload)
+	}
+	return tree, parent
 }
 
 // runWorkers starts the worker pools, which are stopped when the context is cancelled.
@@ -905,9 +934,10 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 			arch.runWorkers(wgCtx, wg, uploader)
 
 			debug.Log("starting snapshot")
-			fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *data.Node, is ItemStats) {
+			previous, parent := arch.loadParentTreeForReuse(wgCtx, opts.ParentSnapshot, true)
+			fn, nodeCount, err := arch.saveTreeWithParent(wgCtx, "/", atree, previous, func(_ *data.Node, is ItemStats) {
 				arch.trackItem("/", nil, nil, is, time.Since(start))
-			})
+			}, parent)
 			if err != nil {
 				return err
 			}

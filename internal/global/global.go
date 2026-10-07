@@ -308,6 +308,9 @@ func OpenRepository(ctx context.Context, gopts Options, printer restic.Printer) 
 		return nil, err
 	}
 
+	be, finishKeyListing := prepareOpenKeyListing(ctx, be, gopts)
+	defer finishKeyListing()
+
 	err = hasRepositoryConfig(ctx, be, repo, gopts)
 	if err != nil {
 		return nil, err
@@ -318,7 +321,8 @@ func OpenRepository(ctx context.Context, gopts Options, printer restic.Printer) 
 		return nil, err
 	}
 
-	err = decryptRepository(ctx, s, &gopts, printer)
+	listing, _ := be.(*openKeyListing)
+	err = decryptRepositoryWithListing(ctx, s, &gopts, printer, listing)
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +373,10 @@ func createRepositoryInstance(be backend.Backend, gopts Options) (*repository.Re
 
 // decryptRepository handles password reading and decrypts the repository.
 func decryptRepository(ctx context.Context, s *repository.Repository, gopts *Options, printer restic.Printer) error {
+	return decryptRepositoryWithListing(ctx, s, gopts, printer, nil)
+}
+
+func decryptRepositoryWithListing(ctx context.Context, s *repository.Repository, gopts *Options, printer restic.Printer, listing *openKeyListing) error {
 	passwordTriesLeft := 1
 	if gopts.Term.InputIsTerminal() && gopts.Password == "" && !gopts.InsecureNoPassword {
 		passwordTriesLeft = 3
@@ -388,7 +396,7 @@ func decryptRepository(ctx context.Context, s *repository.Repository, gopts *Opt
 			continue
 		}
 
-		err = s.SearchKey(ctx, gopts.Password, maxKeys, gopts.KeyHint)
+		err = searchOpeningKey(ctx, s, gopts.Password, gopts.KeyHint, listing)
 		if err != nil && passwordTriesLeft > 1 {
 			gopts.Password = ""
 			printer.E("%s. Try again", err)
@@ -535,6 +543,10 @@ func parseConfig(backends *location.Registry, s string, opts options.Options) (s
 
 	// only apply options for a particular backend here
 	opts = opts.Extract(loc.Scheme)
+	if cfg, ok := cfg.(interface{ SetAllowAdditionalLoadSlot(bool) }); ok {
+		_, connectionsExplicit := opts["connections"]
+		cfg.SetAllowAdditionalLoadSlot(!connectionsExplicit)
+	}
 	if err := opts.Apply(loc.Scheme, cfg); err != nil {
 		return "", nil, err
 	}

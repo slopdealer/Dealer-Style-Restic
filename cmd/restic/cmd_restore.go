@@ -11,6 +11,7 @@ import (
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/filter"
 	"github.com/restic/restic/internal/global"
+	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/restorer"
 	"github.com/restic/restic/internal/ui"
@@ -146,18 +147,33 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 
 	debug.Log("restore %v to %v", snapshotIDString, opts.Target)
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	var indexLoad *repositoryIndexLoad
+	ctx, repo, unlock, err := openWithReadLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, func(ctx context.Context, repo *repository.Repository) func(bool) {
+		indexLoad = startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
+		return indexLoad.settle
+	})
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if indexLoad != nil {
+		defer func() {
+			if !indexLoad.used {
+				indexLoad.discard()
+			}
+		}()
+	}
 
-	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, repo, repo, snapshotIDString)
+	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, indexLoad.snapshotLister(repo), repo, snapshotIDString)
 	if err != nil {
 		return errors.Fatalf("failed to find snapshot: %v", err)
 	}
 
-	err = repo.LoadIndex(ctx, printer)
+	if indexLoad != nil {
+		err = indexLoad.consume(printer)
+	} else {
+		err = repo.LoadIndex(ctx, printer)
+	}
 	if err != nil {
 		return err
 	}
@@ -237,10 +253,11 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 		res.SelectFilter = selectIncludeFilter
 	}
 
-	res.XattrSelectFilter, err = getXattrSelectFilter(opts, printer)
+	xattrSelectFilter, err := getXattrSelectFilter(opts, printer)
 	if err != nil {
 		return err
 	}
+	res.SetConcurrentXattrSelectFilter(xattrSelectFilter)
 
 	if !gopts.JSON {
 		printer.P("restoring %s to %s\n", res.Snapshot(), opts.Target)

@@ -1,6 +1,7 @@
 package archiver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 
@@ -44,6 +45,10 @@ func (s *treeSaver) TriggerShutdown() {
 
 // Save stores the dir d and returns the data once it has been completed.
 func (s *treeSaver) Save(ctx context.Context, snPath string, target string, node *data.Node, nodes []futureNode, complete fileCompleteFunc) futureNode {
+	return s.saveWithParent(ctx, snPath, target, node, nodes, complete, nil)
+}
+
+func (s *treeSaver) saveWithParent(ctx context.Context, snPath string, target string, node *data.Node, nodes []futureNode, complete fileCompleteFunc, parent *parentTreeBytes) futureNode {
 	fn, ch := newFutureNode()
 	job := saveTreeJob{
 		snPath:   snPath,
@@ -52,10 +57,12 @@ func (s *treeSaver) Save(ctx context.Context, snPath string, target string, node
 		nodes:    nodes,
 		ch:       ch,
 		complete: complete,
+		parent:   parent,
 	}
 	select {
 	case s.ch <- job:
 	case <-ctx.Done():
+		parent.release()
 		debug.Log("not saving tree, context is cancelled")
 		close(ch)
 	}
@@ -64,6 +71,7 @@ func (s *treeSaver) Save(ctx context.Context, snPath string, target string, node
 }
 
 type saveTreeJob struct {
+	parent   *parentTreeBytes
 	snPath   string
 	target   string
 	node     *data.Node
@@ -74,6 +82,7 @@ type saveTreeJob struct {
 
 // save stores the nodes as a tree in the repo.
 func (s *treeSaver) save(ctx context.Context, job *saveTreeJob) (*data.Node, ItemStats, error) {
+	defer func() { job.parent.release() }()
 	var stats ItemStats
 	node := job.node
 	nodes := job.nodes
@@ -81,6 +90,9 @@ func (s *treeSaver) save(ctx context.Context, job *saveTreeJob) (*data.Node, Ite
 	job.nodes = nil
 
 	builder := data.NewTreeJSONBuilder()
+	if job.parent != nil {
+		builder = data.NewTreeJSONBuilderWithReference(job.parent.payload)
+	}
 	var lastNode *data.Node
 
 	for i, fn := range nodes {
@@ -136,13 +148,24 @@ func (s *treeSaver) save(ctx context.Context, job *saveTreeJob) (*data.Node, Ite
 		id         restic.ID
 	)
 
+	// Equality is over the complete emitted bytes, including framing. The normal
+	// save path still decides whether the blob is known and performs verification.
+	var parentID restic.ID
+	if job.parent != nil && bytes.Equal(buf, job.parent.payload) {
+		parentID = job.parent.id
+	}
 	ch := make(chan struct{}, 1)
-	s.uploader.SaveBlobAsync(ctx, restic.TreeBlob, buf, restic.ID{}, false, func(newID restic.ID, cbKnown bool, cbSizeInRepo int, cbErr error) {
+	// Save may outlive this job after cancellation. Transfer the retention
+	// charge to completion because buf can alias the authenticated parent.
+	parent := job.parent
+	job.parent = nil
+	s.uploader.SaveBlobAsync(ctx, restic.TreeBlob, buf, parentID, false, func(newID restic.ID, cbKnown bool, cbSizeInRepo int, cbErr error) {
 		known = cbKnown
 		length = len(buf)
 		sizeInRepo = cbSizeInRepo
 		id = newID
 		err = cbErr
+		parent.release()
 		ch <- struct{}{}
 	})
 

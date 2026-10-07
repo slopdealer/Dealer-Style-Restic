@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 
@@ -120,6 +119,16 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 		return nil, fmt.Errorf("repack-smaller-than exceeds repository packsize")
 	}
 
+	// Compute index-only headers alongside used-tree traversal and counting.
+	// Diagnostics and header errors settle at their original position below.
+	var headers *pruneHeaderSizes
+	var takeHeaders func() (map[restic.ID]int64, error)
+	if !debug.IsEnabled() {
+		headers = startPruneHeaderSizesWithCalculator(ctx, repo.idx.PackHeaderSizes)
+		defer headers.discard()
+		takeHeaders = headers.take
+	}
+
 	usedBlobs := index.NewAssociatedSet[uint8](repo.idx)
 	err := getUsedBlobs(ctx, repo, usedBlobs)
 	if err != nil {
@@ -127,7 +136,7 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 	}
 
 	printer.P("searching used packs...\n")
-	keepBlobs, indexPack, err := packInfoFromIndex(ctx, repo, usedBlobs, &stats, printer)
+	keepBlobs, indexPack, err := packInfoFromIndexWithHeaders(ctx, repo, usedBlobs, &stats, printer, takeHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -141,12 +150,12 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 	if len(plan.repackPacks) != 0 {
 		// when repacking, we do not want to keep blobs which are
 		// already contained in kept packs, so delete them from keepBlobs
-		err := repo.ListBlobs(ctx, func(blob restic.PackBlob) {
+		err := listBlobsWithSlot(ctx, repo, keepBlobs, func(blob restic.PackBlob, slot index.Slot) {
 			packID := blob.PackID()
 			if plan.removePacks.Has(packID) || plan.repackPacks.Has(packID) {
 				return
 			}
-			keepBlobs.Delete(blob.Handle())
+			keepBlobs.DeleteAt(blob.Handle(), slot)
 		})
 		if err != nil {
 			return nil, err
@@ -176,22 +185,18 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 }
 
 func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *index.AssociatedSet[uint8], stats *PruneStats, printer restic.Printer) (*index.AssociatedSet[uint8], map[restic.ID]packInfo, error) {
+	return packInfoFromIndexWithHeaders(ctx, idx, usedBlobs, stats, printer, nil)
+}
+
+func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, usedBlobs *index.AssociatedSet[uint8], stats *PruneStats, printer restic.Printer, takeHeaders func() (map[restic.ID]int64, error)) (*index.AssociatedSet[uint8], map[restic.ID]packInfo, error) {
 	// iterate over all blobs in index to find out which blobs are duplicates
 	// The counter in usedBlobs describes how many instances of the blob exist in the repository index
 	// Thus 0 == blob is missing, 1 == blob exists once, >= 2 == duplicates exist
-	err := idx.ListBlobs(ctx, func(blob restic.PackBlob) {
-		bh := blob.Handle()
-		count, ok := usedBlobs.Get(bh)
-		if ok {
-			if count < math.MaxUint8 {
-				// don't overflow, but saturate count at 255
-				// this can lead to a non-optimal pack selection, but won't cause
-				// problems otherwise
-				count++
-			}
-
-			usedBlobs.Set(bh, count)
-		}
+	err := listBlobsWithSlot(ctx, idx, usedBlobs, func(blob restic.PackBlob, slot index.Slot) {
+		// don't overflow, but saturate count at 255
+		// this can lead to a non-optimal pack selection, but won't cause
+		// problems otherwise
+		index.IncrementAssociatedCountAt(usedBlobs, blob.Handle(), slot)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -218,7 +223,12 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 	indexPack := make(map[restic.ID]packInfo)
 
 	// save computed pack header size
-	sz, err := pack.Size(ctx, idx, true)
+	var sz map[restic.ID]int64
+	if takeHeaders == nil {
+		sz, err = pack.Size(ctx, idx, true)
+	} else {
+		sz, err = takeHeaders()
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -229,7 +239,7 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 
 	hasDuplicates := false
 	// iterate over all blobs in index to generate packInfo
-	err = idx.ListBlobs(ctx, func(blob restic.PackBlob) {
+	err = listBlobsWithSlot(ctx, idx, usedBlobs, func(blob restic.PackBlob, slot index.Slot) {
 		packID := blob.PackID()
 		h := blob.Handle()
 
@@ -246,7 +256,7 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 		}
 
 		size := uint64(blob.CiphertextLength())
-		dupCount, _ := usedBlobs.Get(h)
+		dupCount, _ := usedBlobs.GetAt(h, slot)
 		switch {
 		case dupCount >= 2:
 			hasDuplicates = true
@@ -289,10 +299,10 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 	// - if there are no used blobs in a pack, possibly mark duplicates as "unused"
 	if hasDuplicates {
 		// iterate again over all blobs in index (this is pretty cheap, all in-mem)
-		err = idx.ListBlobs(ctx, func(blob restic.PackBlob) {
+		err = listBlobsWithSlot(ctx, idx, usedBlobs, func(blob restic.PackBlob, slot index.Slot) {
 			packID := blob.PackID()
 			bh := blob.Handle()
-			count, ok := usedBlobs.Get(bh)
+			count, ok := usedBlobs.GetAt(bh, slot)
 			// skip non-duplicate, aka. normal blobs
 			// count == 0 is used to mark that this was a duplicate blob with only a single occurrence remaining
 			if !ok || count == 1 {
@@ -316,7 +326,7 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 				stats.Size.Duplicate -= size
 				stats.Blobs.Duplicate--
 				// let other occurrences remain marked as unused
-				usedBlobs.Set(bh, 1)
+				usedBlobs.SetAt(bh, slot, 1)
 			default:
 				// remain unused and decrease counter
 				count--
@@ -325,7 +335,7 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 					// thus use the special value zero. This will select the last instance of the blob for keeping.
 					count = 0
 				}
-				usedBlobs.Set(bh, count)
+				usedBlobs.SetAt(bh, slot, count)
 			}
 			// update indexPack
 			indexPack[packID] = ip

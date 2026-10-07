@@ -214,7 +214,7 @@ func (be *Backend) Load(ctx context.Context, h backend.Handle, length int, offse
 
 	err = be.retry(ctx, fmt.Sprintf("Load(%v, %v, %v)", h, length, offset),
 		func() error {
-			return be.Backend.Load(ctx, h, length, offset, consumer)
+			return be.loadWithPreparedData(ctx, h, length, offset, consumer)
 		})
 
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) && err != nil && ctx.Err() == nil && !be.IsPermanentError(err) {

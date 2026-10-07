@@ -151,28 +151,8 @@ func (a *AssociatedSet[T]) Len() int {
 }
 
 func (a *AssociatedSet[T]) All() iter.Seq2[restic.BlobHandle, T] {
-	return func(yield func(restic.BlobHandle, T) bool) {
-		for k, v := range a.overflow {
-			if !yield(k, v) {
-				return
-			}
-		}
-
-		for pb := range a.idx.Values() {
-			bh := pb.Handle()
-			if _, ok := a.overflow[bh]; ok {
-				// already reported via overflow set
-				continue
-			}
-
-			val, known := a.Get(bh)
-			if known {
-				if !yield(bh, val) {
-					return
-				}
-			}
-		}
-	}
+	// same handles, values and order as a Values walk with a Get per entry
+	return a.allAt
 }
 
 func (a *AssociatedSet[T]) Keys() iter.Seq[restic.BlobHandle] {

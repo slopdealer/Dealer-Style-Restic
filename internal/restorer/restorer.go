@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 
 	"github.com/restic/restic/internal/data"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
+	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 
 	"golang.org/x/sync/errgroup"
@@ -34,6 +36,24 @@ type Restorer struct {
 	SelectFilter func(item string, isDir bool) (selectedForRestore bool, childMayBeSelected bool)
 
 	XattrSelectFilter func(xattrName string) (xattrSelectedForRestore bool)
+
+	// settleBeforeError lets a concurrent restore pass report pending worker
+	// outcomes before a later traversal error is passed to Error.
+	settleBeforeError func() error
+
+	// concurrentXattrSelectFilter is set only when the configured callback is
+	// known to be safe for concurrent calls. Direct assignments to the public
+	// callback keep the synchronous restore path.
+	concurrentXattrSelectFilter bool
+}
+
+// SetConcurrentXattrSelectFilter configures a filter that regular-file
+// metadata workers may call concurrently. The caller must provide a
+// concurrency-safe filter. Direct assignment to XattrSelectFilter preserves
+// the synchronous callback behavior.
+func (res *Restorer) SetConcurrentXattrSelectFilter(filter func(xattrName string) bool) {
+	res.XattrSelectFilter = filter
+	res.concurrentXattrSelectFilter = true
 }
 
 var restorerAbortOnAllErrors = func(_ string, err error) error { return err }
@@ -128,6 +148,11 @@ func (res *Restorer) sanitizeError(location string, err error) error {
 		// Context errors are permanent.
 		return err
 	default:
+		if res.settleBeforeError != nil {
+			if settleErr := res.settleBeforeError(); settleErr != nil {
+				return settleErr
+			}
+		}
 		return res.Error(location, err)
 	}
 }
@@ -135,6 +160,10 @@ func (res *Restorer) sanitizeError(location string, err error) error {
 // traverseTree traverses a tree from the repo and calls treeVisitor.
 // target is the path in the file system, location within the snapshot.
 func (res *Restorer) traverseTree(ctx context.Context, target string, treeID restic.ID, visitor treeVisitor) error {
+	return res.traverseTreeWithTreeAccess(ctx, target, treeID, nil, nil, visitor)
+}
+
+func (res *Restorer) traverseTreeWithTreeAccess(ctx context.Context, target string, treeID restic.ID, loadTree restoreTreeLoader, observeTree func(restic.ID), visitor treeVisitor) error {
 	location := string(filepath.Separator)
 
 	if visitor.enterDir != nil {
@@ -143,7 +172,7 @@ func (res *Restorer) traverseTree(ctx context.Context, target string, treeID res
 			return err
 		}
 	}
-	childFilenames, hasRestored, err := res.traverseTreeInner(ctx, target, location, treeID, visitor)
+	childFilenames, hasRestored, err := res.traverseTreeInnerWithTreeAccess(ctx, target, location, treeID, loadTree, observeTree, visitor)
 	if err != nil {
 		return err
 	}
@@ -155,8 +184,20 @@ func (res *Restorer) traverseTree(ctx context.Context, target string, treeID res
 }
 
 func (res *Restorer) traverseTreeInner(ctx context.Context, target, location string, treeID restic.ID, visitor treeVisitor) (filenames []string, hasRestored bool, err error) {
+	return res.traverseTreeInnerWithTreeAccess(ctx, target, location, treeID, nil, nil, visitor)
+}
+
+func (res *Restorer) traverseTreeInnerWithTreeAccess(ctx context.Context, target, location string, treeID restic.ID, loadTree restoreTreeLoader, observeTree func(restic.ID), visitor treeVisitor) (filenames []string, hasRestored bool, err error) {
 	debug.Log("%v %v %v", target, location, treeID)
-	tree, err := data.LoadTree(ctx, res.repo, treeID)
+	if observeTree != nil {
+		observeTree(treeID)
+	}
+	var tree data.TreeNodeIterator
+	if loadTree == nil {
+		tree, err = data.LoadTree(ctx, res.repo, treeID)
+	} else {
+		tree, err = loadTree(ctx, treeID)
+	}
 	if err != nil {
 		debug.Log("error loading tree %v: %v", treeID, err)
 		return nil, hasRestored, res.sanitizeError(location, err)
@@ -240,7 +281,7 @@ func (res *Restorer) traverseTreeInner(ctx context.Context, target, location str
 			var childFilenames []string
 
 			if childMayBeSelected {
-				childFilenames, childHasRestored, err = res.traverseTreeInner(ctx, nodeTarget, nodeLocation, *node.Subtree, visitor)
+				childFilenames, childHasRestored, err = res.traverseTreeInnerWithTreeAccess(ctx, nodeTarget, nodeLocation, *node.Subtree, loadTree, observeTree, visitor)
 				err = res.sanitizeError(nodeLocation, err)
 				if err != nil {
 					return nil, hasRestored, err
@@ -293,11 +334,15 @@ func (res *Restorer) restoreNodeTo(node *data.Node, target, location string) err
 }
 
 func (res *Restorer) restoreNodeMetadataTo(node *data.Node, target, location string) error {
+	return res.restoreNodeMetadataToWithWarn(node, target, location, res.Warn)
+}
+
+func (res *Restorer) restoreNodeMetadataToWithWarn(node *data.Node, target, location string, warn func(string)) error {
 	if res.opts.DryRun {
 		return nil
 	}
 	debug.Log("restoreNodeMetadata %v %v %v", node.Name, target, location)
-	err := fs.NodeRestoreMetadata(node, target, res.Warn, res.XattrSelectFilter, res.opts.OwnershipByName)
+	err := fs.NodeRestoreMetadata(node, target, warn, res.XattrSelectFilter, res.opts.OwnershipByName)
 	if err != nil {
 		debug.Log("node.RestoreMetadata(%s) error %v", target, err)
 	}
@@ -321,24 +366,284 @@ func (res *Restorer) restoreHardlinkAt(node *data.Node, target, path, location s
 }
 
 func (res *Restorer) ensureDir(target string) error {
+	_, err := res.ensureDirWithFreshness(target)
+	return err
+}
+
+// ensureDirWithFreshness reports whether target was absent or replaced by a
+// directory during this call. A fresh directory is known to contain none of
+// the snapshot's files before the second restore pass starts.
+func (res *Restorer) ensureDirWithFreshness(target string) (bool, error) {
 	if res.opts.DryRun {
-		return nil
+		return false, nil
 	}
 
 	fi, err := fs.Lstat(target)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to check for directory: %w", err)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		return false, fmt.Errorf("failed to check for directory: %w", err)
 	}
 	if err == nil && !fi.IsDir() {
 		// try to cleanup unexpected file
 		if err := fs.Remove(target); err != nil {
-			return fmt.Errorf("failed to remove stale item: %w", err)
+			return false, fmt.Errorf("failed to remove stale item: %w", err)
+		}
+		missing = true
+	}
+	if !missing {
+		// Retain MkdirAll's behavior if the existing directory disappears
+		// between Lstat and this call.
+		if err := fs.MkdirAll(target, 0700); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	// Create parents first, then use exclusive creation for target. If another
+	// process creates target after Lstat, the fallback preserves MkdirAll's
+	// behavior but does not claim that target is fresh.
+	if err := fs.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return false, err
+	}
+	if err := fs.Mkdir(target, 0700); err == nil {
+		return true, nil
+	}
+	// second pass #leaveDir restores directory metadata after visiting all children
+	if err := fs.MkdirAll(target, 0700); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// lastPreparedDirectory remembers one directory that was successfully
+// prepared during a traversal. Sibling nodes commonly share a parent, so this
+// avoids repeating its filesystem check.
+type lastPreparedDirectory struct {
+	target string
+	valid  bool
+	fresh  bool
+}
+
+func (d *lastPreparedDirectory) ensure(target string, ensureDir func(string) error) error {
+	if d.valid && d.target == target {
+		return nil
+	}
+	if err := ensureDir(target); err != nil {
+		return err
+	}
+	d.target = target
+	d.valid = true
+	d.fresh = false
+	return nil
+}
+
+func (d *lastPreparedDirectory) ensureWithFreshness(target string, ensureDir func(string) (bool, error)) (bool, error) {
+	if d.valid && d.target == target {
+		return d.fresh, nil
+	}
+	fresh, err := ensureDir(target)
+	if err != nil {
+		return false, err
+	}
+	d.target = target
+	d.valid = true
+	d.fresh = fresh
+	return fresh, nil
+}
+
+func (d *lastPreparedDirectory) reset() {
+	d.target = ""
+	d.valid = false
+	d.fresh = false
+}
+
+// restoreMetadataTask is one independent regular-file metadata update. The
+// traversal owns task ordering; workers own only the filesystem call and its
+// warnings/error. Keeping the result on the task lets the traversal report
+// failures and warnings in snapshot order.
+type restoreMetadataTask struct {
+	location string
+	apply    func(context.Context, func(string)) error
+	warnings []string
+	done     chan struct{}
+	err      error
+}
+
+// restoreMetadataPool bounds both active filesystem work and retained task
+// state. Directory metadata and hardlink aliases stay in the traversal goroutine
+// and drain this pool first, preserving their dependencies on descendants and
+// on the canonical hardlink path.
+type restoreMetadataPool struct {
+	res      *Restorer
+	ctx      context.Context
+	cancel   context.CancelFunc
+	jobs     chan *restoreMetadataTask
+	workers  sync.WaitGroup
+	pending  []*restoreMetadataTask
+	firstErr error
+	closed   bool
+	settling int
+}
+
+const (
+	restoreMetadataWorkerCount = 4
+	restoreMetadataPendingMax  = 64
+)
+
+func newRestoreMetadataPool(ctx context.Context, res *Restorer) *restoreMetadataPool {
+	workerCtx, cancel := context.WithCancel(ctx)
+	p := &restoreMetadataPool{
+		res:    res,
+		ctx:    workerCtx,
+		cancel: cancel,
+		jobs:   make(chan *restoreMetadataTask, restoreMetadataPendingMax),
+	}
+	for range restoreMetadataWorkerCount {
+		p.workers.Add(1)
+		go func() {
+			defer p.workers.Done()
+			for task := range p.jobs {
+				if err := p.ctx.Err(); err != nil {
+					task.err = err
+				} else {
+					task.err = task.apply(p.ctx, func(message string) {
+						if res.Warn != nil {
+							task.warnings = append(task.warnings, message)
+						}
+					})
+				}
+				close(task.done)
+			}
+		}()
+	}
+	return p
+}
+
+func (p *restoreMetadataPool) waitOldest() error {
+	if len(p.pending) == 0 {
+		return nil
+	}
+	if p.firstErr != nil {
+		return context.Canceled
+	}
+
+	task := p.pending[0]
+	select {
+	case <-task.done:
+	case <-p.ctx.Done():
+		// Prefer a completed task so an earlier filesystem failure is not
+		// hidden by a cancellation that arrived at the same time.
+		select {
+		case <-task.done:
+		default:
+			if p.firstErr == nil {
+				p.firstErr = p.ctx.Err()
+			}
+			return p.ctx.Err()
+		}
+	}
+	p.pending[0] = nil
+	p.pending = p.pending[1:]
+
+	for _, warning := range task.warnings {
+		p.res.Warn(warning)
+	}
+	if task.err != nil {
+		// Suppress a nested drain only while reporting this worker error.
+		// Successful metadata tasks stay on the existing fast path.
+		p.settling++
+		err := p.res.sanitizeError(task.location, task.err)
+		p.settling--
+		if err != nil {
+			p.firstErr = err
+			p.cancel()
+			return context.Canceled
+		}
+	}
+	return nil
+}
+
+func (p *restoreMetadataPool) schedule(location string, apply func(context.Context, func(string)) error) error {
+	if p.firstErr != nil {
+		return context.Canceled
+	}
+	if err := p.ctx.Err(); err != nil {
+		if p.firstErr == nil {
+			p.firstErr = err
+		}
+		return err
+	}
+	for len(p.pending) >= restoreMetadataPendingMax {
+		if err := p.waitOldest(); err != nil {
+			return err
 		}
 	}
 
-	// create parent dir with default permissions
-	// second pass #leaveDir restores dir metadata after visiting/restoring all children
-	return fs.MkdirAll(target, 0700)
+	task := &restoreMetadataTask{
+		location: location,
+		apply:    apply,
+		done:     make(chan struct{}),
+	}
+	select {
+	case <-p.ctx.Done():
+		if p.firstErr == nil {
+			p.firstErr = p.ctx.Err()
+		}
+		return p.ctx.Err()
+	case p.jobs <- task:
+		p.pending = append(p.pending, task)
+		return nil
+	}
+}
+
+func (p *restoreMetadataPool) drain() error {
+	for len(p.pending) > 0 {
+		if err := p.waitOldest(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *restoreMetadataPool) close() {
+	if p.closed {
+		return
+	}
+	p.cancel()
+	close(p.jobs)
+	p.workers.Wait()
+	p.pending = nil
+	p.closed = true
+}
+
+// finish settles accepted metadata tasks before returning a later traversal
+// error. The tree walk is synchronous, so every accepted task was visited
+// before the traversal reached its error. Reporting those task results first
+// preserves the traversal's error and warning order.
+func (p *restoreMetadataPool) finish(traversalErr error) error {
+	if p.firstErr == nil {
+		if poolErr := p.drain(); poolErr != nil && traversalErr == nil {
+			traversalErr = poolErr
+		}
+	}
+	p.close()
+	if p.firstErr != nil {
+		return p.firstErr
+	}
+	return traversalErr
+}
+
+// drainBeforeTraversalError keeps an earlier worker result from being
+// reported after a later traversal diagnostic. waitOldest also calls
+// sanitizeError, so settling must be reentrant: worker failures are reported
+// by the normal callback without starting another drain.
+func (p *restoreMetadataPool) drainBeforeTraversalError() error {
+	if p.settling > 0 {
+		return nil
+	}
+	p.settling++
+	defer func() { p.settling-- }()
+	return p.drain()
 }
 
 // RestoreTo creates the directories and files in the snapshot below dst.
@@ -353,38 +658,105 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 		}
 	}
 
+	// Only paths created by an exclusive Mkdir are fresh. A directory that
+	// already exists (or wins a creation race) must retain file verification.
+	freshDirs := make(map[string]struct{})
+	var preparedDir lastPreparedDirectory
 	if !res.opts.DryRun {
 		// ensure that the target directory exists and is actually a directory
 		// Using ensureDir is too aggressive here as it also removes unexpected files
-		if err := fs.MkdirAll(dst, 0700); err != nil {
-			return restoredFileCount, fmt.Errorf("cannot create target directory: %w", err)
+		dstFresh := fs.Mkdir(dst, 0700) == nil
+		if !dstFresh {
+			if err := fs.MkdirAll(dst, 0700); err != nil {
+				return restoredFileCount, fmt.Errorf("cannot create target directory: %w", err)
+			}
+		}
+		if dstFresh {
+			freshDirs[dst] = struct{}{}
 		}
 	}
 
-	idx := data.NewHardlinkIndex[string]()
+	// The first pass only needs to recognize duplicate hardlinks so their
+	// contents are not restored more than once. Keep no canonical path here:
+	// the path-bearing index is rebuilt in the second pass, after file workers
+	// have finished.
+	seenLinks := data.NewHardlinkIndex[struct{}]()
 	filerestorer := newFileRestorer(dst, res.repo.LoadBlobsFromPack, res.repo.LookupBlob,
 		res.repo.Connections(), res.opts.Sparse, res.opts.Delete, res.repo.StartWarmup, res.opts.Progress,
 		res.repo.ChunkerFactory().ZeroChunk())
 	filerestorer.Error = res.Error
 	filerestorer.Info = res.Info
+	if extra, ok := res.repo.(interface{ AdditionalRestoreWorker() bool }); ok {
+		filerestorer.additionalWorker = extra.AdditionalRestoreWorker()
+	}
 
 	debug.Log("first pass for %q", dst)
+	prepareDirOnce := func(target string) (bool, error) {
+		if res.opts.DryRun {
+			return false, nil
+		}
+		if preparedDir.valid && preparedDir.target == target {
+			return preparedDir.fresh, nil
+		}
+		if _, knownFresh := freshDirs[target]; knownFresh {
+			// The target was created earlier in this traversal or before it
+			// started. Keep the usual directory check, but retain that proof.
+			if err := res.ensureDir(target); err != nil {
+				return false, err
+			}
+			preparedDir = lastPreparedDirectory{target: target, valid: true, fresh: true}
+			return true, nil
+		}
+		fresh, err := preparedDir.ensureWithFreshness(target, res.ensureDirWithFreshness)
+		if err != nil {
+			return false, err
+		}
+		if fresh {
+			freshDirs[target] = struct{}{}
+		}
+		return fresh, nil
+	}
 
 	var buf []byte
+	var restoreTreeIDs []restic.ID
+	var observeTree func(restic.ID)
+	if !res.opts.DryRun {
+		observeTree = func(id restic.ID) {
+			restoreTreeIDs = append(restoreTreeIDs, id)
+		}
+	}
+
+	var treeCarry *restoreTreeCarry
+	if _, concrete := res.repo.(*repository.Repository); concrete && !res.opts.DryRun {
+		treeCarry = newRestoreTreeCarry()
+		defer treeCarry.Close()
+	}
+
+	nodeLookahead := newRestoreNodeLookahead(func(ctx context.Context, id restic.ID) (*data.TreeNodeReader, error) {
+		return data.LoadTreeNodeReader(ctx, res.repo, id)
+	})
+	defer nodeLookahead.Close()
+
+	firstPassTreeLoader := restoreTreeLoader(nodeLookahead.Load)
+	if treeCarry != nil {
+		firstPassTreeLoader = treeCarry.Wrap(firstPassTreeLoader)
+	}
 
 	// first tree pass: create directories and collect all files to restore
-	err = res.traverseTree(ctx, dst, *res.sn.Tree, treeVisitor{
+	err = res.traverseTreeWithTreeAccess(ctx, dst, *res.sn.Tree, firstPassTreeLoader, observeTree, treeVisitor{
 		enterDir: func(_ *data.Node, target, location string) error {
 			debug.Log("first pass, enterDir: mkdir %q, leaveDir should restore metadata", location)
 			if location != string(filepath.Separator) {
 				res.opts.Progress.AddFile(0)
 			}
-			return res.ensureDir(target)
+			_, err := prepareDirOnce(target)
+			return err
 		},
 
 		visitNode: func(node *data.Node, target, location string) error {
 			debug.Log("first pass, visitNode: mkdir %q, leaveDir on second pass should restore metadata", location)
-			if err := res.ensureDir(filepath.Dir(target)); err != nil {
+			parentDir := filepath.Dir(target)
+			if _, err := prepareDirOnce(parentDir); err != nil {
 				return err
 			}
 
@@ -394,15 +766,16 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			}
 
 			if node.Links > 1 {
-				if idx.Has(node.Inode, node.DeviceID) {
+				if seenLinks.Has(node.Inode, node.DeviceID) {
 					// a hardlinked file does not increase the restore size
 					res.opts.Progress.AddFile(0)
 					return nil
 				}
-				idx.Add(node.Inode, node.DeviceID, location)
+				seenLinks.Add(node.Inode, node.DeviceID, struct{}{})
 			}
 
-			buf, err = res.withOverwriteCheck(ctx, node, target, location, false, buf, func(updateMetadataOnly bool, matches *fileState) error {
+			_, parentFresh := freshDirs[parentDir]
+			buf, err = res.withOverwriteCheckInFreshDirectory(ctx, node, target, location, false, parentFresh, buf, func(updateMetadataOnly bool, matches *fileState) error {
 				if updateMetadataOnly {
 					res.opts.Progress.AddSkippedFile(location, node.Size)
 				} else {
@@ -427,8 +800,22 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			return err
 		},
 	})
+	nodeLookahead.Close()
+	// File restoration starts below, after this traversal. Release the cached
+	// path before workers begin restoring file contents.
+	preparedDir.reset()
 	if err != nil {
 		return 0, err
+	}
+	seenLinks = nil
+
+	var treePrefetch *restoreTreePrefetch
+	if !res.opts.DryRun && len(filerestorer.files) != 0 && len(restoreTreeIDs) != 0 {
+		loadTree := restoreTreeLoader(func(ctx context.Context, id restic.ID) (data.TreeNodeIterator, error) {
+			return data.LoadTree(ctx, res.repo, id)
+		})
+		treePrefetch = newRestoreTreePrefetchWithCarry(ctx, restoreTreeIDs, loadTree, treeCarry)
+		defer treePrefetch.Close()
 	}
 
 	if !res.opts.DryRun {
@@ -439,32 +826,68 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	}
 
 	debug.Log("second pass for %q", dst)
+	idx := data.NewHardlinkIndex[string]()
+	var metadataPool *restoreMetadataPool
+	traverseCtx := ctx
+	previousSettleBeforeError := res.settleBeforeError
+	if res.concurrentXattrSelectFilter && !res.opts.DryRun {
+		metadataPool = newRestoreMetadataPool(ctx, res)
+		traverseCtx = metadataPool.ctx
+		res.settleBeforeError = metadataPool.drainBeforeTraversalError
+	}
 
 	// second tree pass: restore special files and filesystem metadata
-	err = res.traverseTree(ctx, dst, *res.sn.Tree, treeVisitor{
+	var secondPassTreeLoader restoreTreeLoader
+	if treePrefetch != nil {
+		secondPassTreeLoader = treePrefetch.Load
+	}
+	err = res.traverseTreeWithTreeAccess(traverseCtx, dst, *res.sn.Tree, secondPassTreeLoader, nil, treeVisitor{
 		visitNode: func(node *data.Node, target, location string) error {
 			debug.Log("second pass, visitNode: restore node %q", location)
 			if node.Type != data.NodeTypeFile {
+				if metadataPool != nil {
+					if err := metadataPool.drain(); err != nil {
+						return err
+					}
+				}
 				_, err := res.withOverwriteCheck(ctx, node, target, location, false, nil, func(_ bool, _ *fileState) error {
 					return res.restoreNodeTo(node, target, location)
 				})
 				return err
 			}
 
-			if idx.Has(node.Inode, node.DeviceID) && idx.Value(node.Inode, node.DeviceID) != location {
-				_, err := res.withOverwriteCheck(ctx, node, target, location, true, nil, func(_ bool, _ *fileState) error {
-					return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.Value(node.Inode, node.DeviceID)), target, location)
-				})
-				return err
+			if node.Links > 1 {
+				if idx.Has(node.Inode, node.DeviceID) {
+					if metadataPool != nil {
+						if err := metadataPool.drain(); err != nil {
+							return err
+						}
+					}
+					_, err := res.withOverwriteCheck(ctx, node, target, location, true, nil, func(_ bool, _ *fileState) error {
+						return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.Value(node.Inode, node.DeviceID)), target, location)
+					})
+					return err
+				}
+				idx.Add(node.Inode, node.DeviceID, location)
 			}
 
 			if _, ok := res.hasRestoredFile(location); ok {
+				if metadataPool != nil {
+					return metadataPool.schedule(location, func(_ context.Context, warn func(string)) error {
+						return res.restoreNodeMetadataToWithWarn(node, target, location, warn)
+					})
+				}
 				return res.restoreNodeMetadataTo(node, target, location)
 			}
 			// don't touch skipped files
 			return nil
 		},
 		leaveDir: func(node *data.Node, target, location string, expectedFilenames []string) error {
+			if metadataPool != nil {
+				if err := metadataPool.drain(); err != nil {
+					return err
+				}
+			}
 			if res.opts.Delete {
 				if err := res.removeUnexpectedFiles(ctx, target, location, expectedFilenames); err != nil {
 					return err
@@ -482,6 +905,10 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			return err
 		},
 	})
+	if metadataPool != nil {
+		res.settleBeforeError = previousSettleBeforeError
+		err = metadataPool.finish(err)
+	}
 	return restoredFileCount, err
 }
 
@@ -562,6 +989,10 @@ func (res *Restorer) hasRestoredFile(location string) (metadataOnly bool, ok boo
 }
 
 func (res *Restorer) withOverwriteCheck(ctx context.Context, node *data.Node, target, location string, isHardlink bool, buf []byte, cb func(updateMetadataOnly bool, matches *fileState) error) ([]byte, error) {
+	return res.withOverwriteCheckInFreshDirectory(ctx, node, target, location, isHardlink, false, buf, cb)
+}
+
+func (res *Restorer) withOverwriteCheckInFreshDirectory(ctx context.Context, node *data.Node, target, location string, isHardlink, parentFresh bool, buf []byte, cb func(updateMetadataOnly bool, matches *fileState) error) ([]byte, error) {
 	overwrite, err := shouldOverwrite(res.opts.Overwrite, node, target)
 	if err != nil {
 		return buf, err
@@ -577,8 +1008,13 @@ func (res *Restorer) withOverwriteCheck(ctx context.Context, node *data.Node, ta
 	var matches *fileState
 	updateMetadataOnly := false
 	if node.Type == data.NodeTypeFile && !isHardlink {
-		// if a file fails to verify, then matches is nil which results in restoring from scratch
-		matches, buf, _ = res.verifyFile(ctx, target, node, false, res.opts.Overwrite == OverwriteIfChanged, buf)
+		// A newly created parent directory proves the file could not have been
+		// present when the first pass checked it. File workers start only after
+		// that pass, so no restore worker can create it before this decision.
+		if !parentFresh {
+			// if a file fails to verify, then matches is nil which results in restoring from scratch
+			matches, buf, _ = res.verifyFile(ctx, target, node, false, res.opts.Overwrite == OverwriteIfChanged, buf)
+		}
 		// skip files that are already correct completely
 		updateMetadataOnly = !matches.NeedsRestore()
 	}
@@ -713,7 +1149,7 @@ func (s *fileState) HasMatchingBlob(i int) bool {
 // Reusing buffers prevents the verifier goroutines allocating all of RAM and
 // flushing the filesystem cache (at least on Linux).
 func (res *Restorer) verifyFile(ctx context.Context, target string, node *data.Node, failFast bool, trustMtime bool, buf []byte) (*fileState, []byte, error) {
-	f, err := fs.OpenFile(target, fs.O_RDONLY|fs.O_NOFOLLOW, 0)
+	f, err := fs.OpenRegularFileNoPoller(target, fs.O_RDONLY|fs.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, buf, err
 	}

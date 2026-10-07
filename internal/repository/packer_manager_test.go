@@ -1,7 +1,10 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	stdErrors "errors"
 	"io"
 	"math/rand"
 	"sync"
@@ -11,6 +14,95 @@ import (
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/test"
 )
+
+func TestPackerWriteThroughHashIncludesMergedPayloadAndFinalHeader(t *testing.T) {
+	pm := newPackerManager(crypto.NewRandomKey(), restic.DataBlob, DefaultPackSize, 2, func(context.Context, restic.BlobType, *packer) error {
+		return nil
+	})
+	pm.hashOnWrite = true
+
+	first, err := pm.newPacker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.tmpfile.Close() })
+	second, err := pm.newPacker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.tmpfile.Close() })
+
+	firstPayload := []byte("first pack payload")
+	secondPayload := []byte("merged pack payload")
+	if _, err := first.Add(restic.DataBlob, restic.Hash(firstPayload), firstPayload, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Add(restic.DataBlob, restic.Hash(secondPayload), secondPayload, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.bufWr.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.tmpfile.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Merge(second.Packer, second.tmpfile); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.bufWr.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := first.tmpfile.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	fileHash := sha256.New()
+	if _, err := io.Copy(fileHash, first.tmpfile); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := first.hashWr.Sum(nil), fileHash.Sum(nil); !bytes.Equal(got, want) {
+		t.Fatalf("write-through hash %x does not match finalized pack hash %x", got, want)
+	}
+}
+
+func TestPackerManagerClosesMergedFilesWhenQueueFails(t *testing.T) {
+	queueErr := stdErrors.New("queue stopped")
+	pm := newPackerManager(crypto.NewRandomKey(), restic.DataBlob, 1024, 2, func(context.Context, restic.BlobType, *packer) error {
+		return queueErr
+	})
+
+	first, err := pm.newPacker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := pm.newPacker()
+	if err != nil {
+		_ = first.tmpfile.Close()
+		t.Fatal(err)
+	}
+	pm.packers[0] = first
+	pm.packers[1] = second
+
+	for _, p := range []*packer{first, second} {
+		payload := []byte("valid pack data")
+		if _, err := p.Add(restic.DataBlob, restic.Hash(payload), payload, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := pm.Flush(context.Background()); !stdErrors.Is(err, queueErr) {
+		t.Fatalf("Flush() error = %v, want %v", err, queueErr)
+	}
+
+	for i, p := range []*packer{first, second} {
+		if _, err := p.tmpfile.Write([]byte("must fail after cleanup")); err == nil {
+			t.Errorf("packer %d temporary file remains open after failed flush", i)
+		}
+	}
+}
 
 func randomID(rd io.Reader) restic.ID {
 	id := restic.ID{}

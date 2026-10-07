@@ -86,3 +86,10 @@ func (l *limitedReader) WriteTo(w io.Writer) (int64, error) {
 }
 
 var _ backend.Backend = (*rateLimitedBackend)(nil)
+
+// AllowAdditionalLoadSlot forwards the underlying backend's check-only
+// overflow capability without bypassing rate limiting.
+func (r rateLimitedBackend) AllowAdditionalLoadSlot() bool {
+	configured, ok := r.Backend.(interface{ AllowAdditionalLoadSlot() bool })
+	return ok && configured.AllowAdditionalLoadSlot()
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/restic/restic/internal/data"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/global"
+	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/ui"
 	"github.com/restic/restic/internal/ui/progress"
@@ -191,16 +192,31 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 	}
 
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun && gopts.NoLock, printer)
+	var indexLoad *repositoryIndexLoad
+	var startWaitWork func(context.Context, *repository.Repository) func(bool)
+	if opts.Prune {
+		startWaitWork = func(ctx context.Context, repo *repository.Repository) func(bool) {
+			indexLoad = startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
+			return indexLoad.settle
+		}
+	}
+	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, opts.DryRun && gopts.NoLock, printer, startWaitWork)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if indexLoad != nil {
+		defer func() {
+			if !indexLoad.used {
+				indexLoad.discard()
+			}
+		}()
+	}
 
 	var snapshots data.Snapshots
 	removeSnIDs := restic.NewIDSet()
 
-	err = opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	err = opts.SnapshotFilter.FindAll(ctx, indexLoad.snapshotLister(repo), repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -353,7 +369,7 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 			printer.P("%d snapshots have been removed, running prune\n", len(removeSnIDs))
 		}
 		pruneOptions.DryRun = opts.DryRun
-		return runPruneWithRepo(ctx, pruneOptions, gopts, repo, removeSnIDs, printer)
+		return runPruneWithRepoAndIndexLoad(ctx, pruneOptions, gopts, repo, removeSnIDs, printer, indexLoad)
 	}
 
 	return nil

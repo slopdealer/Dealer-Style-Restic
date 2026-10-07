@@ -16,6 +16,7 @@ import (
 	"github.com/restic/restic/internal/backend/cache"
 	"github.com/restic/restic/internal/checker"
 	"github.com/restic/restic/internal/data"
+	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/global"
 	"github.com/restic/restic/internal/repository"
@@ -242,20 +243,42 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	if !gopts.NoLock {
 		printer.P("create exclusive lock for repository\n")
 	}
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, gopts.NoLock, printer)
+	var indexLoad *checkerIndexLoad
+	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, func(ctx context.Context, repo *repository.Repository) func(bool) {
+		indexLoad = startCheckerIndexLoad(ctx, repo, opts.CheckUnused, &opts.SnapshotFilter, args)
+		return indexLoad.settle
+	})
 	if err != nil {
 		return summary, err
 	}
 	defer unlock()
+	if indexLoad != nil {
+		defer func() {
+			if !indexLoad.used {
+				indexLoad.discard()
+			}
+		}()
+	}
 
-	chkr := checker.New(repo, opts.CheckUnused)
-	err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
+	var chkr *checker.Checker
+	if indexLoad != nil {
+		chkr = indexLoad.checkerForSnapshots()
+		err = indexLoad.loadSnapshots()
+	} else {
+		chkr = checker.New(repo, opts.CheckUnused)
+		err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
+	}
 	if err != nil {
 		return summary, err
 	}
 
 	printer.P("load indexes\n")
-	hints, errs := chkr.LoadIndex(ctx, printer)
+	var hints, errs []error
+	if indexLoad != nil {
+		hints, errs = indexLoad.consume(printer)
+	} else {
+		hints, errs = chkr.LoadIndex(ctx, printer)
+	}
 	if ctx.Err() != nil {
 		return summary, ctx.Err()
 	}
@@ -302,9 +325,27 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 
 	orphanedPacks := 0
 	errChan := make(chan error)
+	var readPackSizes *repository.PreparedPackSizes
+	var structure *checkStructureOverlap
+	// Keep terminal timing/signal progress on the sequential path. Detached
+	// progress is published only at the original Structure heading below.
+	if !gopts.NoLock && !debug.IsEnabled() &&
+		(gopts.JSON || gopts.Verbosity == 0 || (!term.OutputIsTerminal() && !term.CanUpdateStatus())) {
+		structure = startCheckStructureOverlap(ctx, chkr.Structure)
+		defer structure.discard()
+	}
 
 	printer.P("check all packs\n")
-	go chkr.Packs(ctx, errChan)
+	if indexLoad != nil {
+		packs := indexLoad.packs
+		indexLoad.packs = nil
+		if opts.ReadData || opts.ReadDataSubset != "" {
+			readPackSizes = packs.ForReadPacks()
+		}
+		go chkr.PacksWithPreparedSizes(ctx, packs, errChan)
+	} else {
+		go chkr.Packs(ctx, errChan)
+	}
 
 	for err := range errChan {
 		var packErr *repository.ErrPackMetadata
@@ -342,11 +383,16 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	var brokenSnapshots []string
 	var wg sync.WaitGroup
 
-	wg.Go(func() {
-		bar := printer.NewCounter("snapshots")
-		defer bar.Done()
-		chkr.Structure(ctx, bar, errChan)
-	})
+	if structure != nil {
+		errChan = structure.errors
+		structure.progress.attach(printer.NewCounter("snapshots"))
+	} else {
+		wg.Go(func() {
+			bar := printer.NewCounter("snapshots")
+			defer bar.Done()
+			chkr.Structure(ctx, bar, errChan)
+		})
+	}
 
 	for err := range errChan {
 		errorsFound = true
@@ -370,6 +416,9 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	// Must happen after `errChan` is read from in the above loop to avoid
 	// deadlocking in the case of errors.
 	wg.Wait()
+	if structure != nil {
+		structure.wait()
+	}
 	if ctx.Err() != nil {
 		return summary, ctx.Err()
 	}
@@ -394,7 +443,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	if readDataFilter != nil {
 		errChan := make(chan error)
 
-		go chkr.ReadPacks(ctx, readDataFilter, printer, errChan)
+		go chkr.ReadPacksWithPreparedSizes(ctx, readPackSizes, readDataFilter, printer, errChan)
 
 		for err := range errChan {
 			errorsFound = true

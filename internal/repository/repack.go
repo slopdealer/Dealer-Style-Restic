@@ -12,7 +12,10 @@ import (
 	"github.com/restic/restic/internal/restic"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
+
+const maxAsyncRepackCopyBytes = 8 << 20
 
 type repackBlobSet interface {
 	Has(bh restic.BlobHandle) bool
@@ -84,7 +87,7 @@ func repack(
 	downloadQueue := make(chan index.PackBlobs)
 	wg.Go(func() error {
 		defer close(downloadQueue)
-		for pbs := range repo.listPacksFromIndex(wgCtx, packs) {
+		for pbs := range repo.idx.ListPacksForRepack(wgCtx, packs) {
 			var packBlobs pack.Blobs
 			keepMutex.Lock()
 			// filter out unnecessary blobs
@@ -104,9 +107,19 @@ func repack(
 		}
 		return wgCtx.Err()
 	})
+	saveBudget := semaphore.NewWeighted(maxAsyncRepackCopyBytes)
 
 	worker := func() error {
 		for t := range downloadQueue {
+			type saveResult struct {
+				blob restic.BlobHandle
+				err  error
+				done bool
+			}
+			var pending sync.WaitGroup
+			var resultMu sync.Mutex
+			var results []saveResult
+
 			err := repo.loadBlobsFromPack(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
 				if err != nil {
 					// a required blob couldn't be retrieved
@@ -125,15 +138,63 @@ func repack(
 					return nil
 				}
 
-				// We do want to save already saved blobs!
-				_, _, _, err = uploader.SaveBlob(wgCtx, blob.Type, buf, blob.ID, true)
-				if err != nil {
-					return err
+				resultMu.Lock()
+				resultID := len(results)
+				results = append(results, saveResult{blob: blob})
+				resultMu.Unlock()
+
+				// Keep unusually large blobs on the synchronous path so the byte
+				// budget remains a strict bound on copied plaintext.
+				if int64(len(buf)) > maxAsyncRepackCopyBytes {
+					_, _, _, saveErr := uploader.SaveBlob(ctx, blob.Type, buf, blob.ID, true)
+					resultMu.Lock()
+					results[resultID].err = saveErr
+					results[resultID].done = true
+					resultMu.Unlock()
+					return saveErr
 				}
 
-				debug.Log("  saved blob %v", blob.ID)
+				weight := int64(len(buf))
+				if err := saveBudget.Acquire(wgCtx, weight); err != nil {
+					resultMu.Lock()
+					results[resultID].err = err
+					results[resultID].done = true
+					resultMu.Unlock()
+					return err
+				}
+				owned := append([]byte(nil), buf...)
+				pending.Add(1)
+				// The uploader context owns save lifetime. wgCtx is only for
+				// stopping pack reads and can be canceled as workers finish.
+				uploader.SaveBlobAsync(ctx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
+					resultMu.Lock()
+					results[resultID].err = saveErr
+					results[resultID].done = true
+					resultMu.Unlock()
+					saveBudget.Release(weight)
+					pending.Done()
+				})
 				return nil
 			})
+			pending.Wait()
+			resultMu.Lock()
+			completed := append([]saveResult(nil), results...)
+			resultMu.Unlock()
+			var saveErr error
+			for _, result := range completed {
+				if result.err != nil && saveErr == nil {
+					saveErr = result.err
+				}
+				if result.done && result.err == nil {
+					debug.Log("  saved blob %v", result.blob.ID)
+				}
+			}
+			if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+				return err
+			}
+			if saveErr != nil {
+				return saveErr
+			}
 			if err != nil {
 				return err
 			}

@@ -12,6 +12,20 @@ type Config struct {
 	Path string
 
 	Connections uint `option:"connections" help:"set a limit for the number of concurrent operations (default: 2)"`
+
+	allowAdditionalLoadSlot bool
+}
+
+// SetAllowAdditionalLoadSlot enables the check-only overflow slot when the
+// connection limit was not explicitly set by the user.
+func (cfg *Config) SetAllowAdditionalLoadSlot(allow bool) {
+	cfg.allowAdditionalLoadSlot = allow
+}
+
+// AllowAdditionalLoadSlot reports whether the local backend can use the
+// check-only overflow slot. An explicit connection limit retains its cap.
+func (cfg Config) AllowAdditionalLoadSlot() bool {
+	return cfg.allowAdditionalLoadSlot && cfg.Connections == 2
 }
 
 // NewConfig returns a new config with default options applied.

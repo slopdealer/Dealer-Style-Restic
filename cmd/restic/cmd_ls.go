@@ -19,6 +19,7 @@ import (
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
 	"github.com/restic/restic/internal/global"
+	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/ui"
 	"github.com/restic/restic/internal/ui/progress"
@@ -374,18 +375,40 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 		return false
 	}
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, termPrinter)
+	var indexLoad *repositoryIndexLoad
+	var snapshotLoad *snapshotMetadataLoad
+	ctx, repo, unlock, err := openWithReadLockAndWaitWork(ctx, gopts, gopts.NoLock, termPrinter, func(ctx context.Context, repo *repository.Repository) func(bool) {
+		indexLoad = startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
+		snapshotLoad = startSnapshotMetadataLoad(ctx, repo, indexLoad, args[0])
+		return func(confirmed bool) {
+			indexLoad.settle(confirmed)
+			snapshotLoad.settle(confirmed)
+		}
+	})
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	defer snapshotLoad.finish()
+	if indexLoad != nil {
+		defer func() {
+			if !indexLoad.used {
+				indexLoad.discard()
+			}
+		}()
+	}
 
-	snapshotLister, err := restic.MemorizeList(ctx, repo, restic.SnapshotFile)
+	snapshotLister, err := restic.MemorizeList(ctx, indexLoad.snapshotLister(repo), restic.SnapshotFile)
 	if err != nil {
 		return err
 	}
 
-	if err = repo.LoadIndex(ctx, termPrinter); err != nil {
+	if indexLoad != nil {
+		err = indexLoad.consume(termPrinter)
+	} else {
+		err = repo.LoadIndex(ctx, termPrinter)
+	}
+	if err != nil {
 		return err
 	}
 
@@ -415,7 +438,7 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 		}
 	}
 
-	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, repo, args[0])
+	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, snapshotLoad.get(repo), args[0])
 	if err != nil {
 		return err
 	}
@@ -476,7 +499,7 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 		return nil
 	}
 
-	err = walker.Walk(ctx, repo, *sn.Tree, walker.WalkVisitor{
+	err = walker.WalkPrepared(ctx, repo, *sn.Tree, walker.WalkVisitor{
 		ProcessNode: processNode,
 		LeaveDir: func(path string) error {
 			// the root path `/` has no corresponding node and is thus also skipped by processNode

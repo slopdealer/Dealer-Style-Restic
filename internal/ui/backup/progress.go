@@ -32,14 +32,19 @@ type Counter struct {
 type Progress struct {
 	progress.Updater
 	mu sync.Mutex
+	// scanMu owns scan totals. When both locks are needed, take scanMu
+	// before mu. Ordinary scan publication does not take the archive lock.
+	scanMu sync.Mutex
 
 	start     time.Time
 	estimator rateEstimator
 
 	scanStarted, scanFinished bool
+	archiveStarted            bool
 
 	currentFiles     map[string]struct{}
-	processed, total Counter
+	processed        Counter
+	total            Counter
 	errors           uint
 
 	printer ProgressPrinter
@@ -60,9 +65,11 @@ func newProgress(printer ProgressPrinter, interval time.Duration) *Progress {
 		if final {
 			p.printer.Reset()
 		} else {
+			p.scanMu.Lock()
+			defer p.scanMu.Unlock()
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			if !p.scanStarted {
+			if !p.scanStarted && !p.archiveStarted {
 				return
 			}
 
@@ -88,7 +95,7 @@ func newProgress(printer ProgressPrinter, interval time.Duration) *Progress {
 func (p *Progress) Error(item string, err error) error {
 	p.mu.Lock()
 	p.errors++
-	p.scanStarted = true
+	p.archiveStarted = true
 	p.mu.Unlock()
 
 	return p.printer.Error(item, err)
@@ -106,7 +113,7 @@ func (p *Progress) addProcessed(c Counter) {
 	p.processed.Dirs += c.Dirs
 	p.processed.Bytes += c.Bytes
 	p.estimator.recordBytes(time.Now(), c.Bytes)
-	p.scanStarted = true
+	p.archiveStarted = true
 }
 
 // CompleteBlob is called for all saved blobs for files.
@@ -145,13 +152,17 @@ func (p *Progress) CompleteItem(item string, action archiver.ItemAction, s archi
 
 // ReportTotal sets the total stats up to now
 func (p *Progress) ReportTotal(item string, s archiver.ScanStats) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.scanMu.Lock()
+	defer p.scanMu.Unlock()
 
 	p.total = Counter{Files: uint64(s.Files), Dirs: uint64(s.Dirs), Bytes: s.Bytes}
 	p.scanStarted = true
 
 	if item == "" {
+		// Keep final scan publication serialized with the status updater and
+		// archive accounting, just as it was with the single lock.
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		p.scanFinished = true
 		p.printer.ReportTotal(p.start, s)
 	}

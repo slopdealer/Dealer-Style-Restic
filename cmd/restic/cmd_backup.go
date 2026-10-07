@@ -538,11 +538,33 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		printer.P("open repository")
 	}
 
-	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, opts.DryRun, printer)
+	var indexLoad *backupIndexLoad
+	var startWaitWork func(context.Context, *repository.Repository) func(bool)
+	if !debug.IsEnabled() {
+		startWaitWork = func(lockCtx context.Context, repo *repository.Repository) func(bool) {
+			load := startBackupIndexLoadAfterSnapshots(lockCtx, repo, !opts.Stdin && !opts.Force)
+			indexLoad = load
+			return func(confirmed bool) {
+				if confirmed {
+					return
+				}
+				load.discard()
+				if indexLoad == load {
+					indexLoad = nil
+				}
+			}
+		}
+	}
+	ctx, repo, unlock, err := openWithAppendLockAndWaitWork(ctx, gopts, opts.DryRun, printer, startWaitWork)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	defer func() {
+		if indexLoad != nil {
+			indexLoad.discard()
+		}
+	}()
 
 	progressReporter := backup.NewProgress(printer, gopts.Quiet, gopts.JSON, term.CanUpdateStatus())
 	defer progressReporter.Done()
@@ -555,7 +577,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 
 	var parentSnapshot *data.Snapshot
 	if !opts.Stdin {
-		parentSnapshot, err = findParentSnapshot(ctx, repo, opts, targets, timeStamp)
+		parentSnapshot, err = findParentSnapshot(ctx, indexLoad.parentSearchRepo(repo), opts, targets, timeStamp)
 		if err != nil {
 			return err
 		}
@@ -573,7 +595,11 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		printer.V("load index files")
 	}
 
-	err = repo.LoadIndex(ctx, printer)
+	if indexLoad != nil {
+		err = indexLoad.wait(printer)
+	} else {
+		err = repo.LoadIndex(ctx, printer)
+	}
 	if err != nil {
 		return err
 	}

@@ -100,6 +100,12 @@ func TestSetLockTimeout(t testing.TB, d time.Duration) {
 // that satisfies IsAlreadyLocked. If the new lock is exclusive, then other
 // non-exclusive locks also result in an IsAlreadyLocked error.
 func newLock(ctx context.Context, repo restic.Unpacked[restic.FileType], exclusive bool) (*lockHandle, error) {
+	return newLockWithWaitWork(ctx, repo, exclusive, nil)
+}
+
+// newLockWithWaitWork starts optional read-only work after creating the lock
+// and settles it after the required competing-lock check.
+func newLockWithWaitWork(ctx context.Context, repo restic.Unpacked[restic.FileType], exclusive bool, startWaitWork func(context.Context) func(bool)) (*lockHandle, error) {
 	lock := &lockHandle{
 		Lock: Lock{
 			Time:      time.Now(),
@@ -128,12 +134,24 @@ func newLock(ctx context.Context, repo restic.Unpacked[restic.FileType], exclusi
 	}
 
 	lock.lockID = &lockID
+	var settleWaitWork func(bool)
+	// Wait work only overlaps the settle delay. Without a delay there is
+	// nothing to overlap, so the caller keeps its synchronous path.
+	if startWaitWork != nil && waitBeforeLockCheck > 0 {
+		settleWaitWork = startWaitWork(ctx)
+	}
 
 	time.Sleep(waitBeforeLockCheck)
 
 	if err = lock.checkForOtherLocks(ctx); err != nil {
+		if settleWaitWork != nil {
+			settleWaitWork(false)
+		}
 		_ = lock.unlock(ctx)
 		return nil, err
+	}
+	if settleWaitWork != nil {
+		settleWaitWork(true)
 	}
 
 	return lock, nil

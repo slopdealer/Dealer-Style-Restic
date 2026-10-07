@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -49,11 +50,7 @@ func (fs local) OpenFile(name string, flag int, metadataOnly bool) (File, error)
 // describes the symbolic link.  Lstat makes no attempt to follow the link.
 // If there is an error, it will be of type *PathError.
 func (fs local) Lstat(name string) (*ExtendedFileInfo, error) {
-	fi, err := os.Lstat(fixpath(name))
-	if err != nil {
-		return nil, err
-	}
-	return extendedStat(fi), nil
+	return localPathStat(fixpath(name), false)
 }
 
 // Join joins any number of path elements into a single path, adding a
@@ -129,7 +126,13 @@ func (f *localFile) MakeReadable() error {
 		panic("file is already readable")
 	}
 
-	newF, err := newLocalFile(f.name, f.flag, false)
+	var newF *localFile
+	var err error
+	if f.fi != nil && f.fi.Mode.IsRegular() {
+		newF, err = newRegularLocalFile(f.name, f.flag)
+	} else {
+		newF, err = newLocalFile(f.name, f.flag, false)
+	}
 	if err != nil {
 		return err
 	}
@@ -138,23 +141,58 @@ func (f *localFile) MakeReadable() error {
 	return nil
 }
 
+// newRegularLocalFile uses the direct-open path only after Stat has shown
+// that the metadata-only handle refers to a regular file. The second Stat
+// checks the opened descriptor too, since the path can change between calls.
+func newRegularLocalFile(name string, flag int) (*localFile, error) {
+	f, noAtime, err := openFileNoPoller(fixpath(name), sanitizeFlags(flag), 0, true)
+	if err != nil {
+		return nil, err
+	}
+
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		if fi.IsDir() {
+			// Preserve the metadata-only implementation's path-based behavior
+			// when a regular file is replaced by a directory before reopening.
+			return newLocalFile(name, flag, false)
+		}
+		return nil, fmt.Errorf("file %q changed type while opening; expected a regular file", name)
+	}
+	if !noAtime {
+		_ = setFlags(f)
+	}
+
+	return &localFile{
+		name: name,
+		flag: flag,
+		f:    f,
+		fi:   extendedStat(fi),
+	}, nil
+}
+
 func (f *localFile) cacheFI() error {
 	if f.fi != nil {
 		return nil
 	}
-	var fi os.FileInfo
-	var err error
 	if f.f != nil {
-		fi, err = f.f.Stat()
-	} else if f.flag&O_NOFOLLOW != 0 {
-		fi, err = os.Lstat(f.name)
-	} else {
-		fi, err = os.Stat(f.name)
+		fi, err := f.f.Stat()
+		if err != nil {
+			return err
+		}
+		f.fi = extendedStat(fi)
+		return nil
 	}
+	fi, err := localPathStat(f.name, f.flag&O_NOFOLLOW == 0)
 	if err != nil {
 		return err
 	}
-	f.fi = extendedStat(fi)
+	f.fi = fi
 	return nil
 }
 

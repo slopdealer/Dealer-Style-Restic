@@ -176,10 +176,7 @@ func (m *indexMap) hash(id restic.ID) uint {
 	// While SHA-256 should be collision-resistant, for hash table indices
 	// we use only a few bits of it and finding collisions for those is
 	// much easier than breaking the whole algorithm.
-	mh := maphash.Hash{}
-	mh.SetSeed(m.mh.Seed())
-	_, _ = mh.Write(id[:])
-	h := uint(mh.Sum64())
+	h := uint(maphash.Bytes(m.mh.Seed(), id[:]))
 	return h & uint(len(m.buckets)-1)
 }
 

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/restic/restic/internal/backend"
+	"github.com/restic/restic/internal/backend/sema"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/feature"
@@ -20,7 +20,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const maxStreamBufferSize = 4 * 1024 * 1024
+const (
+	maxStreamBufferSize        = 1 * 1024 * 1024
+	smallCheckStreamBufferSize = 256 * 1024
+	smallCheckBlobLimit        = 1 * 1024 * 1024
+)
 
 // ErrIncompletePackEntry is returned when indexes contain different data for a pack.
 type ErrIncompletePackEntry struct {
@@ -124,25 +128,24 @@ func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory
 
 		debug.Log("process blobs")
 		cnt := 0
-		for blob := range idx.Values() {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		// EachByPack already builds the pack relation for the integrity hash.
+		// Record index membership once per group instead of once per blob.
+		for pbs := range idx.EachByPackForCheck(ctx, restic.NewIDSet()) {
+			cnt += len(pbs.Blobs)
+			if _, ok := packToIndex[pbs.PackID]; !ok {
+				packToIndex[pbs.PackID] = restic.NewIDSet()
 			}
-			cnt++
-
-			packID := blob.PackID()
-			if _, ok := packToIndex[packID]; !ok {
-				packToIndex[packID] = restic.NewIDSet()
-			}
-			packToIndex[packID].Insert(id)
-		}
-
-		for pbs := range idx.EachByPack(ctx, restic.NewIDSet()) {
-			packBlobHash := index.PackBlobsHash(pbs)
+			packToIndex[pbs.PackID].Insert(id)
+			// The group owns this scratch and no longer needs its original order.
+			packBlobHash := index.PackBlobsHashOwned(pbs)
 			if _, ok := packToPackBlobHash[pbs.PackID]; !ok {
 				packToPackBlobHash[pbs.PackID] = restic.NewIDSet()
 			}
 			packToPackBlobHash[pbs.PackID].Insert(packBlobHash)
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		debug.Log("%d blobs processed", cnt)
@@ -186,10 +189,17 @@ func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory
 // there are no packs that aren't in an index. errChan is closed after all
 // packs have been checked.
 func (c *Checker) Packs(ctx context.Context, errChan chan<- error) {
+	c.PacksWithPreparedSizes(ctx, nil, errChan)
+}
+
+// PacksWithPreparedSizes checks current backend contents against sizes derived
+// from the already-loaded index. Only that computation may precede confirmation;
+// the backend listing and diagnostic settlement remain here.
+func (c *Checker) PacksWithPreparedSizes(ctx context.Context, prepared *PreparedPackSizes, errChan chan<- error) {
 	defer close(errChan)
 
 	// compute pack size using index entries
-	packs, err := pack.Size(ctx, c.repo, false)
+	packs, err := c.takePackSizes(ctx, prepared)
 	if err != nil {
 		errChan <- err
 		return
@@ -246,10 +256,16 @@ func (c *Checker) Packs(ctx context.Context, errChan chan<- error) {
 
 // ReadPacks loads data from specified packs and checks the integrity.
 func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID]int64) map[restic.ID]int64, printer restic.Printer, errChan chan<- error) {
+	c.ReadPacksWithPreparedSizes(ctx, nil, filter, printer, errChan)
+}
+
+// ReadPacksWithPreparedSizes reuses an index-derived size result after the
+// metadata check has finished. Normal callers retain the synchronous path.
+func (c *Checker) ReadPacksWithPreparedSizes(ctx context.Context, prepared *PreparedPackSizes, filter func(packs map[restic.ID]int64) map[restic.ID]int64, printer restic.Printer, errChan chan<- error) {
 	defer close(errChan)
 
 	// compute pack size using index entries
-	packs, err := pack.Size(ctx, c.repo, false)
+	packs, err := c.takePackSizes(ctx, prepared)
 	if err != nil {
 		errChan <- err
 		return
@@ -285,8 +301,11 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 		id    restic.ID
 		size  int64
 		blobs pack.Blobs
+		prior error
 	}
 	ch := make(chan checkTask)
+	extraCh := make(chan checkTask, 1)
+	extraDone := make(chan struct{})
 
 	// as packs are streamed the concurrency is limited by IO
 	workerCount := int(c.repo.Connections())
@@ -294,7 +313,7 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 	for range workerCount {
 		g.Go(func() error {
 			bufRd := bufio.NewReaderSize(nil, maxStreamBufferSize)
-			dec, err := zstd.NewReader(nil)
+			dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
 			if err != nil {
 				panic(err)
 			}
@@ -313,6 +332,9 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 				}
 
 				err := checkPack(ctx, c.repo, ps.id, ps.blobs, ps.size, bufRd, dec)
+				if err == nil && ps.prior != nil {
+					err = fmt.Errorf("check successful on second attempt, original error %w", ps.prior)
+				}
 				p.Add(1)
 				if err == nil {
 					continue
@@ -327,15 +349,109 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 		})
 	}
 
+	// One extra worker retains the installed small-pack route and can also
+	// stream mixed packs within explicit ciphertext and decoder limits. The
+	// backend's scoped extra slot is released before promoting unfinished work.
+	g.Go(func() error {
+		defer close(extraDone)
+		var bufRd *bufio.Reader
+		var dec *zstd.Decoder
+		var capacityDec *zstd.Decoder
+		var capacityState checkCapacityState
+		defer func() {
+			if dec != nil {
+				dec.Close()
+			}
+			if capacityDec != nil {
+				capacityDec.Close()
+			}
+		}()
+		checkCtx := sema.WithAdditionalLoadSlot(ctx)
+		for {
+			var ps checkTask
+			var ok bool
+			select {
+			case <-ctx.Done():
+				return nil
+			case ps, ok = <-extraCh:
+				if !ok {
+					return nil
+				}
+			}
+			if bufRd == nil {
+				bufRd = bufio.NewReaderSize(nil, smallCheckStreamBufferSize)
+			}
+
+			var err error
+			if smallCheckTask(ps.blobs) {
+				// The ordinary decoder belongs only to the inherited small-pack
+				// path. Mixed packs must not eagerly acquire its retained buffers.
+				if dec == nil {
+					dec, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+					if err != nil {
+						return err
+					}
+				}
+				err = checkPack(checkCtx, c.repo, ps.id, ps.blobs, ps.size, bufRd, dec)
+			} else {
+				if capacityDec == nil {
+					capacityDec, err = newCapacityCheckDecoder()
+					if err != nil {
+						return err
+					}
+				}
+				err = checkPackCapacity(checkCtx, c.repo, ps.id, ps.blobs, ps.size, bufRd, capacityDec, &capacityState)
+				var refused *checkCapacityRefusal
+				if errors.As(err, &refused) {
+					ps.prior = refused.prior
+					select {
+					case ch <- ps:
+					case <-ctx.Done():
+						return nil
+					}
+					continue
+				}
+			}
+			p.Add(1)
+			if err == nil {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case errChan <- err:
+			}
+		}
+	})
+
 	// push packs to ch
 	for pbs := range c.repo.listPacksFromIndex(ctx, packSet) {
 		size := packs[pbs.PackID]
 		debug.Log("listed %v", pbs.PackID)
+		task := checkTask{id: pbs.PackID, size: size, blobs: pbs.Blobs}
+		if smallCheckTask(task.blobs) || capacityCheckTask(task.blobs, size) {
+			// Never let a busy extra worker stall pack enumeration; the
+			// configured workers can always take this task instead.
+			select {
+			case extraCh <- task:
+				continue
+			default:
+			}
+		}
 		select {
-		case ch <- checkTask{id: pbs.PackID, size: size, blobs: pbs.Blobs}:
+		case ch <- task:
 		case <-ctx.Done():
+			close(extraCh)
+			<-extraDone
+			close(ch)
+			_ = g.Wait()
+			return
 		}
 	}
+	close(extraCh)
+	// The extra worker can return unfinished tasks to ordinary workers. Keep
+	// their input open until that producer has relinquished all of its tasks.
+	<-extraDone
 	close(ch)
 
 	err = g.Wait()
@@ -346,6 +462,15 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 		case errChan <- err:
 		}
 	}
+}
+
+func smallCheckTask(blobs pack.Blobs) bool {
+	for _, blob := range blobs {
+		if blob.DataLength() > smallCheckBlobLimit {
+			return false
+		}
+	}
+	return len(blobs) != 0
 }
 
 // checkPack reads a pack and checks the integrity of all blobs.
@@ -369,6 +494,11 @@ func checkPack(ctx context.Context, r *Repository, id restic.ID, blobs pack.Blob
 }
 
 func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
+	return checkPackInnerWithCapacity(ctx, r, id, blobs, size, bufRd, dec, nil)
+}
+
+func checkPackInnerWithCapacity(ctx context.Context, r *Repository, id restic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder, capacity *checkCapacityState) error {
+	bounded := capacity != nil
 
 	type partialReadError struct {
 		error
@@ -404,27 +534,56 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 	var hdrBuf []byte
 	// must use a separate slice from `errs` here as we're only interested in the last retry
 	var blobErrors []error
+	refused := false
 	h := backend.Handle{Type: backend.PackFile, Name: id.String()}
 	err := r.be.Load(ctx, h, int(size), 0, func(rd io.Reader) error {
+		refused = false
+		// The worker reuses the decoder and buffered reader across packs.
+		// Detach this callback's readers before verifying the captured header
+		// or waiting for another pack, including on failed/retried reads.
+		defer func() {
+			_ = dec.Reset(nil)
+			bufRd.Reset(nil)
+		}()
 		hrd := hashing.NewReader(rd, sha256.New())
 		bufRd.Reset(hrd)
 		// reset blob errors for each retry
 		blobErrors = nil
 
-		it := newPackBlobIterator(id, newBufReader(bufRd), 0, blobs, r.Key(), dec)
+		blobReader := newBufReader(bufRd)
+		if !bounded {
+			blobReader.ordinary = true
+			blobReader.reserve = ordinaryCheckCipherReserve(blobs, size)
+		}
+		if bounded {
+			blobReader.max = checkCipherCapacity
+			if capacity.cipher == nil {
+				capacity.cipher = make([]byte, checkCipherCapacity)
+			}
+			blobReader.buf = capacity.cipher
+		}
+		it := newPackBlobIterator(id, blobReader, 0, blobs, r.Key(), dec)
 		for {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 
-			val, err := it.Next()
+			val, err := it.NextHash()
 			if err == errPackEOF {
 				break
 			} else if err != nil {
+				if bounded && errors.Is(err, errCheckCapacity) {
+					refused = true
+					return nil
+				}
 				return &partialReadError{err}
 			}
 			debug.Log("  check blob %v: %v", val.Handle.ID, val.Handle)
 			if val.Err != nil {
+				if bounded && (errors.Is(val.Err, zstd.ErrWindowSizeExceeded) || errors.Is(val.Err, zstd.ErrDecoderSizeExceeded)) {
+					refused = true
+					return nil
+				}
 				debug.Log("  error verifying blob %v: %v", val.Handle.ID, val.Err)
 				blobErrors = append(blobErrors, errors.Errorf("blob %v: %v", val.Handle.ID, val.Err))
 			}
@@ -443,6 +602,10 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 
 		// read remainder, which should be the pack header
 		var err error
+		if bounded && (size-int64(curPos) < 0 || size-int64(curPos) > checkHeaderCapacity) {
+			refused = true
+			return nil
+		}
 		hdrBuf = make([]byte, int(size-int64(curPos)))
 		_, err = io.ReadFull(bufRd, hdrBuf)
 		if err != nil {
@@ -466,12 +629,22 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 		// completely failed to download such that there's no point in repairing anything.
 		return fmt.Errorf("download error: %w", err)
 	}
+	if refused {
+		var prior error
+		if len(errs) != 0 {
+			prior = &ErrPackData{PackID: id, errs: errs}
+		}
+		return &checkCapacityRefusal{prior: prior}
+	}
 	if !hash.Equal(id) {
 		debug.Log("pack ID does not match, want %v, got %v", id, hash)
 		return &ErrPackData{PackID: id, errs: append(errs, errors.Errorf("unexpected pack id %v", hash))}
 	}
 
-	blobs, hdrSize, err := pack.List(r.Key(), bytes.NewReader(hdrBuf), int64(len(hdrBuf)))
+	if len(hdrBuf) >= largeCheckHeaderThreshold {
+		return checkLargePackHeader(r, id, idxHdrSize, hdrBuf, errs)
+	}
+	blobs, hdrSize, err := pack.ListOwnedTail(r.Key(), hdrBuf)
 	if err != nil {
 		return &ErrPackData{PackID: id, errs: append(errs, err)}
 	}
@@ -483,13 +656,7 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 
 	for _, blob := range blobs {
 		// Check if blob is contained in index and position is correct
-		idxHas := false
-		for _, pb := range r.idx.Lookup(blob.BlobHandle) {
-			if pb.PackID().Equal(id) && pb.Blob == blob {
-				idxHas = true
-				break
-			}
-		}
+		idxHas := r.idx.ContainsPackBlob(id, blob)
 		if !idxHas {
 			errs = append(errs, errors.Errorf("blob %v is not contained in index or position is incorrect", blob.ID))
 			continue
@@ -504,8 +671,11 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 }
 
 type bufReader struct {
-	rd  *bufio.Reader
-	buf []byte
+	rd       *bufio.Reader
+	buf      []byte
+	max      int
+	reserve  int
+	ordinary bool
 }
 
 func newBufReader(rd *bufio.Reader) *bufReader {
@@ -519,6 +689,12 @@ func (b *bufReader) Discard(n int) (discarded int, err error) {
 }
 
 func (b *bufReader) ReadFull(n int) (buf []byte, err error) {
+	if b.ordinary && b.max == 0 {
+		return b.readFullOrdinary(n)
+	}
+	if b.max != 0 && n > b.max {
+		return nil, errCheckCapacity
+	}
 	if cap(b.buf) < n {
 		b.buf = make([]byte, n)
 	}

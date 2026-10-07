@@ -1278,6 +1278,29 @@ func TestRestoreIfChanged(t *testing.T) {
 	}
 }
 
+func TestEnsureDirWithFreshness(t *testing.T) {
+	root := t.TempDir()
+	res := &Restorer{}
+
+	newDir := filepath.Join(root, "new")
+	fresh, err := res.ensureDirWithFreshness(newDir)
+	rtest.OK(t, err)
+	rtest.Equals(t, true, fresh)
+
+	fresh, err = res.ensureDirWithFreshness(newDir)
+	rtest.OK(t, err)
+	rtest.Equals(t, false, fresh)
+
+	stalePath := filepath.Join(root, "stale")
+	rtest.OK(t, os.WriteFile(stalePath, nil, 0o600))
+	fresh, err = res.ensureDirWithFreshness(stalePath)
+	rtest.OK(t, err)
+	rtest.Equals(t, true, fresh)
+	info, err := os.Stat(stalePath)
+	rtest.OK(t, err)
+	rtest.Assert(t, info.IsDir(), "expected stale file to be replaced by a directory")
+}
+
 func TestRestoreDryRun(t *testing.T) {
 	snapshot := Snapshot{
 		Nodes: map[string]Node{
