@@ -35,6 +35,14 @@ type Restorer struct {
 	// can be observed.
 	freshDirs map[string]struct{}
 
+	// prefetchTrees is the bounded list of tree IDs that the first pass of
+	// the running RestoreTo records for the second pass's tree prefetch
+	// (tree_id_list.go). It is a field, not a local of RestoreTo, so that its
+	// size can be observed. prefetchTreeLimit is its bound; zero means
+	// maxPrefetchTreeIDs.
+	prefetchTrees     restoreTreeIDList
+	prefetchTreeLimit int
+
 	Error func(location string, err error) error
 	Warn  func(message string)
 	Info  func(message string)
@@ -729,12 +737,18 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	}
 
 	var buf []byte
-	var restoreTreeIDs []restic.ID
+	treeLimit := res.prefetchTreeLimit
+	if treeLimit == 0 {
+		treeLimit = maxPrefetchTreeIDs
+	}
+	res.prefetchTrees = newRestoreTreeIDList(treeLimit)
+	// the list is of no use once the second pass has ended
+	defer func() { res.prefetchTrees = restoreTreeIDList{} }()
 	var observeTree func(restic.ID)
 	if !res.opts.DryRun {
-		observeTree = func(id restic.ID) {
-			restoreTreeIDs = append(restoreTreeIDs, id)
-		}
+		// Only the first trees of the snapshot are recorded, up to the bound:
+		// the restore keeps nothing for every directory.
+		observeTree = res.prefetchTrees.add
 	}
 
 	var treeCarry *restoreTreeCarry
@@ -831,6 +845,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	}
 
 	var treePrefetch *restoreTreePrefetch
+	restoreTreeIDs := res.prefetchTrees.ids
 	if !res.opts.DryRun && len(filerestorer.files) != 0 && len(restoreTreeIDs) != 0 {
 		// These trees feed the second pass only. LoadMetadataTree returns
 		// nodes WITHOUT their content IDs (Node.Content is empty): no visitor
