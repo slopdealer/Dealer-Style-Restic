@@ -3,7 +3,7 @@ package restorer
 import "github.com/restic/restic/internal/restic"
 
 // maxPrefetchTreeIDs bounds the list of tree IDs that the first pass of a
-// restore records for the second pass's tree prefetch: 2 MiB of IDs.
+// restore records for the second pass's tree prefetch: 16 MiB of IDs.
 //
 // Stock keeps nothing per directory during a restore. The list used to hold
 // one ID for every directory of the snapshot (32 bytes each, more while the
@@ -18,7 +18,15 @@ import "github.com/restic/restic/internal/restic"
 // needs it (restoreTreePrefetch.Load). So a snapshot with more directories
 // than the bound restores as before, without the read-ahead for the trees
 // past the bound; a snapshot with fewer is not affected at all.
-const maxPrefetchTreeIDs = 1 << 16
+//
+// The size of the bound was measured (linux/amd64, 4 CPUs, restore of 606,060
+// directories and three files; wall seconds and peak RSS): no bound 53 s and
+// 80 MiB; 524,288 IDs 52 s and 57 MiB; 262,144 IDs 58 s and 57 MiB; 65,536
+// IDs 72 s and 56 MiB; stock 64 s and 63 MiB. Without the read-ahead the
+// second pass costs about 40 microseconds more per directory. The peak of the
+// process is the key derivation at start-up, so a full list of this size
+// does not show in it; a larger one would.
+const maxPrefetchTreeIDs = 1 << 19
 
 // restoreTreeIDList is a list of tree IDs that never holds, and never
 // allocates room for, more than limit IDs.

@@ -29,7 +29,7 @@ func numberedTreeID(i int) (id restic.ID) {
 // The list never holds more IDs than its limit and never allocates room for
 // more, whatever is added; what it holds is the first IDs, in order.
 func TestRestoreTreeIDListNeverExceedsItsLimit(t *testing.T) {
-	for _, limit := range []int{0, 1, 2, 63, 64, 65, 1000, maxPrefetchTreeIDs} {
+	for _, limit := range []int{0, 1, 2, 63, 64, 65, 1000, 1 << 16, maxPrefetchTreeIDs} {
 		list := newRestoreTreeIDList(limit)
 		adds := 3*limit + 1000
 		for i := 0; i < adds; i++ {
@@ -48,7 +48,7 @@ func TestRestoreTreeIDListNeverExceedsItsLimit(t *testing.T) {
 		}
 	}
 
-	// two million directories against the production bound: 2 MiB, not 64
+	// two million directories against the production bound: 16 MiB, not 64
 	list := newRestoreTreeIDList(maxPrefetchTreeIDs)
 	for i := 0; i < 2_020_200; i++ {
 		list.add(numberedTreeID(i))
@@ -56,8 +56,8 @@ func TestRestoreTreeIDListNeverExceedsItsLimit(t *testing.T) {
 	if len(list.ids) != maxPrefetchTreeIDs || cap(list.ids) != maxPrefetchTreeIDs {
 		t.Fatalf("2,020,200 additions: %d IDs kept with room for %d, the bound is %d", len(list.ids), cap(list.ids), maxPrefetchTreeIDs)
 	}
-	if bytes := cap(list.ids) * len(restic.ID{}); bytes != 2<<20 {
-		t.Fatalf("the full list takes %d bytes, expected 2 MiB", bytes)
+	if bytes := cap(list.ids) * len(restic.ID{}); bytes != 16<<20 {
+		t.Fatalf("the full list takes %d bytes, expected 16 MiB", bytes)
 	}
 }
 
