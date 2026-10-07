@@ -118,15 +118,40 @@ func (p *restoreNodeLookahead) wrapSource(open func() (func() (data.NodeOrError,
 				return false
 			}
 		}
-		if !start() {
-			for {
-				item, ok := next()
-				if !ok || !yield(item) || item.Error != nil {
-					return
+		for {
+			if !pending {
+				// A directory ends a batch, so the helper returns a run of
+				// directories one node at a time, and an empty tree as an
+				// empty batch: a request and a reply each time, with nothing
+				// prepared ahead. Such nodes are decoded here instead. The
+				// helper is asked from the first node on that is no directory.
+				for {
+					item, ok := next()
+					if !ok {
+						return
+					}
+					dir := item.Error == nil && item.Node != nil && item.Node.Type == data.NodeTypeDir
+					if !dir && item.Error == nil && item.Node != nil && estimatePreparedNodeBytes(item.Node) <= restoreLookaheadBytes {
+						// the nodes after it are prepared while this one is
+						// visited, as they are within a batch
+						start()
+					}
+					if !yield(item) || item.Error != nil {
+						return
+					}
+					if !dir {
+						break
+					}
+				}
+				if !pending && !start() {
+					for {
+						item, ok := next()
+						if !ok || !yield(item) || item.Error != nil {
+							return
+						}
+					}
 				}
 			}
-		}
-		for {
 			batch := <-result
 			pending = false
 			owned := true
@@ -160,14 +185,6 @@ func (p *restoreNodeLookahead) wrapSource(open func() (func() (data.NodeOrError,
 			}()
 			if !keepGoing || batch.end {
 				return
-			}
-			if !pending && !start() {
-				for {
-					item, ok := next()
-					if !ok || !yield(item) || item.Error != nil {
-						return
-					}
-				}
 			}
 		}
 	}
