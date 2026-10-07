@@ -34,7 +34,13 @@ import (
 // to a missing backend storage location or config file
 var ErrNoRepository = errors.New("repository does not exist")
 
-const Version = "0.19.1-dev (compiled manually)"
+// Version is the version this build reports, in `restic version` and in the
+// snapshots it writes. It names this build ("dealer") after upstream's
+// version number, so that its snapshots and its bug reports can be told from
+// upstream's. It is a variable so that a release build can set it:
+//
+//	-ldflags '-X github.com/restic/restic/internal/global.Version=...'
+var Version = "0.19.1-dev-dealer.1 (compiled manually)"
 
 // TimeFormat is the format used for all timestamps printed by restic.
 const TimeFormat = "2006-01-02 15:04:05"
