@@ -36,6 +36,9 @@ var (
 type Key struct {
 	MACKey        `json:"mac"`
 	EncryptionKey `json:"encrypt"`
+	// preparation keeps the expanded keys between calls (Prepare); nil for a
+	// Key that was not prepared.
+	preparation *cipherPreparation
 }
 
 // EncryptionKey is key used for encryption
@@ -88,7 +91,7 @@ func poly1305Verify(msg []byte, nonce []byte, key *MACKey, mac []byte) bool {
 
 // NewRandomKey returns new encryption and message authentication keys.
 func NewRandomKey() *Key {
-	k := &Key{}
+	k := &Key{preparation: &cipherPreparation{}}
 
 	n, err := rand.Read(k.EncryptionKey[:])
 	if n != aesKeySize || err != nil {
@@ -259,14 +262,11 @@ func (k *Key) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 
 	ret, out := sliceForAppend(dst, len(plaintext)+k.Overhead())
 
-	c, err := aes.NewCipher(k.EncryptionKey[:])
-	if err != nil {
-		panic(fmt.Sprintf("unable to create cipher: %v", err))
-	}
-	e := cipher.NewCTR(c, nonce)
+	prepared := k.preparedCiphers()
+	e := cipher.NewCTR(prepared.encryption, nonce)
 	e.XORKeyStream(out, plaintext)
 
-	mac := poly1305MAC(out[:len(plaintext)], nonce, &k.MACKey)
+	mac := prepared.sum(out[:len(plaintext)], nonce)
 	copy(out[len(plaintext):], mac)
 
 	return ret
@@ -306,17 +306,14 @@ func (k *Key) Open(dst, nonce, ciphertext, _ []byte) ([]byte, error) {
 	ct, mac := ciphertext[:l], ciphertext[l:]
 
 	// verify mac
-	if !poly1305Verify(ct, nonce, &k.MACKey, mac) {
+	prepared := k.preparedCiphers()
+	if !prepared.verify(ct, nonce, mac) {
 		return nil, ErrUnauthenticated
 	}
 
 	ret, out := sliceForAppend(dst, len(ct))
 
-	c, err := aes.NewCipher(k.EncryptionKey[:])
-	if err != nil {
-		panic(fmt.Sprintf("unable to create cipher: %v", err))
-	}
-	e := cipher.NewCTR(c, nonce)
+	e := cipher.NewCTR(prepared.encryption, nonce)
 	e.XORKeyStream(out, ct)
 
 	return ret, nil

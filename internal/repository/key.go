@@ -121,6 +121,10 @@ func openKey(ctx context.Context, s *Repository, id restic.ID, password string) 
 		return nil, errors.New("Invalid key for repository")
 	}
 
+	// the master key encrypts and authenticates every blob of this process:
+	// let it keep its expanded AES keys (crypto/cipher_preparation.go)
+	k.master.Prepare()
+
 	return k, nil
 }
 
