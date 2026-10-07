@@ -112,6 +112,7 @@ func computePackTypes(ctx context.Context, idx restic.ListBlobser) (map[restic.I
 func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory) (hints []error, errs []error) {
 	debug.Log("Start")
 	packToIndex := make(map[restic.ID]restic.IDSet)
+	packTypes := freshCheckPackTypes(c.repo.idx)
 	// in restic < 0.10.0, the blobs of a pack could be split over multiple indexes.
 	// by now this is considered as repository damage.
 	packToPackBlobHash := make(map[restic.ID]restic.IDSet)
@@ -132,6 +133,9 @@ func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory
 		// Record index membership once per group instead of once per blob.
 		for pbs := range idx.EachByPackForCheck(ctx, restic.NewIDSet()) {
 			cnt += len(pbs.Blobs)
+			if packTypes != nil {
+				collectCheckPackType(packTypes, pbs)
+			}
 			if _, ok := packToIndex[pbs.PackID]; !ok {
 				packToIndex[pbs.PackID] = restic.NewIDSet()
 			}
@@ -156,9 +160,12 @@ func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory
 		return hints, append(errs, err)
 	}
 
-	packTypes, err := computePackTypes(ctx, c.repo)
-	if err != nil {
-		return hints, append(errs, err)
+	if packTypes == nil {
+		// Previously loaded or unsaved blobs do not appear in load callbacks.
+		packTypes, err = computePackTypes(ctx, c.repo)
+		if err != nil {
+			return hints, append(errs, err)
+		}
 	}
 
 	debug.Log("checking for duplicate packs")
