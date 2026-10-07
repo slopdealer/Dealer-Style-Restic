@@ -703,11 +703,14 @@ func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan
 	return mi.listPacksFallback(ctx, packs)
 }
 
-func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collect bool) <-chan PackBlobs {
+// listPacks lists the blobs of the packs to repack: a bounded single traversal
+// for small selections, then routes by pack ordinal over a single final
+// index, then the selective partition walk that ListPacks uses.
+func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
 	out := make(chan PackBlobs)
 	go func() {
 		defer close(out)
-		if collect && len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
+		if len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
 			grouped, complete := mi.collectSelectedPacks(ctx, packs, listPacksCollectPackLimit, listPacksCollectBlobLimit)
 			if ctx.Err() != nil {
 				return
@@ -730,47 +733,11 @@ func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collec
 			}
 		}
 
-		if collect && len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
+		if len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
 			return
 		}
 
-		if collect {
-			mi.publishRepackFallback(ctx, packs, out)
-			return
-		}
-
-		// only resort a part of the index to keep the memory overhead bounded
-		for i := range byte(16) {
-			packBlob := make(map[restic.ID]pack.Blobs)
-			for pack := range packs {
-				if pack[0]&0xf == i {
-					packBlob[pack] = nil
-				}
-			}
-			if len(packBlob) == 0 {
-				continue
-			}
-			for pb := range mi.Values() {
-				if ctx.Err() != nil {
-					return
-				}
-				packID := pb.PackID()
-				if packs.Has(packID) && packID[0]&0xf == i {
-					packBlob[packID] = append(packBlob[packID], pb.Blob)
-				}
-			}
-
-			// pass on packs
-			for packID, pbs := range packBlob {
-				// allow GC
-				packBlob[packID] = nil
-				select {
-				case out <- PackBlobs{PackID: packID, Blobs: pbs}:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
+		mi.publishRepackFallback(ctx, packs, out)
 	}()
 	return out
 }

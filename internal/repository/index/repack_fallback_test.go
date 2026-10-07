@@ -106,7 +106,7 @@ func TestB18FallbackDifferential(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/selected%d", layout, selected), func(t *testing.T) {
 				mi, packs := routeFixture(130000, selected)
 				b18Layout(mi, layout)
-				want := collectPackChannel(t, mi.listPacks(context.Background(), packs, false))
+				want := collectPackChannel(t, mi.listPacksStock(context.Background(), packs))
 				ordinary := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
 				if !reflect.DeepEqual(want, ordinary) {
 					t.Fatal("ordinary fallback differs from original pointer traversal")
@@ -247,17 +247,17 @@ func TestB18FallbackPartialCancellation(t *testing.T) {
 	mi.idx[0].final = false
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	gate := &b26RouteCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &routeCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
 	out := make(chan PackBlobs)
 	done := make(chan struct{})
 	go func() { mi.publishRepackFallback(gate, packs, out); close(out); close(done) }()
-	b26Await(t, gate.entered, "partial fallback scan")
+	awaitSettlement(t, gate.entered, "partial fallback scan")
 	cancel()
 	close(gate.release)
 	for range out {
 		t.Fatal("partial canceled partition escaped")
 	}
-	b26Await(t, done, "fallback producer settlement")
+	awaitSettlement(t, done, "fallback producer settlement")
 	unlocked := make(chan struct{})
 	go func() {
 		mi.idxMutex.Lock()
@@ -266,7 +266,7 @@ func TestB18FallbackPartialCancellation(t *testing.T) {
 		mi.idxMutex.Unlock()
 		close(unlocked)
 	}()
-	b26Await(t, unlocked, "fallback post-cancellation locks")
+	awaitSettlement(t, unlocked, "fallback post-cancellation locks")
 }
 
 func TestB18FallbackOwnsPublishedValues(t *testing.T) {
@@ -293,7 +293,7 @@ func BenchmarkB18OrdinaryFallback(b *testing.B) {
 					if arm == "reject" {
 						out = mi.ListPacks(context.Background(), packs)
 					} else {
-						out = mi.listPacks(context.Background(), packs, false)
+						out = mi.listPacksStock(context.Background(), packs)
 					}
 					count := 0
 					for pbs := range out {

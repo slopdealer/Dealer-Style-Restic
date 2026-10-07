@@ -15,7 +15,7 @@ import (
 // Gate an actual cancellation at an Err checkpoint, without scheduling sleeps
 // or changing production code. The call count lets the test stop after some
 // selected entries have been copied, rather than only before work begins.
-type b26RouteCheckpoint struct {
+type routeCheckpoint struct {
 	context.Context
 	calls   atomic.Int64
 	stop    int64
@@ -23,7 +23,7 @@ type b26RouteCheckpoint struct {
 	release chan struct{}
 }
 
-func (c *b26RouteCheckpoint) Err() error {
+func (c *routeCheckpoint) Err() error {
 	if c.calls.Add(1) == c.stop {
 		close(c.entered)
 		<-c.release
@@ -31,7 +31,7 @@ func (c *b26RouteCheckpoint) Err() error {
 	return c.Context.Err()
 }
 
-func b26Await(t *testing.T, ch <-chan struct{}, what string) {
+func awaitSettlement(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-ch:
@@ -40,13 +40,13 @@ func b26Await(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-func TestB26RepackRoutesPartialCancellation(t *testing.T) {
+func TestRepackRoutesPartialCancellation(t *testing.T) {
 	for _, stage := range []string{"construction", "partition"} {
 		t.Run(stage, func(t *testing.T) {
 			mi, packs := routeFixture(20000, 19)
 			parent, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			gate := &b26RouteCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
+			gate := &routeCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
 			defer func() {
 				select {
 				case <-gate.release:
@@ -75,10 +75,10 @@ func TestB26RepackRoutesPartialCancellation(t *testing.T) {
 					failure = "partial partition escaped"
 				}
 			}()
-			b26Await(t, gate.entered, "partial-work checkpoint")
+			awaitSettlement(t, gate.entered, "partial-work checkpoint")
 			cancel()
 			close(gate.release)
-			b26Await(t, done, "canceled work settlement")
+			awaitSettlement(t, done, "canceled work settlement")
 			if failure != "" {
 				t.Fatal(failure)
 			}
@@ -91,12 +91,12 @@ func TestB26RepackRoutesPartialCancellation(t *testing.T) {
 				mi.idxMutex.Unlock()
 				close(unlocked)
 			}()
-			b26Await(t, unlocked, "post-cancellation write locks")
+			awaitSettlement(t, unlocked, "post-cancellation write locks")
 		})
 	}
 }
 
-func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
+func TestRepackRoutesConcurrentGrowth(t *testing.T) {
 	mi, packs := routeFixture(20000, 19)
 	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
 	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
@@ -118,7 +118,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
 		other.Finalize()
 		additions[batch] = other
 	}
-	gate := &b26RouteCheckpoint{Context: context.Background(), stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &routeCheckpoint{Context: context.Background(), stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
 	defer func() {
 		select {
 		case <-gate.release:
@@ -128,7 +128,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
 	}()
 	first := make(chan map[restic.ID]pack.Blobs, 1)
 	go func() { first <- routes.partition(gate, packs, 1) }()
-	b26Await(t, gate.entered, "conversion holding captured-index read lock")
+	awaitSettlement(t, gate.entered, "conversion holding captured-index read lock")
 	started := make(chan struct{})
 	done := make(chan struct{})
 	var mergeErr error
@@ -142,7 +142,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
 			}
 		}
 	}()
-	b26Await(t, started, "merge started during conversion")
+	awaitSettlement(t, started, "merge started during conversion")
 	select {
 	case <-done:
 		t.Fatal("merge finished while partition held read lock")
@@ -168,7 +168,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
 			t.Fatalf("partition %d retains its ordinal array", group)
 		}
 	}
-	b26Await(t, done, "concurrent merges")
+	awaitSettlement(t, done, "concurrent merges")
 	if mergeErr != nil {
 		t.Fatal(mergeErr)
 	}
@@ -183,7 +183,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
 	}
 }
 
-func TestB26RepackRoutesConsumerOwnership(t *testing.T) {
+func TestRepackRoutesConsumerOwnership(t *testing.T) {
 	mi, packs := routeFixture(20000, 19)
 	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
 	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)

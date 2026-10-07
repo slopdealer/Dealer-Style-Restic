@@ -53,5 +53,5 @@ func (mi *MasterIndex) collectSelectedPacks(ctx context.Context, packs restic.ID
 // An overflowing attempt publishes nothing, so the original path can start
 // cleanly. Callers must cancel the context if they stop consuming the channel.
 func (mi *MasterIndex) ListPacksForRepack(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
-	return mi.listPacks(ctx, packs, true)
+	return mi.listPacks(ctx, packs)
 }
