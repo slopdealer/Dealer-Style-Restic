@@ -18,10 +18,15 @@ type lineWriter struct {
 	timer       *time.Timer
 	lastWrite   time.Time
 	batch       []byte
-	closed      bool
+	// batchEnds holds the offset in batch at which each message of stock
+	// ends: stock prints the complete lines of one Write as one message
+	batchEnds []int
+	closed    bool
 
 	buf   bytes.Buffer
 	print func(string)
+	// printMessages, when set, takes a batch together with its message ends
+	printMessages func(string, []int)
 }
 
 var _ io.WriteCloser = &lineWriter{}
@@ -79,6 +84,7 @@ func (w *lineWriter) Write(data []byte) (n int, err error) {
 	}
 	if start > 0 {
 		w.buf.Next(start)
+		w.endMessageLocked()
 	}
 	if len(w.batch) > 0 {
 		w.scheduleIdleLocked()
@@ -172,14 +178,29 @@ func (w *lineWriter) flushIdle() {
 	w.flushBatchLocked()
 }
 
+// endMessageLocked notes that the lines collected so far end a message.
+func (w *lineWriter) endMessageLocked() {
+	if n := len(w.batch); n > 0 && (len(w.batchEnds) == 0 || w.batchEnds[len(w.batchEnds)-1] != n) {
+		w.batchEnds = append(w.batchEnds, n)
+	}
+}
+
 func (w *lineWriter) flushBatchLocked() {
 	if len(w.batch) == 0 {
 		return
 	}
 	w.stopTimerLocked()
+	w.endMessageLocked()
 	line := string(w.batch)
 	w.batch = w.batch[:0]
-	w.print(line)
+	if w.printMessages == nil {
+		w.batchEnds = w.batchEnds[:0]
+		w.print(line)
+		return
+	}
+	ends := append([]int(nil), w.batchEnds...)
+	w.batchEnds = w.batchEnds[:0]
+	w.printMessages(line, ends)
 }
 
 func (w *lineWriter) stopTimerLocked() {

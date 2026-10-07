@@ -2,7 +2,6 @@ package termstatus
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -53,7 +52,10 @@ type terminal struct {
 }
 
 type message struct {
-	line    string
+	line string
+	// ends is set when line holds several messages of stock, collected by the
+	// output writer: the offset at which each of them ends
+	ends    []int
 	err     bool
 	barrier chan struct{}
 }
@@ -200,9 +202,16 @@ func (t *terminal) OutputWriter() io.Writer {
 	defer t.outputMu.Unlock()
 
 	t.outputWriterOnce.Do(func() {
-		t.outputWriter = newTerminalLineWriter(func(line string) {
+		w := newTerminalLineWriter(func(line string) {
 			t.enqueueOutput(line, false)
 		}, &t.outputMu, t.batchStdout, t.outputBatchWindow)
+		w.printMessages = func(batch string, ends []int) {
+			select {
+			case t.msg <- message{line: batch, ends: ends}:
+			case <-t.closed:
+			}
+		}
+		t.outputWriter = w
 	})
 	return t.outputWriter
 }
@@ -390,7 +399,9 @@ func findUnchangedLines(curr, last []string) []bool {
 func (t *terminal) runWithoutStatus(ctx context.Context) {
 	var lastStatus []string
 	// batch holds the messages collected for one stream, batchErr says which
+	// and batchEnds where each message ends in it
 	var batch []byte
+	var batchEnds []int
 	var batchErr bool
 	var batchTimer *time.Timer
 	var batchTimerC <-chan time.Time
@@ -431,8 +442,9 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 		if batchErr {
 			dst = t.errWriter
 		}
-		t.writeBatch(dst, batch)
+		t.writeBatch(dst, batch, batchEnds)
 		batch = batch[:0]
+		batchEnds = batchEnds[:0]
 	}
 	for {
 		select {
@@ -458,7 +470,14 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 				if batch == nil {
 					batch = make([]byte, 0, maxOutputBatchSize)
 				}
+				base := len(batch)
 				batch = append(batch, msg.line...)
+				for _, end := range msg.ends {
+					batchEnds = append(batchEnds, base+end)
+				}
+				if msg.ends == nil {
+					batchEnds = append(batchEnds, len(batch))
+				}
 				batchErr = msg.err
 				startBatchTimer()
 				continue
@@ -471,6 +490,10 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 				dst = t.wr
 			}
 
+			if msg.ends != nil {
+				t.writeBatch(dst, []byte(msg.line), msg.ends)
+				continue
+			}
 			_, err := io.WriteString(dst, msg.line)
 			t.logWriteErr(err)
 
@@ -494,35 +517,54 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
 	}
 }
 
-// writeBatch writes the messages collected for one stream. A writer that works
-// gets them in one call. When that call fails, the outcome is the one of
-// writing line by line, which is what stock does with these messages: the
-// error is reported, the line in which the write stopped is given up, and
-// every later line is written once on its own, each failure reported. No byte
-// is written twice and nothing is kept for another attempt. As in stock, the
-// number of bytes a writer reports is not examined when it reports no error.
-func (t *terminal) writeBatch(dst io.Writer, batch []byte) {
+// writeBatch writes the messages collected for one stream; ends holds the
+// offset at which each message ends. A writer that works gets them in one
+// call. When that call fails, the outcome is the one of writing message by
+// message, which is what stock does: the error is reported, the message in
+// which the write stopped is given up, and every later message is written once
+// on its own, each failure reported. A write that stopped exactly between two
+// messages stopped in none: the message after it is written like every later
+// one. No byte is written twice and nothing is kept for another attempt. As in
+// stock, the number of bytes a writer reports is not examined when it reports
+// no error.
+func (t *terminal) writeBatch(dst io.Writer, batch []byte, ends []int) {
 	n, err := dst.Write(batch)
 	if err == nil {
 		return
 	}
 	t.logWriteErr(err)
 
-	rest := batch[min(max(n, 0), len(batch)):]
-	// the line that was being written is lost, like a message in stock
-	i := bytes.IndexByte(rest, '\n')
-	if i < 0 {
-		return
+	n = min(max(n, 0), len(batch))
+	// next is the first message that has not been written completely
+	next := 0
+	for next < len(ends) && ends[next] <= n {
+		next++
 	}
-	rest = rest[i+1:]
-	for len(rest) > 0 {
-		end := bytes.IndexByte(rest, '\n') + 1
-		if end == 0 {
-			end = len(rest)
+	start := 0
+	if next > 0 {
+		start = ends[next-1]
+	}
+	switch {
+	case n > start || next == 0:
+		// the message in which the write stopped is lost, like a message in
+		// stock; so is the first one when nothing was written at all
+		next++
+	case next < len(ends):
+		// The write stopped exactly between two messages. Stock either got
+		// this error with the message before, which is complete, and then
+		// wrote the next one; or it got the error for the next one, of which
+		// nothing was written. The next message is therefore written on its
+		// own, and a failure that repeats the reported one is the same
+		// failure, not a second one.
+		_, again := dst.Write(batch[start:ends[next]])
+		if again != nil && again.Error() != err.Error() {
+			t.logWriteErr(again)
 		}
-		_, err := dst.Write(rest[:end])
+		next++
+	}
+	for ; next < len(ends); next++ {
+		_, err := dst.Write(batch[ends[next-1]:ends[next]])
 		t.logWriteErr(err)
-		rest = rest[end:]
 	}
 }
 
