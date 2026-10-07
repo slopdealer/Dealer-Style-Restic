@@ -78,7 +78,10 @@ func TestPackMembershipEqualityThroughMerge(t *testing.T) {
 		p[0] ^= 0x80
 		queries = append(queries, membershipQuery{p, q.blob})
 		if strconv.IntSize > 32 {
-			wide := uint(uint64(1) << 32)
+			// a run-time value: the constant 1<<32 does not fit a 32-bit uint,
+			// and the compiler checks it there even inside this branch
+			one := uint64(1)
+			wide := uint(one << 32)
 			b = q.blob
 			b.Offset += wide
 			queries = append(queries, membershipQuery{q.packID, b})
