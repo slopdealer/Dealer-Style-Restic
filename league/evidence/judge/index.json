@@ -1,0 +1,166 @@
+{
+ "jobs": {
+  "final-rc5-12r": {
+   "file": "final-rc5-12r.result.json",
+   "job_id": "757b745c69924a67a1ba8c1b06694b24",
+   "mode": "reference",
+   "rounds": 12,
+   "status": "complete",
+   "started_at": "2026-10-07T07:06:03.743753+00:00",
+   "completed_at": "2026-10-07T07:52:15.048967+00:00",
+   "candidate": "rc-5",
+   "candidate_source_sha256": "19614c999fdc37ab6d6e74bc589ec224aaa3f4cbe6b73a68a614119d286e130b",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "43150cd80bc0d5406bd5cf3df7b5e9af4f479669c96a75ecb7c139b776661bae",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "final-rc5-44r": {
+   "file": "final-rc5-44r.result.json",
+   "job_id": "c87fa304e1404dfda35dd162d7dcf0fc",
+   "mode": "promotion",
+   "rounds": 44,
+   "status": "complete",
+   "started_at": "2026-10-07T07:58:35.703195+00:00",
+   "completed_at": "2026-10-07T09:43:19.327407+00:00",
+   "candidate": "rc-5",
+   "candidate_source_sha256": "19614c999fdc37ab6d6e74bc589ec224aaa3f4cbe6b73a68a614119d286e130b",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "44c4cd730ed80ce34f1536f4ba62c420c8ff03f503258a41cfe6fa1a7c4b908f",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "final2-rc6-12r": {
+   "file": "final2-rc6-12r.result.json",
+   "job_id": "f6765696fabc4de7b1b9305b54df371a",
+   "mode": "reference",
+   "rounds": 12,
+   "status": "complete",
+   "started_at": "2026-10-07T10:53:55.142138+00:00",
+   "completed_at": "2026-10-07T11:40:32.841177+00:00",
+   "candidate": "rc-6",
+   "candidate_source_sha256": "e9eafda29c85c8a86e5ee0498acda8f615122e8724fb456900810d83f47ba9dd",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "087c5c017a4e14ad2e4aa302fdb71ca3a017993e58902be707d04ec0c0fd4119",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "final2-rc7-12r": {
+   "file": "final2-rc7-12r.result.json",
+   "job_id": "d5c8c004393e4cf5b7ebd41b7dfa3ace",
+   "mode": "reference",
+   "rounds": 12,
+   "status": "complete",
+   "started_at": "2026-10-07T12:04:20.497458+00:00",
+   "completed_at": "2026-10-07T12:50:55.845340+00:00",
+   "candidate": "rc-7",
+   "candidate_source_sha256": "1cf01fbc5b88b160d68d9503a77f1b6d05a6af2f9ac7a5d136a97d945eab50f4",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "127909d959b3161d39789e8f3ecdacfdf50daf612f9d1b7d97674f9efcf3bb3f",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "final2-rc7-44r": {
+   "file": "final2-rc7-44r.result.json",
+   "job_id": "940c4e64034e4e18a740e4f33537b1e8",
+   "mode": "promotion",
+   "rounds": 44,
+   "status": "complete",
+   "started_at": "2026-10-07T12:53:28.702738+00:00",
+   "completed_at": "2026-10-07T14:37:25.206041+00:00",
+   "candidate": "rc-7",
+   "candidate_source_sha256": "1cf01fbc5b88b160d68d9503a77f1b6d05a6af2f9ac7a5d136a97d945eab50f4",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "6ecb66103fb03a69eba3aa736f76e18a6b6907f2313482b680f48c6b8fbf6097",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "final3-rc8-12r": {
+   "file": "final3-rc8-12r.result.json",
+   "job_id": "9fc9eafd689448c3ad5220374cffd888",
+   "mode": "reference",
+   "rounds": 12,
+   "status": "complete",
+   "started_at": "2026-10-07T16:49:07.244233+00:00",
+   "completed_at": "2026-10-07T17:35:10.931317+00:00",
+   "candidate": "rc-8",
+   "candidate_source_sha256": "fb14356cdc11cb5ecdb8e09f2063f19366dee4c210c9c70857951abbdedf6d70",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "3fc11d96351b590dac4c889b5d232bc4347b791dde72529963c1b73b36085853",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "final3-rc8-44r": {
+   "file": "final3-rc8-44r.result.json",
+   "job_id": "50388f4ecf434b0d8663aa4a2a740d95",
+   "mode": "promotion",
+   "rounds": 44,
+   "status": "complete",
+   "started_at": "2026-10-07T17:39:23.128869+00:00",
+   "completed_at": "2026-10-07T19:24:01.724971+00:00",
+   "candidate": "rc-8",
+   "candidate_source_sha256": "fb14356cdc11cb5ecdb8e09f2063f19366dee4c210c9c70857951abbdedf6d70",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "2e6207cf19bcdfd39750eecbad6bd196766cb996383048d1f5f9b16971d4bccf",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "rawrule-rc3-12r": {
+   "file": "rawrule-rc3-12r.result.json",
+   "job_id": "aca189ed7cbe43159e3e58d2ad04dfaf",
+   "mode": "reference",
+   "rounds": 12,
+   "status": "complete",
+   "started_at": "2026-10-07T06:14:02.192881+00:00",
+   "completed_at": "2026-10-07T07:00:39.887428+00:00",
+   "candidate": "rc-3",
+   "candidate_source_sha256": "7c84700e5ea817460d421c71a573c3ca528ef715f025225a1a006b5ea0616e16",
+   "incumbent": "S020",
+   "has_comparisons": true,
+   "source_file_sha256": "2b7639427e52a3fb85b458296b864aa819f25ee808b9d446413dde73593b2be5",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  },
+  "repaired-12r": {
+   "file": "repaired-12r.result.json",
+   "job_id": "3c21cf806c324d4ebbd9f1d61db6bde2",
+   "mode": "reference",
+   "rounds": 12,
+   "status": "complete",
+   "started_at": "2026-10-07T04:44:18.648603+00:00",
+   "completed_at": "2026-10-07T05:31:19.203567+00:00",
+   "candidate": "repaired",
+   "candidate_source_sha256": "fc2829f6b0b3c83f3182b0405738a843d741e5141fe274d829cf9074c3279e8f",
+   "incumbent": "S019-merge",
+   "has_comparisons": true,
+   "source_file_sha256": "9e06e5441f340b5011f130f61b73acfa71dea355a77f2ac6359c125e9004c256",
+   "keys_removed": [
+    "local_evidence"
+   ],
+   "box_prefix_replaced": 9
+  }
+ }
+}

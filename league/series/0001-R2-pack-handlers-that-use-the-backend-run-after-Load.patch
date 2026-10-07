@@ -1,0 +1,525 @@
+From 28cf60c91cc1cee6c71af82a6acc45225e78cc84 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 13:54:41 +0000
+Subject: [PATCH 01/49] R2: pack handlers that use the backend run after Load
+ has returned; decode errors inside Load are not retried; a Load without data
+ fails closed
+
+repack (prune, copy) and repair packs save or upload blobs from the blob
+handler. The coalesced pack stream called the handler inside the backend
+Load callback, while the pack read held a connection: with one backend
+connection repair packs deadlocked. These callers now use
+loadBlobsFromPackReleased: one request per window, the connection is
+released before a blob is decoded or handed over. Restore keeps the
+coalesced path (its handler makes no backend call).
+
+In the coalesced path an error of the decoder in a completely read window
+(for example an index entry with an invalid length) cancels the request and
+is returned once, instead of being replayed by the retry backend until its
+budget ends and the circuit breaker opens. A Load that returns nil without
+taking the range to its end no longer returns success with nothing
+delivered: the open blobs are decoded from zero bytes, as stock does, so each
+fails authentication and is recovered from another copy or reported.
+
+No hash or MAC check is changed.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/repack.go                 |   3 +-
+ internal/repository/repair_pack.go            |   3 +-
+ internal/repository/repository.go             |   5 +
+ internal/repository/stream_pack_coalesced.go  |  48 ++++-
+ .../stream_pack_coalesced_errors_test.go      | 144 +++++++++++++++
+ internal/repository/stream_pack_released.go   |  22 +++
+ .../repository/stream_pack_released_test.go   | 171 ++++++++++++++++++
+ 7 files changed, 393 insertions(+), 3 deletions(-)
+ create mode 100644 internal/repository/stream_pack_coalesced_errors_test.go
+ create mode 100644 internal/repository/stream_pack_released.go
+ create mode 100644 internal/repository/stream_pack_released_test.go
+
+diff --git a/internal/repository/repack.go b/internal/repository/repack.go
+index e4303363a5122c1d92a8b67de6f23bc76fa1ca77..c96e73d79c9a3e0f12212e4edca47b7ad4ac99cb 100644
+--- a/internal/repository/repack.go
++++ b/internal/repository/repack.go
+@@ -120,7 +120,8 @@ func repack(
+ 			var resultMu sync.Mutex
+ 			var results []saveResult
+ 
+-			err := repo.loadBlobsFromPack(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
++			// the handler saves blobs: it must not run inside the backend Load callback
++			err := repo.loadBlobsFromPackReleased(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+ 				if err != nil {
+ 					// a required blob couldn't be retrieved
+ 					return err
+diff --git a/internal/repository/repair_pack.go b/internal/repository/repair_pack.go
+index 6b2c69d66eac42c5310222833a62c62cfc63aeec..531ceee79e0529349c965fae8367d465e57ca1b4 100644
+--- a/internal/repository/repair_pack.go
++++ b/internal/repository/repair_pack.go
+@@ -98,7 +98,8 @@ func resolveBlobsForPacks(ctx context.Context, repo *Repository, ids restic.IDSe
+ }
+ 
+ func reuploadBlobsFromPack(ctx context.Context, repo *Repository, packID restic.ID, blobs pack.Blobs, printer restic.Printer, uploader restic.BlobSaverWithAsync) error {
+-	err := repo.loadBlobsFromPack(ctx, packID, blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
++	// the handler uploads blobs: it must not run inside the backend Load callback
++	err := repo.loadBlobsFromPackReleased(ctx, packID, blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+ 		if err != nil {
+ 			printer.E("failed to load blob %v: %v", blob.ID, err)
+ 			return nil
+diff --git a/internal/repository/repository.go b/internal/repository/repository.go
+index 5901303d6b703cfc24c4789aa77d72e1b6d20395..c612402d326c241554d2f4b7be9adf89398ff053 100644
+--- a/internal/repository/repository.go
++++ b/internal/repository/repository.go
+@@ -1484,6 +1484,11 @@ func putStreamPackBuffer(buf []byte) {
+ // handleBlobFn is called at most once for each blob. If the callback returns an error,
+ // then LoadBlobsFromPack will abort and not retry it. The buf passed to the callback is only valid within
+ // this specific call. The callback must not keep a reference to buf.
++//
++// handleBlobFn may be called while the backend connection of the pack read is
++// still held, so it must not call the backend itself. The restorer, the only
++// caller, writes to the target and nothing else. Handlers that save or load
++// use loadBlobsFromPackReleased.
+ func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+ 	blobs, err := r.blobsInPack(packID, handles)
+ 	if err != nil {
+diff --git a/internal/repository/stream_pack_coalesced.go b/internal/repository/stream_pack_coalesced.go
+index b2fe659d033ea38cbf7591e1b44fdc890fe14e5d..90ce4d9436b2b34706a0e4342b8b6fc74df06189 100644
+--- a/internal/repository/stream_pack_coalesced.go
++++ b/internal/repository/stream_pack_coalesced.go
+@@ -78,6 +78,9 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
+ 	}
+ 	committed := 0
+ 	var handlerErr error
++	// decodeErr is an error of the decoder itself (not of a blob and not of the
++	// transfer), found in a window that was read completely.
++	var decodeErr error
+ 	yield := false
+ 	var finalPart pack.Blobs
+ 	// The final window is read here and decoded after Load returns: its bytes
+@@ -120,8 +123,13 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
+ 			}
+ 			// Reuse the established window decoder. Its load reads from this
+ 			// response; alternate-copy recovery is deliberately disabled here.
++			windowRead := false
+ 			readWindow := func(_ context.Context, _ backend.Handle, _ int, _ int64, consume func(io.Reader) error) error {
+-				return consume(rd)
++				if err := consume(rd); err != nil {
++					return err
++				}
++				windowRead = true
++				return nil
+ 			}
+ 			err := streamPackPartWithBuffer(requestCtx, readWindow, nil, dec, key, packID, part, data,
+ 				func(h restic.BlobHandle, plaintext []byte, blobErr error) error {
+@@ -141,6 +149,15 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
+ 			if err == errStreamPackYield {
+ 				yield = true
+ 				stop()
++			} else if err != nil && windowRead && handlerErr == nil && requestCtx.Err() == nil {
++				// The window arrived completely, so this is not a failed transfer:
++				// the decoder rejected an entry (for example an index entry with an
++				// invalid length). Where decoding happens after Load has returned
++				// such an error is reported once. Cancel the request so that the
++				// retry backend does not download the range again and does not
++				// count the pack as unreadable.
++				decodeErr = err
++				stop()
+ 			}
+ 			if err != nil {
+ 				return err
+@@ -155,6 +172,9 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
+ 	if ctx.Err() != nil {
+ 		return ctx.Err()
+ 	}
++	if decodeErr != nil {
++		return decodeErr
++	}
+ 	if yield {
+ 		// No live response remains here. The original context and policy allow
+ 		// ordinary admission and alternate loads without a nested-load cycle.
+@@ -200,5 +220,31 @@ func streamPackResponse(ctx context.Context, load backendLoadFn, recoverBlob loa
+ 		}
+ 		return streamPackPartWithBuffer(finalCtx, readFinal, recoverBlob, dec, key, packID, finalPart, data, handle)
+ 	}
++	// Load reported success, but the consumer did not take the range to its
++	// end (it was never called, or its error was dropped): nothing was read for
++	// the blobs that are still open. Fail closed exactly as a decode after Load
++	// does with a buffer that was never filled: the remaining blobs are decoded
++	// from zero bytes, none of them authenticates, and each one goes through
++	// alternate-copy recovery or is reported to the handler with its error.
++	for remaining := blobs[committed:]; len(remaining) > 0; {
++		n := packRangeEnd(remaining, window)
++		if err := streamPackPartWithBuffer(ctx, loadNothing, recoverBlob, dec, key, packID, remaining[:n], data, handle); err != nil {
++			return err
++		}
++		remaining = remaining[n:]
++	}
+ 	return nil
+ }
++
++// loadNothing stands for a Load that delivered no bytes: it fills the window
++// with zeros, which is what a freshly allocated range buffer holds.
++func loadNothing(_ context.Context, _ backend.Handle, _ int, _ int64, consume func(io.Reader) error) error {
++	return consume(zeroReader{})
++}
++
++type zeroReader struct{}
++
++func (zeroReader) Read(p []byte) (int, error) {
++	clear(p)
++	return len(p), nil
++}
+diff --git a/internal/repository/stream_pack_coalesced_errors_test.go b/internal/repository/stream_pack_coalesced_errors_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0115f6d8912a301bfde3ad47dc3cfbb3dc9ac643
+--- /dev/null
++++ b/internal/repository/stream_pack_coalesced_errors_test.go
+@@ -0,0 +1,144 @@
++package repository
++
++import (
++	"context"
++	"io"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/klauspost/compress/zstd"
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/backend/mem"
++	"github.com/restic/restic/internal/backend/retry"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++	"github.com/restic/restic/internal/test"
++)
++
++type loadCountingBackend struct {
++	backend.Backend
++	loads atomic.Int64
++}
++
++func (b *loadCountingBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
++	b.loads.Add(1)
++	return b.Backend.Load(ctx, h, length, offset, fn)
++}
++
++// An error of the decoder that is not a transfer error (here an index entry
++// whose length is not larger than the nonce) inside a window that is decoded
++// within the Load callback must be reported once. It must not be retried as a
++// failed download, and it must not open the retry backend's circuit breaker
++// for the pack.
++func TestStreamPackCoalescedDecodeErrorIsNotRetried(t *testing.T) {
++	retry.TestFastRetries(t)
++	dec, err := zstd.NewReader(nil)
++	test.OK(t, err)
++	defer dec.Close()
++	key := testKey(t)
++
++	// 1.2 MiB, 0.6 MiB, 1.2 MiB, 1.2 MiB: more than one 2 MiB window, no gap
++	good, packfile := buildPackfileWithoutHeader([]int{1200000, 600000, 1200000, 1200000}, &key, false)
++	bad := pack.Blob{
++		BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: restic.Hash([]byte("damaged index entry"))},
++		Offset:     good[1].Offset,
++		Length:     10,
++	}
++	packID := restic.Hash(packfile)
++	h := backend.Handle{Type: backend.PackFile, Name: packID.String()}
++
++	for _, tc := range []struct {
++		name   string
++		stream func(ctx context.Context, load backendLoadFn, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error
++	}{
++		{"read then decode", func(ctx context.Context, load backendLoadFn, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error {
++			return streamPack(ctx, load, nil, dec, &key, packID, blobs, handle)
++		}},
++		{"decode inside Load", func(ctx context.Context, load backendLoadFn, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error {
++			return streamPackWithPolicy(ctx, load, nil, dec, &key, packID, blobs, handle, restoreStreamWindow, true)
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			inner := &loadCountingBackend{Backend: mem.New()}
++			test.OK(t, inner.Save(context.TODO(), h, backend.NewByteReader(packfile, inner.Hasher())))
++			be := retry.New(inner, 15*time.Minute, nil, nil)
++
++			delivered := 0
++			err := tc.stream(context.TODO(), be.Load, pack.Blobs{good[0], bad, good[2], good[3]}, func(_ restic.BlobHandle, _ []byte, err error) error {
++				test.OK(t, err)
++				delivered++
++				return nil
++			})
++			if err == nil || !strings.Contains(err.Error(), "invalid blob length") {
++				t.Fatalf("expected the invalid blob length error, got %v", err)
++			}
++			test.Equals(t, 1, delivered)
++			test.Equals(t, int64(1), inner.loads.Load())
++			// the pack must still be readable through the same retry backend
++			test.OK(t, be.Load(context.TODO(), h, 16, 0, func(rd io.Reader) error {
++				_, err := io.Copy(io.Discard, rd)
++				return err
++			}))
++		})
++	}
++}
++
++// A Load that returns nil without calling the consumer has delivered nothing.
++// Every requested blob must then reach the handler with an error (or come
++// from another copy), exactly as when the range is decoded after Load.
++func TestStreamPackCoalescedFailsClosedWithoutConsumer(t *testing.T) {
++	dec, err := zstd.NewReader(nil)
++	test.OK(t, err)
++	defer dec.Close()
++	key := testKey(t)
++
++	blobList, _ := buildPackfileWithoutHeader([]int{1200000, 1200000, 1200000, 1200000}, &key, false)
++	packID := restic.Hash([]byte("pack"))
++	silentLoad := func(_ context.Context, _ backend.Handle, _ int, _ int64, _ func(rd io.Reader) error) error {
++		return nil
++	}
++	recovered := []byte("another copy")
++
++	for _, tc := range []struct {
++		name   string
++		stream func(recoverBlob loadBlobFn, handle func(restic.BlobHandle, []byte, error) error) error
++	}{
++		{"read then decode", func(recoverBlob loadBlobFn, handle func(restic.BlobHandle, []byte, error) error) error {
++			return streamPack(context.TODO(), silentLoad, recoverBlob, dec, &key, packID, append(pack.Blobs(nil), blobList...), handle)
++		}},
++		{"decode inside Load", func(recoverBlob loadBlobFn, handle func(restic.BlobHandle, []byte, error) error) error {
++			return streamPackWithPolicy(context.TODO(), silentLoad, recoverBlob, dec, &key, packID, append(pack.Blobs(nil), blobList...), handle, restoreStreamWindow, true)
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var failed []restic.BlobHandle
++			test.OK(t, tc.stream(nil, func(h restic.BlobHandle, _ []byte, err error) error {
++				if err == nil {
++					t.Errorf("blob %v was delivered although nothing was read", h)
++				} else if !strings.Contains(err.Error(), "decrypting blob") {
++					t.Errorf("unexpected error for blob %v: %v", h, err)
++				}
++				failed = append(failed, h)
++				return nil
++			}))
++			test.Equals(t, len(blobList), len(failed))
++			for i, h := range failed {
++				test.Equals(t, blobList[i].BlobHandle, h)
++			}
++
++			// with another copy available every blob is taken from there
++			calls := 0
++			test.OK(t, tc.stream(func(_ context.Context, _ restic.BlobHandle, _ []byte) ([]byte, error) {
++				return recovered, nil
++			}, func(h restic.BlobHandle, buf []byte, err error) error {
++				test.OK(t, err)
++				test.Equals(t, string(recovered), string(buf))
++				calls++
++				return nil
++			}))
++			test.Equals(t, len(blobList), calls)
++		})
++	}
++}
+diff --git a/internal/repository/stream_pack_released.go b/internal/repository/stream_pack_released.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7d9d6989f3a7a494e40aab66cc8d8d074dbb9f3
+--- /dev/null
++++ b/internal/repository/stream_pack_released.go
+@@ -0,0 +1,22 @@
++package repository
++
++import (
++	"context"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// loadBlobsFromPackReleased is loadBlobsFromPack for handlers that use the
++// backend themselves (repack and copy save the blobs, repair packs uploads
++// them again). Each window is read into memory, the backend connection is
++// released, and only then are the blobs decoded and handed to the handler, so
++// a handler never runs inside the backend's Load callback. With a single
++// backend connection a handler that saves from inside Load waits for the
++// connection its own reader holds.
++//
++// The price is one backend request per window instead of one per pack range.
++// The windows, the range buffer and every check are those of the restore path.
++func (r *Repository) loadBlobsFromPackReleased(ctx context.Context, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
++	return streamPackWindowed(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn, restoreStreamWindow, true)
++}
+diff --git a/internal/repository/stream_pack_released_test.go b/internal/repository/stream_pack_released_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d96f1a6b358ade88673d4e153b3618f0ce314be5
+--- /dev/null
++++ b/internal/repository/stream_pack_released_test.go
+@@ -0,0 +1,171 @@
++package repository
++
++import (
++	"context"
++	"io"
++	"math/rand"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/backend/mem"
++	"github.com/restic/restic/internal/backend/sema"
++	"github.com/restic/restic/internal/restic"
++	"github.com/restic/restic/internal/test"
++)
++
++// A handler that uses the backend must not run inside the backend's Load
++// callback: with one backend connection the upload it starts waits for the
++// connection that its own pack read holds.
++
++type fixedConnectionsBackend struct {
++	backend.Backend
++	connections uint
++}
++
++func (b fixedConnectionsBackend) Properties() backend.Properties {
++	p := b.Backend.Properties()
++	p.Connections = b.connections
++	return p
++}
++
++func (b fixedConnectionsBackend) Unwrap() backend.Backend { return b.Backend }
++
++// saveIncompressibleBlobs stores count data blobs of 1 MiB and returns their
++// IDs and the packs that hold them.
++func saveIncompressibleBlobs(t *testing.T, repo *Repository, count int) (restic.IDs, restic.IDSet) {
++	rnd := rand.New(rand.NewSource(5))
++	var ids restic.IDs
++	test.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, up restic.BlobSaverWithAsync) error {
++		for i := 0; i < count; i++ {
++			buf := make([]byte, 1<<20)
++			rnd.Read(buf)
++			id, _, _, err := up.SaveBlob(ctx, restic.DataBlob, buf, restic.ID{}, false)
++			if err != nil {
++				return err
++			}
++			ids = append(ids, id)
++		}
++		return nil
++	}))
++	packs := restic.NewIDSet()
++	for _, id := range ids {
++		for _, pb := range repo.LookupBlob(restic.BlobHandle{Type: restic.DataBlob, ID: id}) {
++			packs.Insert(pb.PackID())
++		}
++	}
++	return ids, packs
++}
++
++// `restic repair packs` on a backend limited to one connection. The pack was
++// written with the default pack size; the repairing run uses the minimum, so
++// the salvaged blobs fill more than one new pack while the pack is read.
++func testRepairPacksConnections(t *testing.T, connections uint) {
++	be := sema.NewBackend(fixedConnectionsBackend{Backend: mem.New(), connections: connections})
++	src, _ := TestRepositoryWithBackend(t, be, 2, Options{})
++	ids, packs := saveIncompressibleBlobs(t, src, 13)
++
++	repo, err := New(be, Options{Compression: CompressionFastest, PackSize: MinPackSize})
++	test.OK(t, err)
++	test.OK(t, repo.SearchKey(context.Background(), test.TestPassword, 10, ""))
++	test.OK(t, repo.LoadIndex(context.Background(), restic.NoopTerminalCounterFactory))
++
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan error, 1)
++	go func() { done <- RepairPacks(ctx, repo, packs, restic.NewNoopPrinter()) }()
++	select {
++	case err := <-done:
++		test.OK(t, err)
++	case <-time.After(30 * time.Second):
++		t.Fatalf("repair packs did not finish within 30 s with %d backend connection(s): deadlock", connections)
++	}
++
++	check := TestOpenBackend(t, be)
++	test.OK(t, check.LoadIndex(context.Background(), restic.NoopTerminalCounterFactory))
++	for _, id := range ids {
++		_, err := check.LoadBlob(context.Background(), restic.BlobHandle{Type: restic.DataBlob, ID: id}, nil)
++		test.OK(t, err)
++	}
++}
++
++func TestRepairPacksOneConnection(t *testing.T)  { testRepairPacksConnections(t, 1) }
++func TestRepairPacksTwoConnections(t *testing.T) { testRepairPacksConnections(t, 2) }
++
++// packLoadDepthBackend counts the pack reads whose consumer is running.
++type packLoadDepthBackend struct {
++	backend.Backend
++	inLoad atomic.Int32
++	loads  atomic.Int32
++}
++
++func (b *packLoadDepthBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
++	if h.Type != backend.PackFile {
++		return b.Backend.Load(ctx, h, length, offset, fn)
++	}
++	b.loads.Add(1)
++	return b.Backend.Load(ctx, h, length, offset, func(rd io.Reader) error {
++		b.inLoad.Add(1)
++		defer b.inLoad.Add(-1)
++		return fn(rd)
++	})
++}
++
++func (b *packLoadDepthBackend) Unwrap() backend.Backend { return b.Backend }
++
++// insideLoadUploader records saves that are requested while a pack read is
++// inside its Load callback.
++type insideLoadUploader struct {
++	restic.BlobSaverWithAsync
++	be         *packLoadDepthBackend
++	saves      atomic.Int32
++	insideLoad atomic.Int32
++}
++
++func (u *insideLoadUploader) note() {
++	u.saves.Add(1)
++	if u.be.inLoad.Load() != 0 {
++		u.insideLoad.Add(1)
++	}
++}
++
++func (u *insideLoadUploader) SaveBlob(ctx context.Context, tpe restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool) (restic.ID, bool, int, error) {
++	u.note()
++	return u.BlobSaverWithAsync.SaveBlob(ctx, tpe, buf, id, storeDuplicate)
++}
++
++func (u *insideLoadUploader) SaveBlobAsync(ctx context.Context, tpe restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool, cb func(restic.ID, bool, int, error)) {
++	u.note()
++	u.BlobSaverWithAsync.SaveBlobAsync(ctx, tpe, buf, id, storeDuplicate, cb)
++}
++
++// The repack handler (prune and copy) saves blobs. It must be called after
++// the pack read has returned its connection, for every window of the pack.
++func TestRepackHandlerRunsOutsideLoad(t *testing.T) {
++	probe := &packLoadDepthBackend{Backend: mem.New()}
++	// two connections: one repack worker, so no other pack read is in flight
++	be := sema.NewBackend(fixedConnectionsBackend{Backend: probe, connections: 2})
++	repo, _ := TestRepositoryWithBackend(t, be, 2, Options{})
++	ids, packs := saveIncompressibleBlobs(t, repo, 6)
++	test.Equals(t, 1, len(packs))
++
++	keep := restic.NewBlobSet()
++	for _, id := range ids {
++		keep.Insert(restic.BlobHandle{Type: restic.DataBlob, ID: id})
++	}
++	probe.loads.Store(0)
++	var uploader *insideLoadUploader
++	test.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, up restic.BlobSaverWithAsync) error {
++		uploader = &insideLoadUploader{BlobSaverWithAsync: up, be: probe}
++		return CopyBlobs(ctx, repo, repo, uploader, packs, keep, restic.NoopCounter, nil)
++	}))
++
++	test.Equals(t, int32(len(ids)), uploader.saves.Load())
++	if n := uploader.insideLoad.Load(); n != 0 {
++		t.Fatalf("%d of %d saves were requested inside the backend Load callback of the pack read", n, len(ids))
++	}
++	// 6 blobs of 1 MiB in windows of 2 MiB: one blob per window, one request each
++	test.Equals(t, int32(len(ids)), probe.loads.Load())
++	test.Equals(t, 0, keep.Len())
++}

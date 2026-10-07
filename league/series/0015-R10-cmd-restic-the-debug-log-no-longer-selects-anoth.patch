@@ -1,0 +1,102 @@
+From b4e5a1eeb6d868722c50e771fba7cfa59e75645b Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:30:52 +0000
+Subject: [PATCH 15/49] R10 (cmd/restic): the debug log no longer selects
+ another code path; gofmt
+
+internalOpenWithLockedWaitWork dropped the wait work, and check its
+overlapped structure pass, whenever DEBUG_LOG was set, to keep debug lines in
+their usual order. A user who turned the debug log on to look into a problem
+of the overlapped path then ran the other path and could not see it. Both
+switches are removed (backup's was removed with the repair); debug lines of
+the wait work may now interleave with those of the lock code.
+
+check_structure_overlap.go and backup_progress_publication_test.go are
+reformatted with gofmt; no other change in them.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ cmd/restic/backup_progress_publication_test.go | 4 ++--
+ cmd/restic/check_structure_overlap.go          | 6 +++---
+ cmd/restic/cmd_check.go                        | 3 +--
+ cmd/restic/lock.go                             | 7 -------
+ 4 files changed, 6 insertions(+), 14 deletions(-)
+
+diff --git a/cmd/restic/backup_progress_publication_test.go b/cmd/restic/backup_progress_publication_test.go
+index b38a716fcb3daa87681c3e79ad9348463701ab78..0376869eb5af2792c3ab7c4e8958cd6c59f3e544 100644
+--- a/cmd/restic/backup_progress_publication_test.go
++++ b/cmd/restic/backup_progress_publication_test.go
+@@ -26,8 +26,8 @@ func (t *b16ProgressTerminal) Error(line string) { t.errors <- line }
+ func TestBackupProgressPublicationSemantics(t *testing.T) {
+ 	term := &b16ProgressTerminal{
+ 		MockTerminal: &ui.MockTerminal{},
+-		output: make(chan string, 64),
+-		errors: make(chan string, 8),
++		output:       make(chan string, 64),
++		errors:       make(chan string, 8),
+ 	}
+ 	printer := backup.NewJSONProgress(term, 3)
+ 	p := backup.NewProgress(printer, false, true, false)
+diff --git a/cmd/restic/check_structure_overlap.go b/cmd/restic/check_structure_overlap.go
+index 64099b03721b21cde2ce3988cc80849220a53f68..f1672878890d641074d3847a684cb14da08c73ca 100644
+--- a/cmd/restic/check_structure_overlap.go
++++ b/cmd/restic/check_structure_overlap.go
+@@ -10,9 +10,9 @@ import (
+ // are consumed before the command reaches its ordinary Structure heading.
+ // Backpressure bounds queued diagnostics, not StreamTrees' live memory.
+ type checkStructureOverlap struct {
+-	cancel context.CancelFunc
+-	errors chan error
+-	done chan struct{}
++	cancel   context.CancelFunc
++	errors   chan error
++	done     chan struct{}
+ 	progress delayedTerminalCounter
+ }
+ 
+diff --git a/cmd/restic/cmd_check.go b/cmd/restic/cmd_check.go
+index f2490ee008a6a816ded0d33b605d262dc1c186f8..2e2888402e58c332b57f106c90cb27cd34de88dd 100644
+--- a/cmd/restic/cmd_check.go
++++ b/cmd/restic/cmd_check.go
+@@ -16,7 +16,6 @@ import (
+ 	"github.com/restic/restic/internal/backend/cache"
+ 	"github.com/restic/restic/internal/checker"
+ 	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/debug"
+ 	"github.com/restic/restic/internal/errors"
+ 	"github.com/restic/restic/internal/global"
+ 	"github.com/restic/restic/internal/repository"
+@@ -326,7 +325,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
+ 	var structure *checkStructureOverlap
+ 	// Keep terminal timing/signal progress on the sequential path. Detached
+ 	// progress is published only at the original Structure heading below.
+-	if !gopts.NoLock && !debug.IsEnabled() &&
++	if !gopts.NoLock &&
+ 		(gopts.JSON || gopts.Verbosity == 0 || (!term.OutputIsTerminal() && !term.CanUpdateStatus())) {
+ 		structure = startCheckStructureOverlap(ctx, chkr.Structure)
+ 		defer structure.discard()
+diff --git a/cmd/restic/lock.go b/cmd/restic/lock.go
+index 5a715e8c434242d4b2c3be2e84d8601196c3cec8..753753544366d62305e17d552e446e0cf58e7a41 100644
+--- a/cmd/restic/lock.go
++++ b/cmd/restic/lock.go
+@@ -3,7 +3,6 @@ package main
+ import (
+ 	"context"
+ 
+-	"github.com/restic/restic/internal/debug"
+ 	"github.com/restic/restic/internal/global"
+ 	"github.com/restic/restic/internal/repository"
+ 	"github.com/restic/restic/internal/restic"
+@@ -14,12 +13,6 @@ func internalOpenWithLocked(ctx context.Context, gopts global.Options, dryRun bo
+ }
+ 
+ func internalOpenWithLockedWaitWork(ctx context.Context, gopts global.Options, dryRun bool, exclusive bool, printer restic.Printer, startWaitWork func(context.Context, *repository.Repository) func(bool)) (context.Context, *repository.Repository, func(), error) {
+-	// Index loading and checker validation may emit debug logs. Preserve their
+-	// normal output order by keeping the synchronous path when debug is enabled.
+-	if startWaitWork != nil && debug.IsEnabled() {
+-		startWaitWork = nil
+-	}
+-
+ 	repo, err := global.OpenRepository(ctx, gopts, printer)
+ 	if err != nil {
+ 		return nil, nil, nil, err

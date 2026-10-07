@@ -1,0 +1,46 @@
+{
+ "what": "identity of the published source with a commit of the league's working repository, checked when this repository was assembled; and which commit the official judge jobs measured",
+ "source_equals": {
+  "working_label": "final3",
+  "working_commit": "8f9372b7e5ead1f604674381a708c6a6499ce484",
+  "git_tree_id": "8b681f61cc94017a3a2510baa537cbabd0841ff1"
+ },
+ "published": {
+  "commit_upstream_subset": "4ce4953b79083c0bcf927246708d7643c4bf33ab",
+  "commit_league_tree_after_S019": "783c89fbc2160f97754d4ee4ac2efd3101333d51",
+  "commit_last_replayed": "8ffea10f9e69ed18dde1855496ec0cb288c8559f",
+  "replayed_commits": 49,
+  "git_tree_id_of_last_replayed_commit": "96f2bddcd5ffb3dba251a404cefa1d346574078c"
+ },
+ "judged_commit": {
+  "what": "the commit the official judge jobs measured",
+  "working_commit": "b8cf439d6a2eda190dec7e61cf7c8937a7d0451c",
+  "git_tree_id": "30e55572a0c640ee53ee3fbb82f11027d5ffd02c",
+  "files_changed": [
+   "cmd/restic/wait_index_load.go",
+   "internal/repository/repack_scope_test.go"
+  ],
+  "non_test_changes_are_comments": true,
+  "comment_check": "every added or removed line in the changed non-test files is blank or starts with //"
+ },
+ "mode_difference": {
+  "file": "helpers/verify-release-binaries.sh",
+  "published_mode": "100755",
+  "working_repository_mode": "100644",
+  "why": "upstream stores this script with its executable bit; the league's working repository was kept on a file system without mode bits. It is the only reason the two git tree ids differ."
+ },
+ "check_1": "every blob id and path of the last replayed commit equals those of the working commit 8f9372b named under source_equals (git ls-tree -r), and the file modes differ in the one file named under mode_difference",
+ "check_2": "SHA-256 of every file of the last replayed commit compared with `git archive` of the working commit 8f9372b",
+ "scope": "files, all_equal and digest_sha256 describe the last replayed commit, the parent of the commit that adds README.md, .gitattributes and league/. That last commit renames the upstream README to README.upstream.md and changes no file under cmd/, internal/ or helpers/ and no root build file.",
+ "against_upstream_subset": {
+  "A": 296,
+  "M": 56
+ },
+ "files": 938,
+ "all_equal": true,
+ "differ": [],
+ "missing": [],
+ "extra": [],
+ "digest_sha256": "206e707e9158aff833fe3e421a43d499dc74696c246c3ab5b33ba8db2b13c820",
+ "digest_definition": "sha256 over lines 'path NUL sha256(file) LF' for all files, sorted by path"
+}

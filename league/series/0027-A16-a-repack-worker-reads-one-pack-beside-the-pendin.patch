@@ -1,0 +1,1084 @@
+From fd29525186e12ac43acf2e58e754472de245f206 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 05:16:00 +0000
+Subject: [PATCH 27/49] A16: a repack worker reads one pack beside the pending
+ saves of the pack before it
+
+Port of T3's S020 work (teams/T3/S020/M004, repack completion overlap),
+fitted to repair R2's read path. A repack worker waited for every
+asynchronous save of a pack before it read the next pack. It now reads
+one further pack while those saves finish, and never more than one:
+the predecessor is settled before the pack after its successor is
+read, and two packs are open together only if they hold at most 512
+blobs between them.
+
+What does not change: the number of workers; the shared 8 MiB budget
+for plaintext copied for pending saves; the order of error precedence
+(read error, save error, cancellation; in pack order); and the rule
+that the worker returns, with or without an error, only after every
+save it admitted has called back. A caller that saves the index and
+deletes packs after a nil return therefore still has every blob
+stored.
+
+R2: the pack is read through loadBlobsFromPackReleased, as before this
+commit. The handler never runs inside the backend's Load callback, so
+a worker that waits for the save budget while two packs are open holds
+no backend connection. T3's file called the coalesced stream; its
+registration through a package-level function variable is not taken:
+repack calls the loop directly.
+
+New: internal/repository/repack_completion_overlap.go; T3's tests
+(repack_completion_overlap_test.go, repack_completion_integration_test.go,
+repack_budget_cancel_test.go, repack_successor_drain_test.go) and a new
+model test, repack_completion_overlap_model_test.go: 20,000 random pack
+sequences with read and save errors; at most one unsettled pack beside
+the one being read, every pack's saves joined exactly once on every
+path, the first failing pack's error returned, progress equal to the
+packs settled without an error.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/repack.go                 |  98 +-------
+ .../repository/repack_budget_cancel_test.go   | 138 +++++++++++
+ .../repack_completion_integration_test.go     | 226 ++++++++++++++++++
+ .../repository/repack_completion_overlap.go   | 186 ++++++++++++++
+ .../repack_completion_overlap_model_test.go   | 137 +++++++++++
+ .../repack_completion_overlap_test.go         | 133 +++++++++++
+ .../repository/repack_successor_drain_test.go |  63 +++++
+ 7 files changed, 889 insertions(+), 92 deletions(-)
+ create mode 100644 internal/repository/repack_budget_cancel_test.go
+ create mode 100644 internal/repository/repack_completion_integration_test.go
+ create mode 100644 internal/repository/repack_completion_overlap.go
+ create mode 100644 internal/repository/repack_completion_overlap_model_test.go
+ create mode 100644 internal/repository/repack_completion_overlap_test.go
+ create mode 100644 internal/repository/repack_successor_drain_test.go
+
+diff --git a/internal/repository/repack.go b/internal/repository/repack.go
+index c96e73d79c9a3e0f12212e4edca47b7ad4ac99cb..9c61c76b0b2970fbc6847967c6cbc1ad1112edd4 100644
+--- a/internal/repository/repack.go
++++ b/internal/repository/repack.go
+@@ -109,99 +109,13 @@ func repack(
+ 	})
+ 	saveBudget := semaphore.NewWeighted(maxAsyncRepackCopyBytes)
+ 
++	// Each worker reads one pack beside the pending saves of the pack before
++	// it (repack_completion_overlap.go) and returns only after every save it
++	// admitted has completed.
+ 	worker := func() error {
+-		for t := range downloadQueue {
+-			type saveResult struct {
+-				blob restic.BlobHandle
+-				err  error
+-				done bool
+-			}
+-			var pending sync.WaitGroup
+-			var resultMu sync.Mutex
+-			var results []saveResult
+-
+-			// the handler saves blobs: it must not run inside the backend Load callback
+-			err := repo.loadBlobsFromPackReleased(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+-				if err != nil {
+-					// a required blob couldn't be retrieved
+-					return err
+-				}
+-
+-				keepMutex.Lock()
+-				// recheck whether some other worker was faster
+-				shouldKeep := keepBlobs.Has(blob)
+-				if shouldKeep {
+-					keepBlobs.Delete(blob)
+-				}
+-				keepMutex.Unlock()
+-
+-				if !shouldKeep {
+-					return nil
+-				}
+-
+-				resultMu.Lock()
+-				resultID := len(results)
+-				results = append(results, saveResult{blob: blob})
+-				resultMu.Unlock()
+-
+-				// Keep unusually large blobs on the synchronous path so the byte
+-				// budget remains a strict bound on copied plaintext.
+-				if int64(len(buf)) > maxAsyncRepackCopyBytes {
+-					_, _, _, saveErr := uploader.SaveBlob(ctx, blob.Type, buf, blob.ID, true)
+-					resultMu.Lock()
+-					results[resultID].err = saveErr
+-					results[resultID].done = true
+-					resultMu.Unlock()
+-					return saveErr
+-				}
+-
+-				weight := int64(len(buf))
+-				if err := saveBudget.Acquire(wgCtx, weight); err != nil {
+-					resultMu.Lock()
+-					results[resultID].err = err
+-					results[resultID].done = true
+-					resultMu.Unlock()
+-					return err
+-				}
+-				owned := append([]byte(nil), buf...)
+-				pending.Add(1)
+-				// The uploader context owns save lifetime. wgCtx is only for
+-				// stopping pack reads and can be canceled as workers finish.
+-				uploader.SaveBlobAsync(ctx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
+-					resultMu.Lock()
+-					results[resultID].err = saveErr
+-					results[resultID].done = true
+-					resultMu.Unlock()
+-					saveBudget.Release(weight)
+-					pending.Done()
+-				})
+-				return nil
+-			})
+-			pending.Wait()
+-			resultMu.Lock()
+-			completed := append([]saveResult(nil), results...)
+-			resultMu.Unlock()
+-			var saveErr error
+-			for _, result := range completed {
+-				if result.err != nil && saveErr == nil {
+-					saveErr = result.err
+-				}
+-				if result.done && result.err == nil {
+-					debug.Log("  saved blob %v", result.blob.ID)
+-				}
+-			}
+-			if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+-				return err
+-			}
+-			if saveErr != nil {
+-				return saveErr
+-			}
+-			if err != nil {
+-				return err
+-			}
+-			p.Add(1)
+-		}
+-		return nil
++		return runRepackCompletionOverlap(downloadQueue, func(t index.PackBlobs) *repackPackCompletion {
++			return startRepackPackCompletion(ctx, wgCtx, repo, uploader, keepBlobs, &keepMutex, saveBudget, t)
++		}, p)
+ 	}
+ 
+ 	// as packs are streamed the concurrency is limited by IO
+diff --git a/internal/repository/repack_budget_cancel_test.go b/internal/repository/repack_budget_cancel_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e3efa1a0ae3d19f1f6f054bcaec959414d08810
+--- /dev/null
++++ b/internal/repository/repack_budget_cancel_test.go
+@@ -0,0 +1,138 @@
++package repository_test
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++)
++
++type repackHeldBudgetUploader struct {
++	restic.BlobSaverWithAsync
++	held    chan struct{}
++	release <-chan struct{}
++}
++
++func (u *repackHeldBudgetUploader) SaveBlobAsync(ctx context.Context, kind restic.BlobType, buf []byte, id restic.ID, duplicate bool, cb func(restic.ID, bool, int, error)) {
++	u.BlobSaverWithAsync.SaveBlobAsync(ctx, kind, buf, id, duplicate, func(saved restic.ID, known bool, size int, err error) {
++		u.held <- struct{}{}
++		// An admitted callback may retire after read cancellation. Model that
++		// explicitly instead of letting cancellation release this test's gate.
++		<-u.release
++		cb(saved, known, size, err)
++	})
++}
++
++// CopyBlobs serializes access to this set with its own keepMutex. Claiming a
++// third blob happens immediately before attempting its plaintext byte permit.
++type repackBudgetClaims struct {
++	restic.BlobSet
++	claims int
++	third  chan struct{}
++}
++
++func (s *repackBudgetClaims) Delete(h restic.BlobHandle) {
++	s.BlobSet.Delete(h)
++	s.claims++
++	if s.claims == 3 {
++		close(s.third)
++	}
++}
++
++func TestRepackExhaustedBudgetCancellationJoinsCallbacks(t *testing.T) {
++	repo, _ := repository.TestRepositoryWithBackend(t, repository.TestBackend(t), 2, repository.Options{})
++	keep := restic.NewBlobSet()
++	packs := restic.NewIDSet()
++	err := repo.WithBlobUploader(context.Background(), func(ctx context.Context, u restic.BlobSaverWithAsync) error {
++		for i := 1; i <= 3; i++ {
++			id, _, _, err := u.SaveBlob(ctx, restic.DataBlob, bytes.Repeat([]byte{byte(i)}, 4<<20), restic.ID{}, false)
++			if err != nil {
++				return err
++			}
++			keep.Insert(restic.BlobHandle{Type: restic.DataBlob, ID: id})
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for h := range keep {
++		for _, blob := range repo.LookupBlob(h) {
++			packs.Insert(blob.PackID())
++		}
++	}
++	if len(packs) != 1 {
++		t.Fatalf("setup created %d packs, want one", len(packs))
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	release := make(chan struct{})
++	var once sync.Once
++	unblock := func() { once.Do(func() { close(release) }) }
++	held := make(chan struct{}, 3)
++	claims := &repackBudgetClaims{BlobSet: keep, third: make(chan struct{})}
++	done := make(chan error, 1)
++	finished := false
++	defer func() {
++		cancel()
++		unblock()
++		if !finished {
++			select {
++			case <-done:
++			case <-time.After(5 * time.Second):
++				t.Error("canceled repack did not retire")
++			}
++		}
++	}()
++	go func() {
++		done <- repo.WithBlobUploader(ctx, func(ctx context.Context, u restic.BlobSaverWithAsync) error {
++			return repository.CopyBlobs(ctx, repo, repo, &repackHeldBudgetUploader{BlobSaverWithAsync: u, held: held, release: release}, packs, claims, restic.NoopCounter, nil)
++		})
++	}()
++	for i := 0; i < 2; i++ {
++		select {
++		case <-held:
++		case err := <-done:
++			finished = true
++			t.Fatalf("returned before exhausting permits: %v", err)
++		case <-time.After(5 * time.Second):
++			t.Fatal("two 4 MiB callbacks were not admitted")
++		}
++	}
++	select {
++	case <-claims.third:
++	case <-time.After(5 * time.Second):
++		t.Fatal("third blob did not reach byte admission")
++	}
++	select {
++	case <-held:
++		t.Fatal("third 4 MiB save exceeded the 8 MiB budget")
++	default:
++	}
++	cancel()
++	select {
++	case err := <-done:
++		finished = true
++		t.Fatalf("returned without joining held callbacks: %v", err)
++	case <-time.After(20 * time.Millisecond):
++	}
++	unblock()
++	select {
++	case err := <-done:
++		finished = true
++		if !errors.Is(err, context.Canceled) {
++			t.Fatalf("expected cancellation, got %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("callback retirement did not release canceled repack")
++	}
++	select {
++	case <-held:
++		t.Fatal("canceled byte admission started a third save")
++	default:
++	}
++}
+diff --git a/internal/repository/repack_completion_integration_test.go b/internal/repository/repack_completion_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ae15f3327420af85d8d13ee9b3c07630cacb7fd
+--- /dev/null
++++ b/internal/repository/repack_completion_integration_test.go
+@@ -0,0 +1,226 @@
++package repository_test
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++	rtest "github.com/restic/restic/internal/test"
++)
++
++type predecessorTwoConnectionBackend struct{ backend.Backend }
++
++func (b *predecessorTwoConnectionBackend) Properties() backend.Properties {
++	p := b.Backend.Properties()
++	p.Connections = 2
++	return p
++}
++func (b *predecessorTwoConnectionBackend) Unwrap() backend.Backend { return b.Backend }
++
++type predecessorRepackUploader struct {
++	restic.BlobSaverWithAsync
++	calls   atomic.Int32
++	held    chan struct{}
++	next    chan struct{}
++	release <-chan struct{}
++	failure error
++	mu      sync.Mutex
++	saved   map[restic.BlobHandle]int
++}
++
++func (u *predecessorRepackUploader) SaveBlobAsync(ctx context.Context, kind restic.BlobType, buf []byte, id restic.ID, duplicate bool, cb func(restic.ID, bool, int, error)) {
++	n := u.calls.Add(1)
++	expected := append([]byte(nil), buf...)
++	u.mu.Lock()
++	u.saved[restic.BlobHandle{ID: id, Type: kind}]++
++	u.mu.Unlock()
++	if n == 2 {
++		close(u.next)
++	}
++	u.BlobSaverWithAsync.SaveBlobAsync(ctx, kind, buf, id, duplicate, func(newID restic.ID, known bool, size int, err error) {
++		if n == 1 {
++			close(u.held)
++			select {
++			case <-u.release:
++				if err == nil {
++					err = u.failure
++				}
++			case <-ctx.Done():
++				if err == nil {
++					err = ctx.Err()
++				}
++			}
++			if !bytes.Equal(buf, expected) {
++				err = errors.New("borrowed plaintext escaped across pack reads")
++			}
++		}
++		cb(newID, known, size, err)
++	})
++}
++
++func TestRepackCompletionDuplicateOwnership(t *testing.T) {
++	repository.TestAllVersions(t, func(t *testing.T, version uint) {
++		repo, _ := repository.TestRepositoryWithBackend(t, &predecessorTwoConnectionBackend{Backend: repository.TestBackend(t)}, version, repository.Options{})
++		keep := restic.NewBlobSet()
++		for i := 0; i < 3; i++ {
++			rtest.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
++				for _, value := range []byte{42, byte(i + 1)} {
++					id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, bytes.Repeat([]byte{value}, 4096), restic.ID{}, true)
++					if err != nil {
++						return err
++					}
++					keep.Insert(restic.BlobHandle{ID: id, Type: restic.DataBlob})
++				}
++				return nil
++			}))
++		}
++		packs := findPacksForBlobs(t, repo, keep)
++		release := make(chan struct{})
++		close(release)
++		u := &predecessorRepackUploader{held: make(chan struct{}), next: make(chan struct{}), release: release, saved: make(map[restic.BlobHandle]int)}
++		rtest.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
++			u.BlobSaverWithAsync = uploader
++			return repository.CopyBlobs(ctx, repo, repo, u, packs, keep, restic.NoopCounter, nil)
++		}))
++		if len(u.saved) != 4 || keep.Len() != 0 {
++			t.Fatalf("saved %d blobs; remaining %d", len(u.saved), keep.Len())
++		}
++		for blob, count := range u.saved {
++			if count != 1 {
++				t.Fatalf("%v saved %d times", blob, count)
++			}
++		}
++	})
++}
++
++type oversizedCompletionUploader struct {
++	restic.BlobSaverWithAsync
++	synchronous, asynchronous int
++}
++
++func (u *oversizedCompletionUploader) SaveBlob(ctx context.Context, kind restic.BlobType, buf []byte, id restic.ID, duplicate bool) (restic.ID, bool, int, error) {
++	u.synchronous++
++	return u.BlobSaverWithAsync.SaveBlob(ctx, kind, buf, id, duplicate)
++}
++func (u *oversizedCompletionUploader) SaveBlobAsync(ctx context.Context, kind restic.BlobType, buf []byte, id restic.ID, duplicate bool, cb func(restic.ID, bool, int, error)) {
++	u.asynchronous++
++	u.BlobSaverWithAsync.SaveBlobAsync(ctx, kind, buf, id, duplicate, cb)
++}
++
++func TestRepackCompletionOversizedPlaintext(t *testing.T) {
++	repository.TestAllVersions(t, func(t *testing.T, version uint) {
++		repo, _ := repository.TestRepositoryWithBackend(t, &predecessorTwoConnectionBackend{Backend: repository.TestBackend(t)}, version, repository.Options{})
++		var id restic.ID
++		rtest.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, u restic.BlobSaverWithAsync) error {
++			var err error
++			id, _, _, err = u.SaveBlob(ctx, restic.DataBlob, bytes.Repeat([]byte{123}, (8<<20)+1), restic.ID{}, false)
++			return err
++		}))
++		keep := restic.NewBlobSet(restic.BlobHandle{ID: id, Type: restic.DataBlob})
++		packs := findPacksForBlobs(t, repo, keep)
++		var counted *oversizedCompletionUploader
++		rtest.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, u restic.BlobSaverWithAsync) error {
++			counted = &oversizedCompletionUploader{BlobSaverWithAsync: u}
++			return repository.CopyBlobs(ctx, repo, repo, counted, packs, keep, restic.NoopCounter, nil)
++		}))
++		if counted.synchronous != 1 || counted.asynchronous != 0 {
++			t.Fatalf("sync=%d async=%d", counted.synchronous, counted.asynchronous)
++		}
++	})
++}
++
++func TestRepackCompletionNextPackAndFailure(t *testing.T) {
++	for _, action := range []string{"success", "failure", "cancel"} {
++		t.Run(action, func(t *testing.T) {
++			repository.TestAllVersions(t, func(t *testing.T, version uint) {
++				repo, _ := repository.TestRepositoryWithBackend(t, &predecessorTwoConnectionBackend{Backend: repository.TestBackend(t)}, version, repository.Options{})
++				keep := restic.NewBlobSet()
++				// One blob per pack makes next SaveBlobAsync a next-pack read.
++				for i := 0; i < 3; i++ {
++					rtest.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
++						id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, bytes.Repeat([]byte{byte(i + 1)}, 4096), restic.ID{}, false)
++						keep.Insert(restic.BlobHandle{ID: id, Type: restic.DataBlob})
++						return err
++					}))
++				}
++				packs := findPacksForBlobs(t, repo, keep)
++				if len(packs) != 3 {
++					t.Fatalf("got %d packs", len(packs))
++				}
++				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++				defer cancel()
++				release := make(chan struct{})
++				defer close(release)
++				var wantErr error
++				if action == "failure" {
++					wantErr = errors.New("callback failure after insertion")
++				}
++				u := &predecessorRepackUploader{held: make(chan struct{}), next: make(chan struct{}), release: release, failure: wantErr, saved: make(map[restic.BlobHandle]int)}
++				done := make(chan error, 1)
++				go func() {
++					done <- repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
++						u.BlobSaverWithAsync = uploader
++						return repository.CopyBlobs(ctx, repo, repo, u, packs, keep, restic.NoopCounter, nil)
++					})
++				}()
++				select {
++				case <-u.held:
++				case <-ctx.Done():
++					t.Fatal("first save did not start")
++				}
++				select {
++				case <-u.next:
++				case <-ctx.Done():
++					t.Fatal("next pack did not stream while callback was held")
++				}
++				select {
++				case err := <-done:
++					t.Fatalf("returned before predecessor callback: %v", err)
++				default:
++				}
++				if action == "cancel" {
++					cancel()
++				} else {
++					release <- struct{}{}
++				}
++				select {
++				case err := <-done:
++					if action == "success" && err != nil {
++						t.Fatal(err)
++					}
++					if action == "failure" && !errors.Is(err, wantErr) {
++						t.Fatalf("want callback error, got %v", err)
++					}
++					if action == "cancel" && !errors.Is(err, context.Canceled) {
++						t.Fatalf("want cancellation, got %v", err)
++					}
++				case <-time.After(5 * time.Second):
++					t.Fatal("callbacks were not drained")
++				}
++				u.mu.Lock()
++				for blob, count := range u.saved {
++					if count != 1 {
++						t.Errorf("blob %v saved %d times", blob, count)
++					}
++				}
++				if action == "success" && (len(u.saved) != 3 || keep.Len() != 0) {
++					t.Error("successful repack omitted a blob")
++				}
++				u.mu.Unlock()
++				remaining := listPacks(t, repo)
++				for id := range packs {
++					if !remaining.Has(id) {
++						t.Fatal("source pack deleted")
++					}
++				}
++			})
++		})
++	}
++}
+diff --git a/internal/repository/repack_completion_overlap.go b/internal/repository/repack_completion_overlap.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dcab3700e6fc1e42e8d2a8d59cc4c7ac9665879f
+--- /dev/null
++++ b/internal/repository/repack_completion_overlap.go
+@@ -0,0 +1,186 @@
++package repository
++
++import (
++	"context"
++	"sync"
++
++	"github.com/restic/restic/internal/debug"
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/restic"
++
++	"golang.org/x/sync/semaphore"
++)
++
++// A repack worker reads a pack and hands the blobs it keeps to the uploader's
++// asynchronous save. It used to wait for every one of those saves before it
++// read the next pack. It now reads ONE further pack while the saves of the
++// pack before it finish, and never more than one:
++//
++//   - a pack is settled (all its saves joined, its result examined) before
++//     the pack after its successor is read;
++//   - the function returns, with or without an error, only after every save
++//     it admitted has called back, so a caller that goes on to save the index
++//     and delete packs after a nil return has every blob stored;
++//   - the first error wins in the order read error, save error, cancellation,
++//     for each pack and in pack order, as before;
++//   - the plaintext copied for pending saves stays bounded by the shared
++//     maxAsyncRepackCopyBytes budget, and the worker count is unchanged.
++//
++// maxRepackOverlapDescriptors bounds the result records of the two packs that
++// can be open at once: a pack is not read beside its predecessor when the two
++// together hold more blobs than that.
++const maxRepackOverlapDescriptors = 512
++
++// repackPackCompletion is what is left of a pack after it was read.
++type repackPackCompletion struct {
++	// readErr is the result of reading the pack (nil, a handler error, or a
++	// read error).
++	readErr error
++	// descriptors is the number of blobs requested from the pack.
++	descriptors int
++	// finish waits for the pack's saves and returns the pack's result.
++	finish func() error
++	// drain waits for the pack's saves and discards their results.
++	drain func()
++}
++
++// runRepackCompletionOverlap is the loop of one repack worker.
++func runRepackCompletionOverlap(queue <-chan index.PackBlobs, start func(index.PackBlobs) *repackPackCompletion, progress restic.Counter) error {
++	var previous *repackPackCompletion
++	settle := func() error {
++		if previous == nil {
++			return nil
++		}
++		err := previous.finish()
++		previous = nil
++		if err == nil {
++			progress.Add(1)
++		}
++		return err
++	}
++	for task := range queue {
++		// Settle first when the two packs together would exceed the bound. A
++		// single pack above the bound is settled right after it was read.
++		if previous != nil && previous.descriptors+len(task.Blobs) > maxRepackOverlapDescriptors {
++			if err := settle(); err != nil {
++				return err
++			}
++		}
++		current := start(task)
++		task.Blobs = nil
++		if err := settle(); err != nil {
++			// the predecessor failed: join what the successor admitted
++			current.drain()
++			return err
++		}
++		previous = current
++		if current.readErr != nil || current.descriptors > maxRepackOverlapDescriptors {
++			if err := settle(); err != nil {
++				return err
++			}
++		}
++	}
++	return settle()
++}
++
++// startRepackPackCompletion reads one pack and admits the saves of the blobs
++// to keep. It returns when the pack has been read; the saves may still run.
++//
++// The handler saves blobs, so the pack is read through
++// loadBlobsFromPackReleased: the handler never runs inside the backend's
++// Load callback, and a worker that waits for the save budget holds no backend
++// connection.
++func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, uploader restic.BlobSaverWithAsync, keepBlobs repackBlobSet, keepMutex *sync.Mutex, saveBudget *semaphore.Weighted, t index.PackBlobs) *repackPackCompletion {
++	type saveResult struct {
++		blob restic.BlobHandle
++		err  error
++		done bool
++	}
++	var pending sync.WaitGroup
++	var resultMu sync.Mutex
++	var results []saveResult
++
++	err := repo.loadBlobsFromPackReleased(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
++		if err != nil {
++			// a required blob couldn't be retrieved
++			return err
++		}
++
++		keepMutex.Lock()
++		// recheck whether some other worker was faster
++		shouldKeep := keepBlobs.Has(blob)
++		if shouldKeep {
++			keepBlobs.Delete(blob)
++		}
++		keepMutex.Unlock()
++
++		if !shouldKeep {
++			return nil
++		}
++
++		resultMu.Lock()
++		resultID := len(results)
++		results = append(results, saveResult{blob: blob})
++		resultMu.Unlock()
++
++		// Keep unusually large blobs on the synchronous path so the byte
++		// budget remains a strict bound on copied plaintext.
++		if int64(len(buf)) > maxAsyncRepackCopyBytes {
++			_, _, _, saveErr := uploader.SaveBlob(ctx, blob.Type, buf, blob.ID, true)
++			resultMu.Lock()
++			results[resultID].err = saveErr
++			results[resultID].done = true
++			resultMu.Unlock()
++			return saveErr
++		}
++
++		weight := int64(len(buf))
++		if err := saveBudget.Acquire(wgCtx, weight); err != nil {
++			resultMu.Lock()
++			results[resultID].err = err
++			results[resultID].done = true
++			resultMu.Unlock()
++			return err
++		}
++		owned := append([]byte(nil), buf...)
++		pending.Add(1)
++		// The uploader context owns save lifetime. wgCtx is only for
++		// stopping pack reads and can be canceled as workers finish.
++		uploader.SaveBlobAsync(ctx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
++			resultMu.Lock()
++			results[resultID].err = saveErr
++			results[resultID].done = true
++			resultMu.Unlock()
++			saveBudget.Release(weight)
++			pending.Done()
++		})
++		return nil
++	})
++	descriptors := len(t.Blobs)
++
++	finish := func() error {
++		pending.Wait()
++		// Every callback has stored its result before Done, and the pack is
++		// not read any more: results is no longer written.
++		var saveErr error
++		for _, result := range results {
++			if result.err != nil && saveErr == nil {
++				saveErr = result.err
++			}
++			if result.done && result.err == nil {
++				debug.Log("  saved blob %v", result.blob.ID)
++			}
++		}
++		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
++			return err
++		}
++		if saveErr != nil {
++			return saveErr
++		}
++		if err != nil {
++			return err
++		}
++		return nil
++	}
++	return &repackPackCompletion{readErr: err, descriptors: descriptors, finish: finish, drain: pending.Wait}
++}
+diff --git a/internal/repository/repack_completion_overlap_model_test.go b/internal/repository/repack_completion_overlap_model_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..34f566bfc46af3c3b88c9d3ec6f512f0f3837b0a
+--- /dev/null
++++ b/internal/repository/repack_completion_overlap_model_test.go
+@@ -0,0 +1,137 @@
++package repository
++
++import (
++	"errors"
++	"fmt"
++	"math/rand"
++	"testing"
++
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/repository/pack"
++)
++
++type countingCounter struct{ n uint64 }
++
++func (c *countingCounter) Add(v uint64)          { c.n += v }
++func (c *countingCounter) SetMax(uint64)         {}
++func (c *countingCounter) Get() (uint64, uint64) { return c.n, 0 }
++func (c *countingCounter) Done()                 {}
++
++// Random pack sequences with read errors and save errors at random places.
++// For every sequence the worker loop must
++//   - read at most one pack while another one is still unsettled, and none
++//     when the two together exceed the descriptor bound;
++//   - have joined the saves of every pack it read when it returns, on every
++//     path (a pack is joined by finish or by drain, exactly once);
++//   - return the error of the first failing pack in pack order, and nil only
++//     if every pack was read and every save succeeded;
++//   - count exactly the packs that were settled without an error.
++func TestRepackCompletionOverlapRandomSequences(t *testing.T) {
++	rnd := rand.New(rand.NewSource(20261007))
++	for seq := 0; seq < 20000; seq++ {
++		n := rnd.Intn(9)
++		type packPlan struct {
++			blobs   int
++			readErr error
++			saveErr error
++		}
++		plans := make([]packPlan, n)
++		for i := range plans {
++			switch rnd.Intn(6) {
++			case 0:
++				plans[i].blobs = 0
++			case 1:
++				plans[i].blobs = maxRepackOverlapDescriptors + rnd.Intn(3) - 1
++			case 2:
++				plans[i].blobs = 2*maxRepackOverlapDescriptors + rnd.Intn(100)
++			default:
++				plans[i].blobs = 1 + rnd.Intn(maxRepackOverlapDescriptors/2+20)
++			}
++			if rnd.Intn(12) == 0 {
++				plans[i].readErr = fmt.Errorf("read error in pack %d", i)
++			}
++			if rnd.Intn(12) == 0 {
++				plans[i].saveErr = fmt.Errorf("save error in pack %d", i)
++			}
++		}
++
++		queue := make(chan index.PackBlobs, n)
++		for i := range plans {
++			queue <- index.PackBlobs{Blobs: make(pack.Blobs, plans[i].blobs)}
++		}
++		close(queue)
++
++		started := 0
++		joined := make([]int, n)   // times the saves of pack i were joined
++		open := map[int]struct{}{} // read, not joined yet
++		openBlobs := 0
++		var wantErr error
++		fail := func(format string, args ...any) {
++			t.Helper()
++			t.Fatalf("sequence %d (%+v): %s", seq, plans, fmt.Sprintf(format, args...))
++		}
++		progress := &countingCounter{}
++		err := runRepackCompletionOverlap(queue, func(task index.PackBlobs) *repackPackCompletion {
++			i := started
++			started++
++			if len(task.Blobs) != plans[i].blobs {
++				fail("pack %d arrived out of order", i)
++			}
++			if len(open) > 1 {
++				fail("pack %d is read while %d packs are unsettled", i, len(open))
++			}
++			if len(open) == 1 && openBlobs+plans[i].blobs > maxRepackOverlapDescriptors {
++				fail("pack %d (%d blobs) is read beside an unsettled pack of %d blobs", i, plans[i].blobs, openBlobs)
++			}
++			open[i] = struct{}{}
++			openBlobs += plans[i].blobs
++			join := func() {
++				joined[i]++
++				delete(open, i)
++				openBlobs -= plans[i].blobs
++			}
++			return &repackPackCompletion{
++				readErr:     plans[i].readErr,
++				descriptors: plans[i].blobs,
++				finish: func() error {
++					join()
++					if plans[i].readErr != nil {
++						return plans[i].readErr
++					}
++					return plans[i].saveErr
++				},
++				drain: join,
++			}
++		}, progress)
++
++		settledOK := uint64(0)
++		for i := range plans {
++			if plans[i].readErr != nil {
++				wantErr = plans[i].readErr
++				break
++			}
++			if plans[i].saveErr != nil {
++				wantErr = plans[i].saveErr
++				break
++			}
++			settledOK++
++		}
++		if !errors.Is(err, wantErr) || (wantErr == nil) != (err == nil) {
++			fail("returned %v, want %v", err, wantErr)
++		}
++		if len(open) != 0 {
++			fail("returned with the saves of %d packs not joined", len(open))
++		}
++		for i := 0; i < started; i++ {
++			if joined[i] != 1 {
++				fail("the saves of pack %d were joined %d times", i, joined[i])
++			}
++		}
++		if wantErr == nil && started != n {
++			fail("returned nil after %d of %d packs", started, n)
++		}
++		if got, _ := progress.Get(); got != settledOK {
++			fail("progress counts %d packs, %d were settled without an error", got, settledOK)
++		}
++	}
++}
+diff --git a/internal/repository/repack_completion_overlap_test.go b/internal/repository/repack_completion_overlap_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ae7caefd98c463d65b02f467801a0e2a9cdc6b3
+--- /dev/null
++++ b/internal/repository/repack_completion_overlap_test.go
+@@ -0,0 +1,133 @@
++package repository
++
++import (
++	"errors"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++func TestRepackCompletionOverlapHeldPredecessor(t *testing.T) {
++	queue := make(chan index.PackBlobs, 3)
++	for i := 0; i < 3; i++ {
++		queue <- index.PackBlobs{Blobs: make(pack.Blobs, 1)}
++	}
++	close(queue)
++	release := make(chan struct{})
++	defer close(release)
++	started := make(chan int, 3)
++	wantErr := errors.New("predecessor failed")
++	var calls int
++	var drained atomic.Bool
++	done := make(chan error, 1)
++	go func() {
++		done <- runRepackCompletionOverlap(queue, func(task index.PackBlobs) *repackPackCompletion {
++			calls++
++			started <- calls
++			if calls == 1 {
++				return &repackPackCompletion{descriptors: 1, finish: func() error { <-release; return wantErr }, drain: func() { <-release }}
++			}
++			return &repackPackCompletion{descriptors: 1, finish: func() error { return nil }, drain: func() { drained.Store(true) }}
++		}, restic.NoopCounter)
++	}()
++	for i := 1; i <= 2; i++ {
++		select {
++		case got := <-started:
++			if got != i {
++				t.Fatalf("start %d, want %d", got, i)
++			}
++		case <-time.After(time.Second):
++			t.Fatal("successor did not start before predecessor completion")
++		}
++	}
++	select {
++	case <-started:
++		t.Fatal("third pack admitted before predecessor settled")
++	case err := <-done:
++		t.Fatalf("returned before callback completion: %v", err)
++	case <-time.After(20 * time.Millisecond):
++	}
++	release <- struct{}{}
++	select {
++	case err := <-done:
++		if !errors.Is(err, wantErr) {
++			t.Fatalf("got %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("did not join")
++	}
++	if !drained.Load() {
++		t.Fatal("admitted successor was not drained after predecessor failure")
++	}
++}
++
++func TestRepackCompletionOverlapDescriptorBound(t *testing.T) {
++	queue := make(chan index.PackBlobs, 2)
++	queue <- index.PackBlobs{Blobs: make(pack.Blobs, maxRepackOverlapDescriptors)}
++	queue <- index.PackBlobs{Blobs: make(pack.Blobs, 1)}
++	close(queue)
++	release := make(chan struct{})
++	defer close(release)
++	started := make(chan int, 2)
++	var calls int
++	done := make(chan error, 1)
++	go func() {
++		done <- runRepackCompletionOverlap(queue, func(task index.PackBlobs) *repackPackCompletion {
++			calls++
++			started <- calls
++			if calls == 1 {
++				return &repackPackCompletion{descriptors: len(task.Blobs), finish: func() error { <-release; return nil }, drain: func() { <-release }}
++			}
++			return &repackPackCompletion{descriptors: 1, finish: func() error { return nil }, drain: func() {}}
++		}, restic.NoopCounter)
++	}()
++	select {
++	case <-started:
++	case <-time.After(time.Second):
++		t.Fatal("first pack did not start")
++	}
++	select {
++	case <-started:
++		t.Fatal("overlap exceeded descriptor bound")
++	case <-time.After(20 * time.Millisecond):
++	}
++	release <- struct{}{}
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("did not finish after descriptor capacity became available")
++	}
++}
++
++func TestRepackCompletionOverlapImmediateErrorAndEOF(t *testing.T) {
++	for _, fail := range []bool{false, true} {
++		queue := make(chan index.PackBlobs, 2)
++		queue <- index.PackBlobs{}
++		queue <- index.PackBlobs{}
++		close(queue)
++		calls, completed := 0, 0
++		wantErr := errors.New("stream failed")
++		err := runRepackCompletionOverlap(queue, func(task index.PackBlobs) *repackPackCompletion {
++			calls++
++			var readErr error
++			if fail {
++				readErr = wantErr
++			}
++			return &repackPackCompletion{readErr: readErr, finish: func() error { completed++; return readErr }, drain: func() { completed++ }}
++		}, restic.NoopCounter)
++		if fail {
++			if !errors.Is(err, wantErr) || calls != 1 || completed != 1 {
++				t.Fatalf("failure admission: %v %d %d", err, calls, completed)
++			}
++		} else if err != nil || calls != 2 || completed != 2 {
++			t.Fatalf("EOF completion: %v %d %d", err, calls, completed)
++		}
++	}
++}
+diff --git a/internal/repository/repack_successor_drain_test.go b/internal/repository/repack_successor_drain_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c2917cfb194ff6ea0731c2800ccbc58a1a5428f
+--- /dev/null
++++ b/internal/repository/repack_successor_drain_test.go
+@@ -0,0 +1,63 @@
++package repository
++
++import (
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// Complements the predecessor test: calling drain is insufficient if it does
++// not block return until a successor's admitted save has actually retired.
++func TestRepackOverlapFailureJoinsHeldSuccessor(t *testing.T) {
++	queue := make(chan index.PackBlobs, 2)
++	for i := 0; i < 2; i++ {
++		queue <- index.PackBlobs{Blobs: make(pack.Blobs, 1)}
++	}
++	close(queue)
++	releaseA, releaseB := make(chan struct{}), make(chan struct{})
++	defer close(releaseA)
++	defer close(releaseB)
++	successorStarted, draining := make(chan struct{}), make(chan struct{})
++	want := errors.New("predecessor callback failure")
++	done := make(chan error, 1)
++	go func() {
++		calls := 0
++		done <- runRepackCompletionOverlap(queue, func(index.PackBlobs) *repackPackCompletion {
++			calls++
++			if calls == 1 {
++				return &repackPackCompletion{descriptors: 1, finish: func() error { <-releaseA; return want }, drain: func() { <-releaseA }}
++			}
++			close(successorStarted)
++			return &repackPackCompletion{descriptors: 1, finish: func() error { <-releaseB; return nil }, drain: func() { close(draining); <-releaseB }}
++		}, restic.NoopCounter)
++	}()
++	select {
++	case <-successorStarted:
++	case <-time.After(5 * time.Second):
++		t.Fatal("successor did not stream during held predecessor")
++	}
++	releaseA <- struct{}{}
++	select {
++	case <-draining:
++	case <-time.After(5 * time.Second):
++		t.Fatal("failure did not drain admitted successor")
++	}
++	select {
++	case err := <-done:
++		t.Fatalf("returned while successor callback remained held: %v", err)
++	default:
++	}
++	releaseB <- struct{}{}
++	select {
++	case err := <-done:
++		if !errors.Is(err, want) {
++			t.Fatalf("error precedence: %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("successor retirement did not release failure")
++	}
++}

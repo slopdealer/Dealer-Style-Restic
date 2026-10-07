@@ -1,0 +1,2820 @@
+From 16e811557f162527d049c69e20f374427ca6d9b2 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:47:24 +0000
+Subject: [PATCH 11/49] R10 (2/2): hygiene under internal
+
+- internal/repository/repository.go.orig (1,998 lines, a left-over copy)
+  is deleted.
+- The debug.IsEnabled() switches in index_decode_eager.go,
+  index_load_ordinary_stream.go and prune.go are removed: with DEBUG_LOG,
+  DEBUG_FUNCS or DEBUG_FILES set the process ran stock's index decoder,
+  stock's index load and no background header sizes, so a debug run did not
+  run what a normal run runs. (With DEBUG_LOG set, two of the league's own
+  index stream tests failed.) The three switches under cmd/restic belong to
+  another repair.
+- The counters accepted, replayed, scheduled and capacity of
+  parentCutReader, written on every guided read and read only by tests, are
+  removed. The tests take the same numbers from a probe around the two
+  chunkers (parent_cut_probe_test.go).
+- streamPack, the function that stock's TestStreamPack, TestBlobVerification
+  and TestStreamPackFallback test, is the pack stream of repack, copy and
+  repair packs again (loadBlobsFromPackReleased calls it: ranges of at most
+  4 MiB, as from S004 to S018, instead of the 2 MiB windows chosen in R2).
+  streamPackPart had no caller and is deleted. The same table also runs
+  against the restore path (TestStreamPackTableOnProductionPaths).
+- The comment in internal/restic/restore_hold_budget.go states what was
+  measured about the binary layout and no longer gives it as the purpose.
+
+No behaviour change is intended in the items left alone: runtime.GC() before
+the index load and the judge-sized constants are listed in the report.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/archiver/parent_cut_long.go          |    7 -
+ .../archiver/parent_cut_long_join_test.go     |    6 +-
+ internal/archiver/parent_cut_long_test.go     |   22 +-
+ .../parent_cut_long_transition_test.go        |   12 +-
+ internal/archiver/parent_cut_probe_test.go    |  121 +
+ internal/archiver/parent_cut_reader.go        |   34 +-
+ internal/archiver/parent_cut_reader_test.go   |   28 +-
+ .../archiver/parent_cut_reclaim_b18_test.go   |    6 +-
+ .../repository/index/index_decode_eager.go    |    5 -
+ .../repository/index_load_ordinary_stream.go  |    5 -
+ internal/repository/prune.go                  |   10 +-
+ internal/repository/repository.go             |   11 +-
+ internal/repository/repository.go.orig        | 1998 -----------------
+ internal/repository/stream_pack_released.go   |    9 +-
+ .../repository/stream_pack_released_test.go   |    4 +-
+ internal/repository/stream_pack_table_test.go |  154 ++
+ internal/restic/restore_hold_budget.go        |    8 +-
+ 17 files changed, 346 insertions(+), 2094 deletions(-)
+ create mode 100644 internal/archiver/parent_cut_probe_test.go
+ delete mode 100644 internal/repository/repository.go.orig
+ create mode 100644 internal/repository/stream_pack_table_test.go
+
+diff --git a/internal/archiver/parent_cut_long.go b/internal/archiver/parent_cut_long.go
+index cf1be4b5c757a932a8cff66568f849d65399fd47..c850ff62ae742c972fc3761011f0160f93fe1636 100644
+--- a/internal/archiver/parent_cut_long.go
++++ b/internal/archiver/parent_cut_long.go
+@@ -33,7 +33,6 @@ func (g *parentCutReader) readLongPair(ctx context.Context, state *fileChunkStat
+ 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+ 		return nil, err, true
+ 	}
+-	g.capacity = max(g.capacity, uint64(cap(input)))
+ 	g.pending = input[:n]
+ 	g.nextCut = 0
+ 	g.pendingHashed = false
+@@ -51,7 +50,6 @@ func (g *parentCutReader) readLongPair(ctx context.Context, state *fileChunkStat
+ 	var second int
+ 	var wg sync.WaitGroup
+ 	wg.Add(1)
+-	g.scheduled++
+ 	go func() { defer wg.Done(); second = g.extra.NextSplitPoint(input[int(a):]) }()
+ 	first := ordinary.NextSplitPoint(input[:int(a)])
+ 	wg.Wait()
+@@ -61,19 +59,14 @@ func (g *parentCutReader) readLongPair(ctx context.Context, state *fileChunkStat
+ 	}
+ 	if first == int(a) {
+ 		state.chunkID, state.hashed = ids[0], hashed[0]
+-		g.accepted += a
+ 		if second == int(b) {
+ 			g.nextCut = int(b)
+ 			g.pendingID, g.pendingHashed = ids[1], hashed[1]
+-			g.accepted += b
+-		} else {
+-			g.replayed += b
+ 		}
+ 		g.pending = input[int(a):]
+ 		ordinary.Reset()
+ 		return input[:int(a)], nil, true
+ 	}
+-	g.replayed += a + b
+ 	ordinary.Reset()
+ 	out, err := g.pop(state, rd, ordinary)
+ 	return out, err, true
+diff --git a/internal/archiver/parent_cut_long_join_test.go b/internal/archiver/parent_cut_long_join_test.go
+index 3ea4d46e8bc2ad78b44bc36619ad4a06e805a194..dd542ef2882f5bc7b828366e7f4ffb891a709724 100644
+--- a/internal/archiver/parent_cut_long_join_test.go
++++ b/internal/archiver/parent_cut_long_join_test.go
+@@ -54,10 +54,10 @@ func TestB18LongPairBlockedValidatorJoin(t *testing.T) {
+ 				sizes[parent.Content[1]] -= 10
+ 			}
+ 			factory := b18LongBlockedFactory{b18TrialFactory{pol}, make(chan struct{}), make(chan struct{}), make(chan bool, 1)}
+-			g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
++			g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
+ 			ctx, cancel := context.WithCancel(t.Context())
+ 			defer cancel()
+-			state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
++			state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
+ 			storage := make([]byte, 0, chunker.MaxSize)
+ 			type result struct {
+ 				out []byte
+@@ -65,7 +65,7 @@ func TestB18LongPairBlockedValidatorJoin(t *testing.T) {
+ 			}
+ 			done := make(chan result, 1)
+ 			go func() {
+-				out, err := state.readNextChunk(bytes.NewReader(input), b18TrialFactory{pol}.NewChunker(), storage)
++				out, err := state.readNextChunk(bytes.NewReader(input), g.ordinary(b18TrialFactory{pol}.NewChunker()), storage)
+ 				done <- result{out, err}
+ 			}()
+ 			select {
+diff --git a/internal/archiver/parent_cut_long_test.go b/internal/archiver/parent_cut_long_test.go
+index 2f6e181016436c6915693ef94038dd4efbcdaf6e..872830a32832263e4ea8960eda43246a8d4a4a7a 100644
+--- a/internal/archiver/parent_cut_long_test.go
++++ b/internal/archiver/parent_cut_long_test.go
+@@ -33,10 +33,10 @@ func b18LongFixture(t *testing.T) ([]byte, *data.Node, map[restic.ID]uint) {
+ 	t.Fatal("no long pair in reference input")
+ 	return nil, nil, nil
+ }
+-func b18ReadLong(ctx context.Context, rd io.Reader, factory restic.ChunkerFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *parentCutReader, error) {
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
+-	c := factory.NewChunker()
++func b18ReadLong(ctx context.Context, rd io.Reader, factory restic.ChunkerFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *b18Guided, error) {
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
++	c := g.ordinary(factory.NewChunker())
+ 	scratch := make([]byte, 0, chunker.MaxSize)
+ 	var ends []int
+ 	var ids []restic.ID
+@@ -89,7 +89,7 @@ func TestB18LongPairIdentity(t *testing.T) {
+ 				if tc.name == "unchanged" && (g.scheduled == 0 || g.accepted == 0) {
+ 					t.Fatal("long route not exercised")
+ 				}
+-				t.Logf("division=%d accepted=%d replay=%d scheduled=%d capacity=%d", division, g.accepted, g.replayed, g.scheduled, g.capacity)
++				t.Logf("division=%d accepted=%d replay=%d scheduled=%d", division, g.accepted, g.replayed, g.scheduled)
+ 			}
+ 		})
+ 	}
+@@ -150,10 +150,10 @@ func TestB18LongPairFailureAndJoin(t *testing.T) {
+ 	defer cancel()
+ 	joined := make(chan struct{})
+ 	factory := b18CancelFactory{b18TrialFactory{pol}, cancel, joined}
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
+ 	storage := make([]byte, 0, chunker.MaxSize)
+-	out, err := state.readNextChunk(bytes.NewReader(input), b18TrialFactory{pol}.NewChunker(), storage)
++	out, err := state.readNextChunk(bytes.NewReader(input), g.ordinary(b18TrialFactory{pol}.NewChunker()), storage)
+ 	if out != nil || !errors.Is(err, context.Canceled) || g.scheduled != 1 {
+ 		t.Fatal("long validator published after cancellation", err)
+ 	}
+@@ -197,12 +197,12 @@ func TestB18LongReplayGrowthError(t *testing.T) {
+ 		parent.Content = append(parent.Content, id)
+ 		sizes[id] = n
+ 	}
+-	g := &parentCutReader{parent: parent, factory: b18TrialFactory{pol}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
++	g := b18Probed(&parentCutReader{parent: parent, factory: b18TrialFactory{pol}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
+ 	initial := make([]byte, 0, 3*1024*1024)
+ 	sentinel := errors.New("after long replay growth")
+ 	rd := &b18FailReader{r: bytes.NewReader(input), left: 4 * 1024 * 1024, err: sentinel}
+-	out, err := state.readNextChunk(rd, b18TrialFactory{pol}.NewChunker(), initial)
++	out, err := state.readNextChunk(rd, g.ordinary(b18TrialFactory{pol}.NewChunker()), initial)
+ 	if len(out) == 0 || !errors.Is(err, sentinel) || g.scheduled != 1 || g.replayed == 0 || cap(g.root) <= cap(initial) {
+ 		t.Fatalf("err=%v scheduled=%d replay=%d cap=%d", err, g.scheduled, g.replayed, cap(g.root))
+ 	}
+diff --git a/internal/archiver/parent_cut_long_transition_test.go b/internal/archiver/parent_cut_long_transition_test.go
+index 63461a1d91d18b4330f3795b4ef131b8dc876e40..58e5220b52e4ee18c9b3a294af8de23d6e610c65 100644
+--- a/internal/archiver/parent_cut_long_transition_test.go
++++ b/internal/archiver/parent_cut_long_transition_test.go
+@@ -20,9 +20,9 @@ func TestB18LongPairNaturallyGrownAssembly(t *testing.T) {
+ 	input := b06Payload(32*1024*1024+173, 881)
+ 	parent, sizes := b18Guidance(input, pol)
+ 	factory := b18TrialFactory{pol}
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
+-	c := factory.NewChunker()
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
++	c := g.ordinary(factory.NewChunker())
+ 	assembly := make([]byte, 0, 2<<20)
+ 	rd := bytes.NewReader(input)
+ 	var ends []int
+@@ -71,14 +71,14 @@ func TestB18LongPairRouteTransitionReadError(t *testing.T) {
+ 			input = append(input, bytes.Repeat([]byte{byte(i + 1)}, n)...)
+ 		}
+ 	}
+-	g := &parentCutReader{parent: parent, factory: b18ReclaimFactory{}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g, bmax: 111}
++	g := b18Probed(&parentCutReader{parent: parent, factory: b18ReclaimFactory{}, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader, bmax: 111}
+ 	copy(state.readBuf, input[:111])
+ 	sentinel := errors.New("next long pair failed")
+ 	rd := &b18FailReader{r: bytes.NewReader(input[111:]), left: len(input) - 111, err: sentinel}
+ 	storage := make([]byte, 0, 4<<20)
+ 	assembly := storage
+-	c := g.factory.NewChunker()
++	c := g.newOrdinary()
+ 	for i := 0; i < 6; i++ {
+ 		out, err := state.readNextChunk(rd, c, assembly)
+ 		if err != nil || len(out) != lengths[i] || !bytes.Equal(out, bytes.Repeat([]byte{byte(i + 1)}, lengths[i])) {
+diff --git a/internal/archiver/parent_cut_probe_test.go b/internal/archiver/parent_cut_probe_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e67828987bf30d139a857a902ad4835528d0e3a
+--- /dev/null
++++ b/internal/archiver/parent_cut_probe_test.go
+@@ -0,0 +1,121 @@
++package archiver
++
++import (
++	"sync"
++
++	"github.com/restic/restic/internal/restic"
++)
++
++// cutProbe counts what a parentCutReader does with its predictions. The
++// reader itself keeps no counters; the probe derives them from the calls the
++// reader makes to its two chunkers:
++//
++//   - scheduled: validations started, one scan of the additional chunker each;
++//   - accepted: bytes of predicted chunks whose cut was confirmed;
++//   - replayed: bytes of predictions that were not confirmed and are scanned
++//     again.
++//
++// The reader resets the additional chunker right before every validation and
++// at no other time. The next scan of the ordinary chunker is then the scan of
++// the first predicted chunk, and the scan of the additional chunker is the
++// scan of the second.
++type cutProbe struct {
++	mu                            sync.Mutex
++	scheduled, accepted, replayed uint64
++
++	armed       bool
++	first, a    int
++	second, b   int
++	haveFirst   bool
++	haveSecond  bool
++	ordinaryFor restic.ChunkerFactory
++}
++
++// b18Guided is a reader together with its probe.
++type b18Guided struct {
++	*parentCutReader
++	*cutProbe
++}
++
++// b18Probed attaches a probe to g. The ordinary chunker that the test hands
++// to the reader must come from ordinary().
++func b18Probed(g *parentCutReader) *b18Guided {
++	p := &cutProbe{ordinaryFor: g.factory}
++	g.factory = cutProbeFactory{g.factory, p}
++	return &b18Guided{g, p}
++}
++
++// ordinary wraps the chunker of the ordinary read path.
++func (p *cutProbe) ordinary(c restic.Chunker) restic.Chunker {
++	return &cutProbeOrdinary{c, p}
++}
++
++// newOrdinary returns a probed ordinary chunker from the reader's own factory.
++func (p *cutProbe) newOrdinary() restic.Chunker {
++	return p.ordinary(p.ordinaryFor.NewChunker())
++}
++
++func (p *cutProbe) settle() {
++	if !p.haveFirst || !p.haveSecond {
++		return
++	}
++	p.haveFirst, p.haveSecond = false, false
++	if p.first != p.a {
++		p.replayed += uint64(p.a + p.b)
++		return
++	}
++	p.accepted += uint64(p.a)
++	if p.second == p.b {
++		p.accepted += uint64(p.b)
++	} else {
++		p.replayed += uint64(p.b)
++	}
++}
++
++type cutProbeFactory struct {
++	restic.ChunkerFactory
++	p *cutProbe
++}
++
++func (f cutProbeFactory) NewChunker() restic.Chunker {
++	return &cutProbeValidator{f.ChunkerFactory.NewChunker(), f.p}
++}
++
++type cutProbeValidator struct {
++	restic.Chunker
++	p *cutProbe
++}
++
++func (c *cutProbeValidator) Reset() {
++	c.Chunker.Reset()
++	c.p.mu.Lock()
++	c.p.armed, c.p.haveFirst, c.p.haveSecond = true, false, false
++	c.p.mu.Unlock()
++}
++
++func (c *cutProbeValidator) NextSplitPoint(buf []byte) int {
++	n := c.Chunker.NextSplitPoint(buf)
++	c.p.mu.Lock()
++	c.p.scheduled++
++	c.p.second, c.p.b, c.p.haveSecond = n, len(buf), true
++	c.p.settle()
++	c.p.mu.Unlock()
++	return n
++}
++
++type cutProbeOrdinary struct {
++	restic.Chunker
++	p *cutProbe
++}
++
++func (c *cutProbeOrdinary) NextSplitPoint(buf []byte) int {
++	n := c.Chunker.NextSplitPoint(buf)
++	c.p.mu.Lock()
++	if c.p.armed {
++		c.p.armed = false
++		c.p.first, c.p.a, c.p.haveFirst = n, len(buf), true
++		c.p.settle()
++	}
++	c.p.mu.Unlock()
++	return n
++}
+diff --git a/internal/archiver/parent_cut_reader.go b/internal/archiver/parent_cut_reader.go
+index 23350d9f99f8f28cae27a548a162d63dbddae236..1378846c1fa3052cebadedb269cbbd03d6cd478a 100644
+--- a/internal/archiver/parent_cut_reader.go
++++ b/internal/archiver/parent_cut_reader.go
+@@ -21,20 +21,19 @@ type parentCutLength struct {
+ }
+ 
+ type parentCutReader struct {
+-	lengths                                 [2]parentCutLength
+-	disabled                                bool
+-	parent                                  *data.Node
+-	lookup                                  func(restic.BlobHandle) (uint, bool)
+-	factory                                 restic.ChunkerFactory
+-	extra                                   restic.Chunker
+-	hashes                                  *parentPairHashLane
+-	pendingID                               restic.ID
+-	pendingHashed                           bool
+-	offset, hintOffset                      uint64
+-	hint                                    int
+-	root, pending                           []byte
+-	nextCut                                 int
+-	accepted, replayed, scheduled, capacity uint64
++	lengths            [2]parentCutLength
++	disabled           bool
++	parent             *data.Node
++	lookup             func(restic.BlobHandle) (uint, bool)
++	factory            restic.ChunkerFactory
++	extra              restic.Chunker
++	hashes             *parentPairHashLane
++	pendingID          restic.ID
++	pendingHashed      bool
++	offset, hintOffset uint64
++	hint               int
++	root, pending      []byte
++	nextCut            int
+ }
+ 
+ func (g *parentCutReader) span(i int) (uint64, bool) {
+@@ -126,7 +125,6 @@ func (g *parentCutReader) readNext(ctx context.Context, state *fileChunkState, r
+ 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+ 		return nil, err
+ 	}
+-	g.capacity = max(g.capacity, uint64(cap(input)))
+ 	g.pending = input[:n]
+ 	g.nextCut = 0
+ 	g.pendingHashed = false
+@@ -143,7 +141,6 @@ func (g *parentCutReader) readNext(ctx context.Context, state *fileChunkState, r
+ 	var second int
+ 	var wg sync.WaitGroup
+ 	wg.Add(1)
+-	g.scheduled++
+ 	go func() { defer wg.Done(); second = g.extra.NextSplitPoint(input[a:]) }()
+ 	first := ordinary.NextSplitPoint(input[:a])
+ 	wg.Wait()
+@@ -153,19 +150,14 @@ func (g *parentCutReader) readNext(ctx context.Context, state *fileChunkState, r
+ 	}
+ 	if first == a {
+ 		state.chunkID, state.hashed = ids[0], hashed[0]
+-		g.accepted += uint64(a)
+ 		if second == b {
+ 			g.nextCut = b
+ 			g.pendingID, g.pendingHashed = ids[1], hashed[1]
+-			g.accepted += uint64(b)
+-		} else {
+-			g.replayed += uint64(b)
+ 		}
+ 		g.pending = input[a:]
+ 		ordinary.Reset()
+ 		return input[:a], nil
+ 	}
+-	g.replayed += uint64(a + b)
+ 	ordinary.Reset()
+ 	return g.pop(state, rd, ordinary)
+ }
+diff --git a/internal/archiver/parent_cut_reader_test.go b/internal/archiver/parent_cut_reader_test.go
+index 1cad82c69814edd314a645a2a2be80824e7c85bf..bb4381dbdcde7f100190639c26a91c7fbef161c9 100644
+--- a/internal/archiver/parent_cut_reader_test.go
++++ b/internal/archiver/parent_cut_reader_test.go
+@@ -32,10 +32,10 @@ func b18Guidance(payload []byte, pol chunker.Pol) (*data.Node, map[restic.ID]uin
+ 	}
+ 	return parent, sizes
+ }
+-func b18ReadGuided(ctx context.Context, rd io.Reader, factory b18TrialFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *parentCutReader, error) {
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
+-	c := factory.NewChunker()
++func b18ReadGuided(ctx context.Context, rd io.Reader, factory b18TrialFactory, parent *data.Node, sizes map[restic.ID]uint) ([]int, []restic.ID, *b18Guided, error) {
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
++	c := g.ordinary(factory.NewChunker())
+ 	scratch := make([]byte, 0, 2*1024*1024)
+ 	offset := 0
+ 	var ends []int
+@@ -84,7 +84,7 @@ func TestB18GuidedReader(t *testing.T) {
+ 				if err != nil || !slices.Equal(got, want) || !slices.Equal(ids, b18ContentIDs(tc.input, want)) {
+ 					t.Fatalf("division=%d got=%v want=%v err=%v", division, got, want, err)
+ 				}
+-				t.Logf("division=%d bytes=%d accepted=%d replayed=%d scheduled=%d assembly_capacity=%d", division, len(tc.input), g.accepted, g.replayed, g.scheduled, g.capacity)
++				t.Logf("division=%d bytes=%d accepted=%d replayed=%d scheduled=%d", division, len(tc.input), g.accepted, g.replayed, g.scheduled)
+ 			}
+ 		})
+ 	}
+@@ -213,12 +213,12 @@ func TestB18GuidedSaverHashOwnership(t *testing.T) {
+ 	s.NodeFromFileInfo = func(string, string, toNoder, bool) (*data.Node, error) {
+ 		return &data.Node{Type: data.NodeTypeFile, Size: uint64(len(input))}, nil
+ 	}
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize}
+-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize})
++	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
+ 	file := &b06SaverFile{r: bytes.NewReader(input)}
+ 	var result futureNodeResult
+ 	completed, reading := 0, 0
+-	s.saveFile(t.Context(), factory.NewChunker(), state, "/guided", "guided", file, func() {}, func() { reading++ }, func(r futureNodeResult) { result = r; completed++ })
++	s.saveFile(t.Context(), g.ordinary(factory.NewChunker()), state, "/guided", "guided", file, func() {}, func() { reading++ }, func(r futureNodeResult) { result = r; completed++ })
+ 	if g.accepted == 0 || reading != 1 || completed != 0 || !file.closed {
+ 		t.Fatalf("guided save not exercised: accepted=%d reading=%d completed=%d", g.accepted, reading, completed)
+ 	}
+@@ -319,9 +319,9 @@ func TestB18GuidedCancellationDuringValidator(t *testing.T) {
+ 	defer cancel()
+ 	joined := make(chan struct{})
+ 	factory := b18CancelFactory{b18TrialFactory{pol}, cancel, joined}
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g}
+-	output, err := state.readNextChunk(bytes.NewReader(input), b18TrialFactory{pol}.NewChunker(), make([]byte, 0, 2*1024*1024))
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: ctx, guided: g.parentCutReader}
++	output, err := state.readNextChunk(bytes.NewReader(input), g.ordinary(b18TrialFactory{pol}.NewChunker()), make([]byte, 0, 2*1024*1024))
+ 	if !errors.Is(err, context.Canceled) || output != nil || g.scheduled != 1 {
+ 		t.Fatal("validator cancellation did not prevent emission", err, g.scheduled)
+ 	}
+@@ -349,11 +349,11 @@ func TestB18GuidedEOFReturnsAssemblyBase(t *testing.T) {
+ 	s.NodeFromFileInfo = func(string, string, toNoder, bool) (*data.Node, error) {
+ 		return &data.Node{Type: data.NodeTypeFile, Size: uint64(len(input))}, nil
+ 	}
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize}
+-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: u.LookupStoredBlobSize})
++	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
+ 	var result futureNodeResult
+ 	completed := 0
+-	s.saveFile(t.Context(), factory.NewChunker(), state, "/cut", "cut", &b06SaverFile{r: bytes.NewReader(input)}, func() {}, func() {}, func(r futureNodeResult) { result = r; completed++ })
++	s.saveFile(t.Context(), g.ordinary(factory.NewChunker()), state, "/cut", "cut", &b06SaverFile{r: bytes.NewReader(input)}, func() {}, func() {}, func(r futureNodeResult) { result = r; completed++ })
+ 	for _, p := range u.pending {
+ 		p.cb(p.id, p.known, p.size, nil)
+ 	}
+diff --git a/internal/archiver/parent_cut_reclaim_b18_test.go b/internal/archiver/parent_cut_reclaim_b18_test.go
+index 4426e2b482d46954d53d86e63a7c3f528b34b25a..58acdeced6b264cfd00c8569c9793a629b2c481f 100644
+--- a/internal/archiver/parent_cut_reclaim_b18_test.go
++++ b/internal/archiver/parent_cut_reclaim_b18_test.go
+@@ -29,9 +29,9 @@ func TestB18FallbackReadErrorReclaimsAssembly(t *testing.T) {
+ 		sizes[id] = uint(n)
+ 	}
+ 	factory := b18TrialFactory{pol}
+-	g := &parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }}
+-	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g}
+-	c := factory.NewChunker()
++	g := b18Probed(&parentCutReader{parent: parent, factory: factory, lookup: func(h restic.BlobHandle) (uint, bool) { n, ok := sizes[h.ID]; return n, ok }})
++	state := &fileChunkState{readBuf: make([]byte, chunkReadBufSize), ctx: t.Context(), guided: g.parentCutReader}
++	c := g.ordinary(factory.NewChunker())
+ 	pool := newBufferPool(2 << 20)
+ 	buf := pool.Get()
+ 	base := &buf.Data[0]
+diff --git a/internal/repository/index/index_decode_eager.go b/internal/repository/index/index_decode_eager.go
+index 3a09dd5ab06ee7ba8d0ed3e344de522fe909471b..3c67abd8c241bd0fd50c10b496bab1f764d54bd3 100644
+--- a/internal/repository/index/index_decode_eager.go
++++ b/internal/repository/index/index_decode_eager.go
+@@ -4,7 +4,6 @@ import (
+ 	"bytes"
+ 	"math"
+ 
+-	"github.com/restic/restic/internal/debug"
+ 	"github.com/restic/restic/internal/repository/pack"
+ 	"github.com/restic/restic/internal/restic"
+ )
+@@ -14,10 +13,6 @@ import (
+ // the entire document before lookup storage exists, including storage overflow.
+ // Fallback therefore holds no partial index or typed pack/blob representation.
+ func decodeIndexEager(buf []byte, id restic.ID) (*Index, error) {
+-	// Preserve the ordinary decoder's instrumentation sites and debug filters.
+-	if debug.IsEnabled() {
+-		return DecodeIndex(buf, id)
+-	}
+ 	if idx, ok := decodeCanonicalIndex(buf, id); ok {
+ 		return idx, nil
+ 	}
+diff --git a/internal/repository/index_load_ordinary_stream.go b/internal/repository/index_load_ordinary_stream.go
+index cf3ac71d9ca11e741841b0e61d2ed1fa27e243c7..3c8fa7281152b593531727b6e3b83b392092fcd9 100644
+--- a/internal/repository/index_load_ordinary_stream.go
++++ b/internal/repository/index_load_ordinary_stream.go
+@@ -7,7 +7,6 @@ import (
+ 	"io"
+ 
+ 	"github.com/klauspost/compress/zstd"
+-	"github.com/restic/restic/internal/debug"
+ 	"github.com/restic/restic/internal/repository/crypto"
+ 	"github.com/restic/restic/internal/repository/index"
+ 	"github.com/restic/restic/internal/restic"
+@@ -26,10 +25,6 @@ func (r *Repository) loadIndexesStreaming(ctx context.Context, p restic.Counter,
+ }
+ 
+ func (r *ordinaryIndexStreamRepository) LoadIndexStream(ctx context.Context, id restic.ID) (*index.Index, []byte, error) {
+-	if debug.IsEnabled() {
+-		buf, err := r.LoadUnpacked(ctx, restic.IndexFile, id)
+-		return nil, buf, err
+-	}
+ 	buf, err := r.LoadRaw(ctx, restic.IndexFile, id)
+ 	if err != nil {
+ 		return nil, nil, err
+diff --git a/internal/repository/prune.go b/internal/repository/prune.go
+index 5117da00abc7d20968a3818ca1ab51ab6633571f..e4d36bc972a18a15bdbf4f5bff15bb3c8a97b10b 100644
+--- a/internal/repository/prune.go
++++ b/internal/repository/prune.go
+@@ -121,13 +121,9 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
+ 
+ 	// Compute index-only headers alongside used-tree traversal and counting.
+ 	// Diagnostics and header errors settle at their original position below.
+-	var headers *pruneHeaderSizes
+-	var takeHeaders func() (map[restic.ID]int64, error)
+-	if !debug.IsEnabled() {
+-		headers = startPruneHeaderSizesWithCalculator(ctx, repo.idx.PackHeaderSizes)
+-		defer headers.discard()
+-		takeHeaders = headers.take
+-	}
++	headers := startPruneHeaderSizesWithCalculator(ctx, repo.idx.PackHeaderSizes)
++	defer headers.discard()
++	takeHeaders := headers.take
+ 
+ 	usedBlobs := index.NewAssociatedSet[uint8](repo.idx)
+ 	err := getUsedBlobs(ctx, repo, usedBlobs)
+diff --git a/internal/repository/repository.go b/internal/repository/repository.go
+index 37048c4bea4651877b8992527fb2f14fa7183af5..258a762e0991534eefc347aec63d0e14ead583db 100644
+--- a/internal/repository/repository.go
++++ b/internal/repository/repository.go
+@@ -1562,6 +1562,12 @@ type smallRestoreDecodePolicy struct {
+ 	ensureOrdinary func(context.Context) error
+ }
+ 
++// streamPack reads each range of at most maxStreamPackChunkSize into memory,
++// returns the backend connection and then decodes the blobs and calls
++// handleBlobFn: the handler never runs inside the backend's Load callback.
++// It is the pack stream of repack, copy and repair packs
++// (loadBlobsFromPackReleased) and the function that TestStreamPack,
++// TestBlobVerification and TestStreamPackFallback test.
+ func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+ 	return streamPackWindowed(ctx, beLoad, loadBlobFn, dec, key, packID, blobs, handleBlobFn, maxStreamPackChunkSize, true)
+ }
+@@ -1627,11 +1633,6 @@ func streamPackWindowed(ctx context.Context, beLoad backendLoadFn, loadBlobFn lo
+ 	return loadPart(blobs[lowerIdx:])
+ }
+ 
+-func streamPackPart(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	var data []byte
+-	return streamPackPartWithBuffer(ctx, beLoad, loadBlobFn, dec, key, packID, blobs, &data, handleBlobFn)
+-}
+-
+ func streamPackPartWithBuffer(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, data *[]byte, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+ 	h := backend.Handle{Type: backend.PackFile, Name: packID.String(), IsMetadata: blobs[0].Type.IsMetadata()}
+ 
+diff --git a/internal/repository/repository.go.orig b/internal/repository/repository.go.orig
+deleted file mode 100644
+index 54b5c281a7191603442952efbfa47acc4fa11ed0..0000000000000000000000000000000000000000
+--- a/internal/repository/repository.go.orig
++++ /dev/null
+@@ -1,1998 +0,0 @@
+-package repository
+-
+-import (
+-	"bytes"
+-	"context"
+-	"crypto/sha256"
+-	"fmt"
+-	"hash"
+-	"io"
+-	"math"
+-	"runtime"
+-	"sync"
+-
+-	"github.com/klauspost/compress/zstd"
+-	"github.com/restic/chunker"
+-	"github.com/restic/restic/internal/backend"
+-	"github.com/restic/restic/internal/backend/cache"
+-	"github.com/restic/restic/internal/backend/dryrun"
+-	"github.com/restic/restic/internal/backend/sema"
+-	"github.com/restic/restic/internal/debug"
+-	"github.com/restic/restic/internal/errors"
+-	"github.com/restic/restic/internal/repository/crypto"
+-	"github.com/restic/restic/internal/repository/index"
+-	"github.com/restic/restic/internal/repository/pack"
+-	"github.com/restic/restic/internal/restic"
+-
+-	"golang.org/x/sync/errgroup"
+-)
+-
+-const MinPackSize = 4 * 1024 * 1024
+-const DefaultPackSize = 16 * 1024 * 1024
+-const MaxPackSize = 128 * 1024 * 1024
+-
+-// CompressionAuto samples large data blobs before encoding the whole blob.
+-// The windows are spread across the input so that one local region doesn't
+-// decide whether the complete blob is compressed.
+-const (
+-	autoCompressionMinSampledSize = 512 * 1024
+-	autoCompressionSampleWindow   = 2 * 1024
+-	autoCompressionSampleWindows  = 16
+-	autoCompressionSampleSize     = autoCompressionSampleWindow * autoCompressionSampleWindows
+-)
+-
+-type compressionSample struct {
+-	input   []byte
+-	encoded []byte
+-}
+-
+-var compressionSamplePool = sync.Pool{New: func() any {
+-	return &compressionSample{
+-		input:   make([]byte, autoCompressionSampleSize),
+-		encoded: make([]byte, 0, autoCompressionSampleSize+1024),
+-	}
+-}}
+-
+-// Repository is used to access a repository in a backend.
+-type Repository struct {
+-	be    backend.Backend
+-	cfg   restic.Config
+-	key   *crypto.Key
+-	keyID restic.ID
+-	idx   *index.MasterIndex
+-	cache *cache.Cache
+-
+-	opts Options
+-
+-	packerWg    *errgroup.Group
+-	mainWg      *errgroup.Group
+-	blobSaver   *sync.WaitGroup
+-	uploader    *packerUploader
+-	treePM      *packerManager
+-	dataPM      *packerManager
+-	packerCount int
+-
+-	allocEnc sync.Once
+-	allocDec sync.Once
+-	enc      *zstd.Encoder
+-	dec      *zstd.Decoder
+-
+-	// One idle limited decoder is retained; checked-out decoders have a single
+-	// synchronous stream owner. Concurrent restores allocate independently.
+-	smallRestoreDecoderMu sync.Mutex
+-	smallRestoreDecoder   *zstd.Decoder
+-	smallRestoreClosed    bool
+-
+-	zeroChunkOnce sync.Once
+-	zeroChunkID   restic.ID
+-}
+-
+-// internalRepository allows using SaveUnpacked and RemoveUnpacked with all FileTypes
+-type internalRepository struct {
+-	*Repository
+-}
+-
+-type Options struct {
+-	Compression   CompressionMode
+-	PackSize      uint
+-	NoExtraVerify bool
+-}
+-
+-// CompressionMode configures if data should be compressed.
+-type CompressionMode uint
+-
+-// Constants for the different compression levels.
+-const (
+-	CompressionAuto    CompressionMode = 0
+-	CompressionOff     CompressionMode = 1
+-	CompressionMax     CompressionMode = 2
+-	CompressionFastest CompressionMode = 3
+-	CompressionBetter  CompressionMode = 4
+-	CompressionInvalid CompressionMode = 5
+-)
+-
+-// Set implements the method needed for pflag command flag parsing.
+-func (c *CompressionMode) Set(s string) error {
+-	switch s {
+-	case "auto":
+-		*c = CompressionAuto
+-	case "off":
+-		*c = CompressionOff
+-	case "max":
+-		*c = CompressionMax
+-	case "fastest":
+-		*c = CompressionFastest
+-	case "better":
+-		*c = CompressionBetter
+-	default:
+-		*c = CompressionInvalid
+-		return fmt.Errorf("invalid compression mode %q, must be one of (auto|off|fastest|better|max)", s)
+-	}
+-
+-	return nil
+-}
+-
+-func (c *CompressionMode) String() string {
+-	switch *c {
+-	case CompressionAuto:
+-		return "auto"
+-	case CompressionOff:
+-		return "off"
+-	case CompressionMax:
+-		return "max"
+-	case CompressionFastest:
+-		return "fastest"
+-	case CompressionBetter:
+-		return "better"
+-	default:
+-		return "invalid"
+-	}
+-
+-}
+-func (c *CompressionMode) Type() string {
+-	return "mode"
+-}
+-
+-// New returns a new repository with backend be.
+-func New(be backend.Backend, opts Options) (*Repository, error) {
+-	if opts.Compression == CompressionInvalid {
+-		return nil, errors.New("invalid compression mode")
+-	}
+-
+-	if opts.PackSize == 0 {
+-		opts.PackSize = DefaultPackSize
+-	}
+-	if opts.PackSize > MaxPackSize {
+-		return nil, fmt.Errorf("pack size larger than limit of %v MiB", MaxPackSize/1024/1024)
+-	} else if opts.PackSize < MinPackSize {
+-		return nil, fmt.Errorf("pack size smaller than minimum of %v MiB", MinPackSize/1024/1024)
+-	}
+-
+-	repo := &Repository{
+-		be:          be,
+-		opts:        opts,
+-		idx:         index.NewMasterIndex(),
+-		packerCount: defaultPackerCount,
+-	}
+-
+-	return repo, nil
+-}
+-
+-// setConfig assigns the given config and updates the repository parameters accordingly
+-func (r *Repository) setConfig(cfg restic.Config) {
+-	r.cfg = cfg
+-}
+-
+-// Config returns the repository configuration.
+-func (r *Repository) Config() restic.Config {
+-	return r.cfg
+-}
+-
+-// PackSize return the target size of a pack file when uploading
+-func (r *Repository) PackSize() uint {
+-	return r.opts.PackSize
+-}
+-
+-// UseCache replaces the backend with the wrapped cache.
+-func (r *Repository) UseCache(c *cache.Cache, errorLog func(string, ...any)) {
+-	if c == nil {
+-		return
+-	}
+-	debug.Log("using cache")
+-	r.cache = c
+-	r.be = c.Wrap(r.be, errorLog)
+-}
+-
+-func (r *Repository) Cache() *cache.Cache {
+-	return r.cache
+-}
+-
+-// SetDryRun sets the repo backend into dry-run mode.
+-func (r *Repository) SetDryRun() {
+-	r.be = dryrun.New(r.be)
+-}
+-
+-func (r *Repository) Checker() *Checker {
+-	return newChecker(r)
+-}
+-
+-// LoadUnpacked loads and decrypts the file with the given type and ID.
+-func (r *Repository) LoadUnpacked(ctx context.Context, t restic.FileType, id restic.ID) ([]byte, error) {
+-	debug.Log("load %v with id %v", t, id)
+-
+-	if t == restic.ConfigFile {
+-		id = restic.ID{}
+-	}
+-
+-	buf, err := r.LoadRaw(ctx, t, id)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	if len(buf) < crypto.CiphertextLength(0) {
+-		return nil, fmt.Errorf("invalid data in %v file, too short", t)
+-	}
+-
+-	nonce, ciphertext := buf[:r.key.NonceSize()], buf[r.key.NonceSize():]
+-	plaintext, err := r.key.Open(ciphertext[:0], nonce, ciphertext, nil)
+-	if err != nil {
+-		return nil, err
+-	}
+-	if t != restic.ConfigFile {
+-		return r.decompressUnpacked(plaintext)
+-	}
+-
+-	return plaintext, nil
+-}
+-
+-type haver interface {
+-	Has(backend.Handle) bool
+-}
+-
+-// sortCachedPacksFirst moves all cached pack files to the front of blobs.
+-func sortCachedPacksFirst(cache haver, blobs []*pack.PackedBlob) {
+-	if cache == nil {
+-		return
+-	}
+-
+-	// no need to sort a list with one element
+-	if len(blobs) == 1 {
+-		return
+-	}
+-
+-	cached := blobs[:0]
+-	noncached := make([]*pack.PackedBlob, 0, len(blobs)/2)
+-
+-	for _, blob := range blobs {
+-		if cache.Has(backend.Handle{Type: backend.PackFile, Name: blob.PackID().String()}) {
+-			cached = append(cached, blob)
+-			continue
+-		}
+-		noncached = append(noncached, blob)
+-	}
+-
+-	copy(blobs[len(cached):], noncached)
+-}
+-
+-// LoadBlob loads a blob from the repository.
+-// It may use all of buf[:cap(buf)] as scratch space.
+-func (r *Repository) LoadBlob(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error) {
+-	debug.Log("load %v (buf len %v, cap %d)", bh, len(buf), cap(buf))
+-
+-	// lookup packs
+-	blobs := r.idx.Lookup(bh)
+-	if len(blobs) == 0 {
+-		debug.Log("id %v not found in index", bh.ID)
+-		return nil, errors.Errorf("id %v not found in repository", bh.ID)
+-	}
+-
+-	// try cached pack files first
+-	sortCachedPacksFirst(r.cache, blobs)
+-
+-	buf, err := r.loadBlob(ctx, blobs, buf)
+-	if err != nil {
+-		if r.cache != nil {
+-			for _, blob := range blobs {
+-				h := backend.Handle{Type: backend.PackFile, Name: blob.PackID().String(), IsMetadata: blob.Blob.Type.IsMetadata()}
+-				// ignore errors as there's not much we can do here
+-				_ = r.cache.Forget(h)
+-			}
+-		}
+-
+-		buf, err = r.loadBlob(ctx, blobs, buf)
+-	}
+-	return buf, err
+-}
+-
+-func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf []byte) ([]byte, error) {
+-	var lastError error
+-	for _, blob := range blobs {
+-		debug.Log("blob %v found: %v", blob.Handle(), blob)
+-		// load blob from pack
+-		h := backend.Handle{Type: backend.PackFile, Name: blob.PackID().String(), IsMetadata: blob.Blob.Type.IsMetadata()}
+-
+-		switch {
+-		case cap(buf) < int(blob.Blob.Length):
+-			buf = make([]byte, blob.Blob.Length)
+-		case len(buf) != int(blob.Blob.Length):
+-			buf = buf[:blob.Blob.Length]
+-		}
+-
+-		_, err := backend.ReadAt(ctx, r.be, h, int64(blob.Blob.Offset), buf)
+-		if err != nil {
+-			debug.Log("error loading blob %v: %v", blob, err)
+-			lastError = err
+-			continue
+-		}
+-
+-		it := newPackBlobIterator(blob.PackID(), newByteReader(buf), blob.Blob.Offset, pack.Blobs{blob.Blob}, r.key, r.getZstdDecoder())
+-		pbv, err := it.Next()
+-
+-		if err == nil {
+-			err = pbv.Err
+-		}
+-		if err != nil {
+-			debug.Log("error decoding blob %v: %v", blob, err)
+-			lastError = err
+-			continue
+-		}
+-
+-		plaintext := pbv.Plaintext
+-		if len(plaintext) > cap(buf) {
+-			return plaintext, nil
+-		}
+-		// move decrypted data to the start of the buffer
+-		buf = buf[:len(plaintext)]
+-		copy(buf, plaintext)
+-		return buf, nil
+-	}
+-
+-	if lastError != nil {
+-		return nil, lastError
+-	}
+-
+-	return nil, errors.Errorf("loading %v from %v packs failed", blobs[0].Handle(), len(blobs))
+-}
+-
+-func (r *Repository) getZstdEncoder() *zstd.Encoder {
+-	r.allocEnc.Do(func() {
+-		opts := []zstd.EOption{
+-			// Set the compression level configured.
+-			zstd.WithEncoderLevel(r.zstdEncoderLevel()),
+-			// Disable CRC, we have enough checks in place, makes the
+-			// compressed data four bytes shorter.
+-			zstd.WithEncoderCRC(false),
+-			// Set a window of 512kbyte, so we have good lookbehind for usual
+-			// blob sizes.
+-			zstd.WithWindowSize(512 * 1024),
+-		}
+-
+-		enc, err := zstd.NewWriter(nil, opts...)
+-		if err != nil {
+-			panic(err)
+-		}
+-		r.enc = enc
+-	})
+-	return r.enc
+-}
+-
+-func (r *Repository) zstdEncoderLevel() zstd.EncoderLevel {
+-	switch r.opts.Compression {
+-	case CompressionFastest:
+-		return zstd.SpeedFastest
+-	case CompressionBetter:
+-		return zstd.SpeedBetterCompression
+-	case CompressionMax:
+-		return zstd.SpeedBestCompression
+-	default:
+-		return zstd.SpeedDefault
+-	}
+-}
+-
+-func (r *Repository) getZstdDecoder() *zstd.Decoder {
+-	r.allocDec.Do(func() {
+-		opts := []zstd.DOption{
+-			// Use all available cores.
+-			zstd.WithDecoderConcurrency(0),
+-			// Limit the maximum decompressed memory. Set to a very high,
+-			// conservative value.
+-			zstd.WithDecoderMaxMemory(16 * 1024 * 1024 * 1024),
+-		}
+-
+-		dec, err := zstd.NewReader(nil, opts...)
+-		if err != nil {
+-			panic(err)
+-		}
+-		r.dec = dec
+-	})
+-	return r.dec
+-}
+-
+-// saveAndEncrypt encrypts data and stores it to the backend as type t. If data
+-// is small enough, it will be packed together with other small blobs. The
+-// caller must ensure that the id matches the data. Returned is the size data
+-// occupies in the repo (compressed or not, including the encryption overhead).
+-func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data []byte, id restic.ID) (size int, err error) {
+-	debug.Log("save id %v (%v, %d bytes)", id, t, len(data))
+-
+-	uncompressedLength := 0
+-	if r.cfg.Version > 1 {
+-		// we have a repo v2, so compression is available. if the user opts to
+-		// not compress, we won't compress any data, but everything else is
+-		// compressed.
+-		// uncompressedLength != 0 is used to indicate compressed data. Thus, a zero-sized blob
+-		// cannot be compressed. This special case is only relevant for tests, normal operation does not
+-		// generate zero-sized blobs.
+-		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != restic.DataBlob) {
+-			useCompression := true
+-			sampledAutoData := t == restic.DataBlob && r.opts.Compression == CompressionAuto && len(data) >= autoCompressionMinSampledSize
+-			if sampledAutoData {
+-				useCompression = r.autoDataBlobLooksCompressible(data)
+-			}
+-
+-			if useCompression {
+-				compressed := r.getZstdEncoder().EncodeAll(data, nil)
+-				if sampledAutoData && len(compressed)+4 >= len(data) {
+-					// A compressed pack entry carries a four-byte uncompressed
+-					// length. Keep the original bytes when that header and payload
+-					// would not save space.
+-					uncompressedLength = 0
+-				} else {
+-					uncompressedLength = len(data)
+-					data = compressed
+-				}
+-			}
+-		}
+-	}
+-
+-	nonce := crypto.NewRandomNonce()
+-
+-	ciphertext := make([]byte, 0, crypto.CiphertextLength(len(data)))
+-	ciphertext = append(ciphertext, nonce...)
+-
+-	// encrypt blob
+-	ciphertext = r.key.Seal(ciphertext, nonce, data, nil)
+-
+-	if err := r.verifyCiphertext(ciphertext, uncompressedLength, id); err != nil {
+-		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
+-		return 0, fmt.Errorf("Detected data corruption while saving blob %v: %w\nCorrupted blobs are either caused by hardware issues or software bugs. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting.", id, err)
+-	}
+-
+-	// find suitable packer and add blob
+-	var pm *packerManager
+-
+-	switch t {
+-	case restic.TreeBlob:
+-		pm = r.treePM
+-	case restic.DataBlob:
+-		pm = r.dataPM
+-	default:
+-		panic(fmt.Sprintf("invalid type: %v", t))
+-	}
+-
+-	return pm.SaveBlob(ctx, t, id, ciphertext, uncompressedLength)
+-}
+-
+-// autoDataBlobLooksCompressible estimates whether CompressionAuto should pay
+-// to encode a large data blob. False positives only cost the full encoding;
+-// false negatives store the original bytes, which remain readable by stock.
+-func (r *Repository) autoDataBlobLooksCompressible(data []byte) bool {
+-	sample := compressionSamplePool.Get().(*compressionSample)
+-	defer func() {
+-		clear(sample.input)
+-		clear(sample.encoded[:cap(sample.encoded)])
+-		sample.encoded = sample.encoded[:0]
+-		if cap(sample.encoded) <= autoCompressionSampleSize+1024 {
+-			compressionSamplePool.Put(sample)
+-		}
+-	}()
+-
+-	lastStart := len(data) - autoCompressionSampleWindow
+-	for i := 0; i < autoCompressionSampleWindows; i++ {
+-		start := i * lastStart / (autoCompressionSampleWindows - 1)
+-		copy(sample.input[i*autoCompressionSampleWindow:(i+1)*autoCompressionSampleWindow], data[start:start+autoCompressionSampleWindow])
+-	}
+-
+-	encoded := r.getZstdEncoder().EncodeAll(sample.input, sample.encoded[:0])
+-	sample.encoded = encoded
+-	// Require at least a one-percent sample reduction to justify the full pass.
+-	return len(encoded)*100 < len(sample.input)*99
+-}
+-
+-func (r *Repository) verifyCiphertext(buf []byte, uncompressedLength int, id restic.ID) error {
+-	if r.opts.NoExtraVerify {
+-		return nil
+-	}
+-	if uncompressedLength == 0 && len(buf) >= streamSaveVerifyMinSize {
+-		return r.verifyRawCiphertextStream(buf, id)
+-	}
+-
+-	nonce, ciphertext := buf[:r.key.NonceSize()], buf[r.key.NonceSize():]
+-	plaintext, err := r.key.Open(nil, nonce, ciphertext, nil)
+-	if err != nil {
+-		return fmt.Errorf("decryption failed: %w", err)
+-	}
+-	if uncompressedLength != 0 {
+-		// DecodeAll will allocate a slice if it is not large enough since it
+-		// knows the decompressed size (because we're using EncodeAll)
+-		plaintext, err = r.getZstdDecoder().DecodeAll(plaintext, nil)
+-		if err != nil {
+-			return fmt.Errorf("decompression failed: %w", err)
+-		}
+-	}
+-	if !restic.Hash(plaintext).Equal(id) {
+-		return errors.New("hash mismatch")
+-	}
+-
+-	return nil
+-}
+-
+-func (r *Repository) compressUnpacked(p []byte) ([]byte, error) {
+-	// compression is only available starting from version 2
+-	if r.cfg.Version < 2 {
+-		return p, nil
+-	}
+-
+-	// version byte
+-	out := []byte{2}
+-	out = r.getZstdEncoder().EncodeAll(p, out)
+-	return out, nil
+-}
+-
+-func (r *Repository) compressLockUnpacked(p []byte) ([]byte, error) {
+-	// Compression is only available starting from version 2.
+-	if r.cfg.Version < 2 {
+-		return p, nil
+-	}
+-
+-	// Keep the v2 Zstandard envelope without constructing the repository's
+-	// general-purpose encoder for this small transient record.
+-	out := []byte{2}
+-	out = appendRawZstdFrame(out, p)
+-	return out, nil
+-}
+-
+-const maxZstdRawBlockSize = 128 * 1024
+-
+-// appendRawZstdFrame appends a valid single-segment Zstandard frame containing
+-// raw blocks. It is used for lock JSON to avoid allocating an encoder with a
+-// large workspace for a record of only a few hundred bytes.
+-func appendRawZstdFrame(dst, data []byte) []byte {
+-	dst = append(dst, 0x28, 0xb5, 0x2f, 0xfd) // Zstandard magic number.
+-
+-	size := uint64(len(data))
+-	switch {
+-	case size <= 255:
+-		// Single segment, one-byte frame content size.
+-		dst = append(dst, 0x20, byte(size))
+-	case size <= 65791:
+-		// Two-byte content size stores the value minus 256.
+-		dst = append(dst, 0x60)
+-		dst = appendZstdLittleEndian(dst, size-256, 2)
+-	case size <= math.MaxUint32:
+-		dst = append(dst, 0xa0)
+-		dst = appendZstdLittleEndian(dst, size, 4)
+-	default:
+-		dst = append(dst, 0xe0)
+-		dst = appendZstdLittleEndian(dst, size, 8)
+-	}
+-
+-	for offset := 0; ; {
+-		blockSize := min(maxZstdRawBlockSize, len(data)-offset)
+-		lastBlock := offset+blockSize == len(data)
+-		blockHeader := uint32(blockSize) << 3
+-		if lastBlock {
+-			blockHeader |= 1
+-		}
+-		dst = append(dst, byte(blockHeader), byte(blockHeader>>8), byte(blockHeader>>16))
+-		dst = append(dst, data[offset:offset+blockSize]...)
+-		offset += blockSize
+-		if lastBlock {
+-			return dst
+-		}
+-	}
+-}
+-
+-func appendZstdLittleEndian(dst []byte, value uint64, size int) []byte {
+-	for i := 0; i < size; i++ {
+-		dst = append(dst, byte(value))
+-		value >>= 8
+-	}
+-	return dst
+-}
+-
+-func (r *Repository) decompressUnpacked(p []byte) ([]byte, error) {
+-	// compression is only available starting from version 2
+-	if r.cfg.Version < 2 {
+-		return p, nil
+-	}
+-
+-	if len(p) == 0 {
+-		// too short for version header
+-		return p, nil
+-	}
+-	if p[0] == '[' || p[0] == '{' {
+-		// probably raw JSON
+-		return p, nil
+-	}
+-	// version
+-	if p[0] != 2 {
+-		return nil, errors.New("not supported encoding format")
+-	}
+-
+-	return r.getZstdDecoder().DecodeAll(p[1:], nil)
+-}
+-
+-// SaveUnpacked encrypts data and stores it in the backend. Returned is the
+-// storage hash.
+-func (r *Repository) SaveUnpacked(ctx context.Context, t restic.WriteableFileType, buf []byte) (id restic.ID, err error) {
+-	return r.saveUnpacked(ctx, t.ToFileType(), buf)
+-}
+-
+-func (r *internalRepository) SaveUnpacked(ctx context.Context, t restic.FileType, buf []byte) (id restic.ID, err error) {
+-	return r.Repository.saveUnpacked(ctx, t, buf)
+-}
+-
+-// SaveIndexStream stores an index encoded by encode. This optional path lets
+-// Index.SaveIndex avoid retaining the complete JSON representation while the
+-// repository creates the compressed payload.
+-func (r *internalRepository) SaveIndexStream(ctx context.Context, encode func(io.Writer) error) (restic.ID, error) {
+-	return r.Repository.saveIndexStream(ctx, encode)
+-}
+-
+-func (r *Repository) saveIndexStream(ctx context.Context, encode func(io.Writer) error) (restic.ID, error) {
+-	// Older repositories store unpacked data without compression. Keep their
+-	// established representation and use the ordinary save path.
+-	if r.cfg.Version < 2 {
+-		var buf bytes.Buffer
+-		if err := encode(&buf); err != nil {
+-			return restic.ID{}, err
+-		}
+-		return r.saveUnpacked(ctx, restic.IndexFile, buf.Bytes())
+-	}
+-
+-	var payload bytes.Buffer
+-	payload.WriteByte(2)
+-	enc, err := zstd.NewWriter(&payload,
+-		zstd.WithEncoderLevel(r.zstdEncoderLevel()),
+-		zstd.WithEncoderCRC(false),
+-		zstd.WithWindowSize(512*1024),
+-		// A streamed writer owns its workspace for the duration of this save.
+-		// Keep concurrent prune saves from multiplying encoder workers.
+-		zstd.WithEncoderConcurrency(1),
+-	)
+-	if err != nil {
+-		return restic.ID{}, err
+-	}
+-	encodeErr := encode(enc)
+-	closeErr := enc.Close()
+-	if encodeErr != nil {
+-		return restic.ID{}, encodeErr
+-	}
+-	if closeErr != nil {
+-		return restic.ID{}, closeErr
+-	}
+-
+-	return r.saveCompressedIndex(ctx, payload.Bytes(), encode)
+-}
+-
+-func (r *Repository) saveCompressedIndex(ctx context.Context, payload []byte, encode func(io.Writer) error) (restic.ID, error) {
+-	ciphertext := crypto.NewBlobBuffer(len(payload))
+-	ciphertext = ciphertext[:0]
+-	nonce := crypto.NewRandomNonce()
+-	ciphertext = append(ciphertext, nonce...)
+-	ciphertext = r.key.Seal(ciphertext, nonce, payload, nil)
+-
+-	if !r.opts.NoExtraVerify {
+-		err := r.verifyCompressedIndexStream(ciphertext, encode)
+-		if err != nil {
+-			//nolint:revive,staticcheck // ignore linter warnings about error message spelling
+-			return restic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting.", restic.IndexFile, err)
+-		}
+-	}
+-
+-	id := restic.Hash(ciphertext)
+-	h := backend.Handle{Type: backend.FileType(restic.IndexFile), Name: id.String()}
+-	if err := r.be.Save(ctx, h, backend.NewByteReader(ciphertext, r.be.Hasher())); err != nil {
+-		debug.Log("error saving blob %v: %v", h, err)
+-		return restic.ID{}, err
+-	}
+-
+-	debug.Log("blob %v saved", h)
+-	return id, nil
+-}
+-
+-func (r *Repository) saveUnpacked(ctx context.Context, t restic.FileType, buf []byte) (id restic.ID, err error) {
+-	p := buf
+-	if t != restic.ConfigFile {
+-		if t == restic.LockFile {
+-			p, err = r.compressLockUnpacked(p)
+-		} else {
+-			p, err = r.compressUnpacked(p)
+-		}
+-		if err != nil {
+-			return restic.ID{}, err
+-		}
+-	}
+-
+-	ciphertext := crypto.NewBlobBuffer(len(p))
+-	ciphertext = ciphertext[:0]
+-	nonce := crypto.NewRandomNonce()
+-	ciphertext = append(ciphertext, nonce...)
+-
+-	ciphertext = r.key.Seal(ciphertext, nonce, p, nil)
+-
+-	if err := r.verifyUnpacked(ciphertext, t, buf); err != nil {
+-		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
+-		return restic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting.", t, err)
+-	}
+-
+-	if t == restic.ConfigFile {
+-		id = restic.ID{}
+-	} else {
+-		id = restic.Hash(ciphertext)
+-	}
+-	h := backend.Handle{Type: backend.FileType(t), Name: id.String()}
+-
+-	err = r.be.Save(ctx, h, backend.NewByteReader(ciphertext, r.be.Hasher()))
+-	if err != nil {
+-		debug.Log("error saving blob %v: %v", h, err)
+-		return restic.ID{}, err
+-	}
+-
+-	debug.Log("blob %v saved", h)
+-	return id, nil
+-}
+-
+-func (r *Repository) verifyUnpacked(buf []byte, t restic.FileType, expected []byte) error {
+-	if r.opts.NoExtraVerify {
+-		return nil
+-	}
+-
+-	nonce, ciphertext := buf[:r.key.NonceSize()], buf[r.key.NonceSize():]
+-	plaintext, err := r.key.Open(nil, nonce, ciphertext, nil)
+-	if err != nil {
+-		return fmt.Errorf("decryption failed: %w", err)
+-	}
+-	// Index saves already hold the encoded JSON while verification is running.
+-	// Compare the decompressed stream directly so verification does not allocate
+-	// another full copy of that JSON. Keep the existing path for raw and legacy
+-	// index encodings, and for every other unpacked file type.
+-	if t == restic.IndexFile && r.cfg.Version >= 2 && len(plaintext) > 0 && plaintext[0] == 2 {
+-		return verifyCompressedIndex(plaintext[1:], expected)
+-	}
+-	if t != restic.ConfigFile {
+-		plaintext, err = r.decompressUnpacked(plaintext)
+-		if err != nil {
+-			return fmt.Errorf("decompression failed: %w", err)
+-		}
+-	}
+-
+-	if !bytes.Equal(plaintext, expected) {
+-		return errors.New("data mismatch")
+-	}
+-	return nil
+-}
+-
+-// verifyCompressedIndex compares a compressed index against the JSON passed to
+-// SaveUnpacked without retaining a second copy of the decompressed JSON.
+-func verifyCompressedIndex(compressed, expected []byte) error {
+-	dec, err := zstd.NewReader(bytes.NewReader(compressed),
+-		zstd.WithDecoderConcurrency(1),
+-		zstd.WithDecoderMaxMemory(16*1024*1024*1024),
+-	)
+-	if err != nil {
+-		return fmt.Errorf("decompression failed: %w", err)
+-	}
+-	defer dec.Close()
+-
+-	equal, err := compareStreamBytes(dec, expected)
+-	if err != nil {
+-		return fmt.Errorf("decompression failed: %w", err)
+-	}
+-	if !equal {
+-		return errors.New("data mismatch")
+-	}
+-	return nil
+-}
+-
+-// verifyCompressedIndexStream checks that decrypting and decompressing an
+-// encoded index produces exactly the same bytes as a second streaming encode.
+-// The pipe keeps the expected JSON bounded in memory, and the decoder is read
+-// through EOF even after a mismatch so frame errors are not hidden.
+-func (r *Repository) verifyCompressedIndexStream(buf []byte, encode func(io.Writer) error) error {
+-	nonce, ciphertext := buf[:r.key.NonceSize()], buf[r.key.NonceSize():]
+-	plaintext, err := r.key.Open(nil, nonce, ciphertext, nil)
+-	if err != nil {
+-		return fmt.Errorf("decryption failed: %w", err)
+-	}
+-	if len(plaintext) == 0 || plaintext[0] != 2 {
+-		return errors.New("not supported encoding format")
+-	}
+-	return verifyCompressedIndexStream(plaintext[1:], encode)
+-}
+-
+-func verifyCompressedIndexStream(compressed []byte, encode func(io.Writer) error) error {
+-	dec, err := zstd.NewReader(bytes.NewReader(compressed),
+-		zstd.WithDecoderConcurrency(1),
+-		zstd.WithDecoderMaxMemory(16*1024*1024*1024),
+-	)
+-	if err != nil {
+-		return fmt.Errorf("decompression failed: %w", err)
+-	}
+-	defer dec.Close()
+-
+-	expected, expectedWriter := io.Pipe()
+-	encodeDone := make(chan error, 1)
+-	go func() {
+-		encodeErr := encode(expectedWriter)
+-		_ = expectedWriter.CloseWithError(encodeErr)
+-		encodeDone <- encodeErr
+-	}()
+-
+-	cmp := streamCompareWriter{actual: dec, buf: make([]byte, 32*1024), equal: true}
+-	_, copyErr := io.Copy(&cmp, expected)
+-	_ = expected.Close()
+-	encodeErr := <-encodeDone
+-	if cmp.err != nil {
+-		return fmt.Errorf("decompression failed: %w", cmp.err)
+-	}
+-	if encodeErr != nil {
+-		return fmt.Errorf("encoding failed: %w", encodeErr)
+-	}
+-	if copyErr != nil {
+-		return fmt.Errorf("encoding failed: %w", copyErr)
+-	}
+-
+-	extra, err := io.Copy(io.Discard, dec)
+-	if err != nil {
+-		return fmt.Errorf("decompression failed: %w", err)
+-	}
+-	if extra != 0 {
+-		cmp.equal = false
+-	}
+-	if !cmp.equal {
+-		return errors.New("data mismatch")
+-	}
+-	return nil
+-}
+-
+-type streamCompareWriter struct {
+-	actual io.Reader
+-	buf    []byte
+-	equal  bool
+-	ended  bool
+-	err    error
+-}
+-
+-func (w *streamCompareWriter) Write(expected []byte) (int, error) {
+-	length := len(expected)
+-	for len(expected) > 0 {
+-		if w.ended {
+-			w.equal = false
+-			return length, nil
+-		}
+-		n := min(len(expected), len(w.buf))
+-		got, err := io.ReadFull(w.actual, w.buf[:n])
+-		if err != nil {
+-			if err == io.EOF || err == io.ErrUnexpectedEOF {
+-				w.ended = true
+-				w.equal = false
+-				return length, nil
+-			}
+-			w.err = err
+-			return 0, err
+-		}
+-		if !bytes.Equal(w.buf[:got], expected[:n]) {
+-			w.equal = false
+-		}
+-		expected = expected[n:]
+-	}
+-	return length, nil
+-}
+-
+-func compareStreamBytes(src io.Reader, expected []byte) (bool, error) {
+-	cmp := byteStreamComparator{expected: expected, equal: true}
+-	if _, err := io.Copy(&cmp, src); err != nil {
+-		return false, err
+-	}
+-	return cmp.equal && cmp.offset == len(expected), nil
+-}
+-
+-// byteStreamComparator checks all decoded bytes, but keeps reading after a
+-// mismatch so decoder errors are still reported before verification succeeds.
+-type byteStreamComparator struct {
+-	expected []byte
+-	offset   int
+-	equal    bool
+-}
+-
+-func (c *byteStreamComparator) Write(p []byte) (int, error) {
+-	remaining := len(c.expected) - c.offset
+-	if len(p) > remaining {
+-		c.equal = false
+-		c.offset = len(c.expected)
+-		return len(p), nil
+-	}
+-	if !bytes.Equal(p, c.expected[c.offset:c.offset+len(p)]) {
+-		c.equal = false
+-	}
+-	c.offset += len(p)
+-	return len(p), nil
+-}
+-
+-func (r *Repository) RemoveUnpacked(ctx context.Context, t restic.WriteableFileType, id restic.ID) error {
+-	return r.removeUnpacked(ctx, t.ToFileType(), id)
+-}
+-
+-func (r *internalRepository) RemoveUnpacked(ctx context.Context, t restic.FileType, id restic.ID) error {
+-	return r.Repository.removeUnpacked(ctx, t, id)
+-}
+-
+-func (r *Repository) removeUnpacked(ctx context.Context, t restic.FileType, id restic.ID) error {
+-	return r.be.Remove(ctx, backend.Handle{Type: backend.FileType(t), Name: id.String()})
+-}
+-
+-func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader restic.BlobSaverWithAsync) error) error {
+-	ctx, cancel := context.WithCancel(ctx)
+-	defer cancel()
+-	wg, ctx := errgroup.WithContext(ctx)
+-	// pack uploader + wg.Go below + blob saver (CPU bound)
+-	wg.SetLimit(2 + runtime.GOMAXPROCS(0))
+-	r.mainWg = wg
+-	r.startPackUploader(ctx, wg)
+-	// blob saver are spawned on demand, use wait group to keep track of them
+-	r.blobSaver = &sync.WaitGroup{}
+-	wg.Go(func() error {
+-		inCallback := true
+-		defer func() {
+-			// when the defer is called while inCallback is true, this means
+-			// that runtime.Goexit was called within `fn`. This should only happen
+-			// if a test uses t.Fatal within `fn`.
+-			if inCallback {
+-				cancel()
+-			}
+-		}()
+-		err := fn(ctx, &blobSaverRepo{repo: r})
+-		inCallback = false
+-		if err != nil {
+-			return err
+-		}
+-		if err := r.flush(ctx); err != nil {
+-			return fmt.Errorf("error flushing repository: %w", err)
+-		}
+-		return nil
+-	})
+-	return wg.Wait()
+-}
+-
+-func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) {
+-	if r.packerWg != nil {
+-		panic("uploader already started")
+-	}
+-
+-	innerWg, ctx := errgroup.WithContext(ctx)
+-	r.packerWg = innerWg
+-	r.uploader = newPackerUploader(ctx, innerWg, r, r.Connections())
+-	r.treePM = newPackerManager(r.key, restic.TreeBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
+-	r.dataPM = newPackerManager(r.key, restic.DataBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
+-	// Backends without their own checksum can use a pack hash collected on the
+-	// write path, avoiding a later read of the finalized temporary pack.
+-	hashOnWrite := r.be.Hasher() == nil
+-	r.treePM.hashOnWrite = hashOnWrite
+-	r.dataPM.hashOnWrite = hashOnWrite
+-
+-	wg.Go(func() error {
+-		return innerWg.Wait()
+-	})
+-}
+-
+-type blobSaverRepo struct {
+-	repo *Repository
+-}
+-
+-func (r *blobSaverRepo) SaveBlob(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool) (newID restic.ID, known bool, size int, err error) {
+-	return r.repo.saveBlob(ctx, t, buf, id, storeDuplicate)
+-}
+-
+-func (r *blobSaverRepo) SaveBlobAsync(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool, cb func(newID restic.ID, known bool, size int, err error)) {
+-	r.repo.saveBlobAsync(ctx, t, buf, id, storeDuplicate, cb)
+-}
+-
+-// LookupStoredBlobSize checks only indexed blobs, excluding unfinished pending saves.
+-func (r *blobSaverRepo) LookupStoredBlobSize(bh restic.BlobHandle) (uint, bool) {
+-	return r.repo.idx.LookupIndexSize(bh)
+-}
+-
+-// SaveKnownBlobAsync reports an indexed blob asynchronously without retaining its data.
+-func (r *blobSaverRepo) SaveKnownBlobAsync(ctx context.Context, id restic.ID, cb func(newID restic.ID, known bool, sizeInRepo int, err error)) {
+-	r.repo.mainWg.Go(func() error {
+-		if ctx.Err() != nil {
+-			cb(restic.ID{}, false, 0, ctx.Err())
+-			return ctx.Err()
+-		}
+-		cb(id, true, 0, nil)
+-		return nil
+-	})
+-}
+-
+-// Flush saves all remaining packs and the index
+-func (r *Repository) flush(ctx context.Context) error {
+-	r.flushBlobSaver()
+-	r.mainWg = nil
+-
+-	if err := r.flushPackUploader(ctx); err != nil {
+-		return err
+-	}
+-
+-	return r.idx.Flush(ctx, &internalRepository{r})
+-}
+-
+-func (r *Repository) flushBlobSaver() {
+-	if r.blobSaver == nil {
+-		return
+-	}
+-	r.blobSaver.Wait()
+-	r.blobSaver = nil
+-}
+-
+-// FlushPacks saves all remaining packs.
+-func (r *Repository) flushPackUploader(ctx context.Context) error {
+-	if r.packerWg == nil {
+-		return nil
+-	}
+-
+-	err := r.treePM.Flush(ctx)
+-	if err != nil {
+-		return err
+-	}
+-	err = r.dataPM.Flush(ctx)
+-	if err != nil {
+-		return err
+-	}
+-	r.uploader.TriggerShutdown()
+-	err = r.packerWg.Wait()
+-
+-	r.treePM = nil
+-	r.dataPM = nil
+-	r.uploader = nil
+-	r.packerWg = nil
+-
+-	return err
+-}
+-
+-func (r *Repository) Connections() uint {
+-	return r.be.Properties().Connections
+-}
+-
+-func (r *Repository) LookupBlob(bh restic.BlobHandle) []restic.PackBlob {
+-	entries := r.idx.Lookup(bh)
+-	out := make([]restic.PackBlob, len(entries))
+-	for i, e := range entries {
+-		out[i] = e
+-	}
+-	return out
+-}
+-
+-// LookupBlobSize returns the size of blob id. Also returns pending blobs.
+-func (r *Repository) LookupBlobSize(bh restic.BlobHandle) (uint, bool) {
+-	return r.idx.LookupSize(bh)
+-}
+-
+-// ListBlobs runs fn on all blobs known to the index. When the context is cancelled,
+-// the index iteration returns immediately with ctx.Err(). This blocks any modification of the index.
+-func (r *Repository) ListBlobs(ctx context.Context, fn func(restic.PackBlob)) error {
+-	for blob := range r.idx.Values() {
+-		if ctx.Err() != nil {
+-			return ctx.Err()
+-		}
+-		fn(blob)
+-	}
+-	return nil
+-}
+-
+-// listPacksFromIndex returns index entries for the given packs, grouped by pack file.
+-func (r *Repository) listPacksFromIndex(ctx context.Context, packs restic.IDSet) <-chan index.PackBlobs {
+-	return r.idx.ListPacks(ctx, packs)
+-}
+-
+-func (r *Repository) clearIndex() {
+-	r.idx = index.NewMasterIndex()
+-}
+-
+-// DiscardIndex replaces the in-memory index with an empty one. Callers must
+-// ensure no repository operation is using the current index.
+-func (r *Repository) DiscardIndex() {
+-	r.clearIndex()
+-}
+-
+-// LoadIndex loads all index files from the backend in parallel and stores them
+-func (r *Repository) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory) error {
+-	return r.loadIndexWithCallback(ctx, p, nil)
+-}
+-
+-// loadIndexWithCallback loads all index files from the backend in parallel and stores them
+-func (r *Repository) loadIndexWithCallback(ctx context.Context, p restic.TerminalCounterFactory, cb func(id restic.ID, idx *index.Index, err error) error) error {
+-	debug.Log("Loading index")
+-
+-	bar := p.NewCounterTerminalOnly("index files loaded")
+-
+-	// Reclaim completed setup work, including transient KDF scratch, before
+-	// the index adds its live allocations to the process high-water mark.
+-	runtime.GC()
+-
+-	err := r.loadIndexesStreaming(ctx, bar, cb)
+-	if err != nil {
+-		return err
+-	}
+-
+-	// Trigger GC to reset garbage collection threshold
+-	runtime.GC()
+-
+-	if r.cfg.Version < 2 {
+-		// sanity check
+-		ctx, cancel := context.WithCancel(ctx)
+-		defer cancel()
+-
+-		invalidIndex := false
+-		for blob := range r.idx.Values() {
+-			if ctx.Err() != nil {
+-				return ctx.Err()
+-			}
+-			if blob.IsCompressed() {
+-				invalidIndex = true
+-			}
+-		}
+-		if invalidIndex {
+-			return errors.New("index uses feature not supported by repository version 1")
+-		}
+-	}
+-	if ctx.Err() != nil {
+-		return ctx.Err()
+-	}
+-
+-	// remove index files from the cache which have been removed in the repo
+-	return r.prepareCache()
+-}
+-
+-// createIndexFromPacks creates a new index by reading all given pack files (with sizes).
+-// The index is added to the MasterIndex but not marked as finalized.
+-// Returned is the list of pack files which could not be read.
+-func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[restic.ID]int64, p restic.Counter) (invalid restic.IDs, err error) {
+-	var m sync.Mutex
+-
+-	debug.Log("Loading index from pack files")
+-
+-	// track spawned goroutines using wg, create a new context which is
+-	// cancelled as soon as an error occurs.
+-	wg, wgCtx := errgroup.WithContext(ctx)
+-
+-	type FileInfo struct {
+-		restic.ID
+-		Size int64
+-	}
+-	ch := make(chan FileInfo)
+-
+-	// send list of pack files through ch, which is closed afterwards
+-	wg.Go(func() error {
+-		defer close(ch)
+-		for id, size := range packsize {
+-			select {
+-			case <-wgCtx.Done():
+-				return wgCtx.Err()
+-			case ch <- FileInfo{id, size}:
+-			}
+-		}
+-		return nil
+-	})
+-
+-	// a worker receives an pack ID from ch, reads the pack contents, and adds them to idx
+-	worker := func() error {
+-		for fi := range ch {
+-			entries, err := r.listPack(wgCtx, fi.ID, fi.Size)
+-			if err != nil {
+-				debug.Log("unable to list pack file %v", fi.ID.Str())
+-				m.Lock()
+-				invalid = append(invalid, fi.ID)
+-				m.Unlock()
+-			} else if err := r.idx.StorePack(wgCtx, fi.ID, entries, &internalRepository{r}); err != nil {
+-				return err
+-			}
+-			p.Add(1)
+-		}
+-
+-		return nil
+-	}
+-
+-	// decoding the pack header is usually quite fast, thus we are primarily IO-bound
+-	workerCount := int(r.Connections())
+-	// run workers on ch
+-	for range workerCount {
+-		wg.Go(worker)
+-	}
+-
+-	err = wg.Wait()
+-	if err != nil {
+-		return invalid, err
+-	}
+-
+-	// flush the index to the repository
+-	err = r.flush(ctx)
+-	if err != nil {
+-		return invalid, err
+-	}
+-
+-	return invalid, nil
+-}
+-
+-func (r *Repository) NewAssociatedBlobSet() restic.AssociatedBlobSet {
+-	return &associatedBlobSet{*index.NewAssociatedSet[struct{}](r.idx)}
+-}
+-
+-// associatedBlobSet is a wrapper around index.AssociatedSet to implement the restic.AssociatedBlobSet interface.
+-type associatedBlobSet struct {
+-	index.AssociatedSet[struct{}]
+-}
+-
+-func (s *associatedBlobSet) Intersect(other restic.AssociatedBlobSet) restic.AssociatedBlobSet {
+-	return &associatedBlobSet{*s.AssociatedSet.Intersect(other)}
+-}
+-func (s *associatedBlobSet) Sub(other restic.AssociatedBlobSet) restic.AssociatedBlobSet {
+-	return &associatedBlobSet{*s.AssociatedSet.Sub(other)}
+-}
+-
+-// prepareCache initializes the local cache. indexIDs is the list of IDs of
+-// index files still present in the repo.
+-func (r *Repository) prepareCache() error {
+-	if r.cache == nil {
+-		return nil
+-	}
+-
+-	packs := r.idx.Packs(restic.NewIDSet())
+-
+-	ids := make(map[string]struct{})
+-	for id := range packs {
+-		ids[id.String()] = struct{}{}
+-	}
+-
+-	// clear old packs
+-	return r.cache.Clear(backend.PackFile, ids)
+-}
+-
+-// SearchKey finds a key with the supplied password, afterwards the config is
+-// read and parsed. It tries at most maxKeys key files in the repo.
+-func (r *Repository) SearchKey(ctx context.Context, password string, maxKeys int, keyHint string) error {
+-	key, err := searchKey(ctx, r, password, maxKeys, keyHint)
+-	if err != nil {
+-		return err
+-	}
+-
+-	oldKey := r.key
+-	oldKeyID := r.keyID
+-
+-	r.key = key.master
+-	r.keyID = key.ID()
+-	cfg, err := restic.LoadConfig(ctx, r)
+-	if err != nil {
+-		r.key = oldKey
+-		r.keyID = oldKeyID
+-
+-		if err == crypto.ErrUnauthenticated {
+-			return fmt.Errorf("config or key %v is damaged: %w", key.ID(), err)
+-		}
+-		return fmt.Errorf("config cannot be loaded: %w", err)
+-	}
+-
+-	r.setConfig(cfg)
+-	return nil
+-}
+-
+-// Init creates a new master key with the supplied password, initializes and
+-// saves the repository config.
+-func (r *Repository) Init(ctx context.Context, version uint, password string, chunkerPolynomial *chunker.Pol) error {
+-	if version > restic.MaxRepoVersion {
+-		return fmt.Errorf("repository version %v too high", version)
+-	}
+-
+-	if version < restic.MinRepoVersion {
+-		return fmt.Errorf("repository version %v too low", version)
+-	}
+-
+-	_, err := r.be.Stat(ctx, backend.Handle{Type: backend.ConfigFile})
+-	if err != nil && !r.be.IsNotExist(err) {
+-		return err
+-	}
+-	if err == nil {
+-		return errors.New("repository master key and config already initialized")
+-	}
+-	// double check to make sure that a repository is not accidentally reinitialized
+-	// if the backend somehow fails to stat the config file. An initialized repository
+-	// must always contain at least one key file.
+-	if err := r.List(ctx, restic.KeyFile, func(_ restic.ID, _ int64) error {
+-		return errors.New("repository already contains keys")
+-	}); err != nil {
+-		return err
+-	}
+-	// Also check for snapshots to detect repositories with a misconfigured retention
+-	// policy that deletes files older than x days. For such repositories usually the
+-	// config and key files are removed first and therefore the check would not detect
+-	// the old repository.
+-	if err := r.List(ctx, restic.SnapshotFile, func(_ restic.ID, _ int64) error {
+-		return errors.New("repository already contains snapshots")
+-	}); err != nil {
+-		return err
+-	}
+-
+-	cfg, err := restic.CreateConfig(version, chunkerPolynomial)
+-	if err != nil {
+-		return err
+-	}
+-
+-	return r.init(ctx, password, cfg)
+-}
+-
+-// init creates a new master key with the supplied password and uses it to save
+-// the config into the repo.
+-func (r *Repository) init(ctx context.Context, password string, cfg restic.Config) error {
+-	key, err := createMasterKey(ctx, r, password)
+-	if err != nil {
+-		return err
+-	}
+-
+-	r.key = key.master
+-	r.keyID = key.ID()
+-	r.setConfig(cfg)
+-	return restic.SaveConfig(ctx, &internalRepository{r}, cfg)
+-}
+-
+-// Key returns the current master key.
+-func (r *Repository) Key() *crypto.Key {
+-	return r.key
+-}
+-
+-// KeyID returns the id of the current key in the backend.
+-func (r *Repository) KeyID() restic.ID {
+-	return r.keyID
+-}
+-
+-// List runs fn for all files of type t in the repo.
+-func (r *Repository) List(ctx context.Context, t restic.FileType, fn func(restic.ID, int64) error) error {
+-	return r.be.List(ctx, backend.FileType(t), func(fi backend.FileInfo) error {
+-		id, err := restic.ParseID(fi.Name)
+-		if err != nil {
+-			debug.Log("unable to parse %v as an ID", fi.Name)
+-			return nil
+-		}
+-		return fn(id, fi.Size)
+-	})
+-}
+-
+-// listPack returns blob entries from the pack file header including offsets.
+-func (r *Repository) listPack(ctx context.Context, id restic.ID, size int64) (pack.Blobs, error) {
+-	h := backend.Handle{Type: backend.PackFile, Name: id.String()}
+-
+-	entries, _, err := pack.List(r.Key(), backend.ReaderAt(ctx, r.be, h), size)
+-	if err != nil {
+-		if r.cache != nil {
+-			// ignore error as there is not much we can do here
+-			_ = r.cache.Forget(h)
+-		}
+-
+-		// retry on error
+-		entries, _, err = pack.List(r.Key(), backend.ReaderAt(ctx, r.be, h), size)
+-	}
+-	return pack.Blobs(entries), err
+-}
+-
+-// ListPackHandles returns the blob handles stored in the pack file header.
+-func (r *Repository) ListPackHandles(ctx context.Context, id restic.ID, size int64) ([]restic.BlobHandle, error) {
+-	blobs, err := r.listPack(ctx, id, size)
+-	if err != nil {
+-		return nil, err
+-	}
+-	handles := make([]restic.BlobHandle, len(blobs))
+-	for i, blob := range blobs {
+-		handles[i] = blob.BlobHandle
+-	}
+-	return handles, nil
+-}
+-
+-// Delete calls backend.Delete() if implemented, and returns an error
+-// otherwise.
+-func (r *Repository) Delete(ctx context.Context) error {
+-	return r.be.Delete(ctx)
+-}
+-
+-// Close closes the repository by closing the backend.
+-func (r *Repository) Close() error {
+-	r.smallRestoreDecoderMu.Lock()
+-	r.smallRestoreClosed = true
+-	dec := r.smallRestoreDecoder
+-	r.smallRestoreDecoder = nil
+-	r.smallRestoreDecoderMu.Unlock()
+-	if dec != nil {
+-		dec.Close()
+-	}
+-	return r.be.Close()
+-}
+-
+-// saveBlob saves a blob of type t into the repository.
+-// It takes care that no duplicates are saved; this can be overwritten
+-// by setting storeDuplicate to true.
+-// If id is the null id, it will be computed and returned.
+-// Also returns if the blob was already known before.
+-// If the blob was not known before, it returns the number of bytes the blob
+-// occupies in the repo (compressed or not, including encryption overhead).
+-func (r *Repository) saveBlob(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool) (newID restic.ID, known bool, size int, err error) {
+-
+-	if int64(len(buf)) > math.MaxUint32 {
+-		return restic.ID{}, false, 0, fmt.Errorf("blob is larger than 4GB")
+-	}
+-
+-	// compute plaintext hash if not already set
+-	if id.IsNull() {
+-		// Special case the hash calculation for all zero chunks. This is especially
+-		// useful for sparse files containing large all zero regions. For these we can
+-		// process chunks as fast as we can read the from disk.
+-		if len(buf) == chunker.MinSize && restic.ZeroPrefixLen(buf) == chunker.MinSize {
+-			newID = r.zeroChunk()
+-		} else {
+-			newID = restic.Hash(buf)
+-		}
+-	} else {
+-		newID = id
+-	}
+-
+-	// first try to add to pending blobs; if not successful, this blob is already known
+-	known = !r.idx.AddPending(restic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
+-
+-	// only save when needed or explicitly told
+-	if !known || storeDuplicate {
+-		size, err = r.saveAndEncrypt(ctx, t, buf, newID)
+-	}
+-
+-	return newID, known, size, err
+-}
+-
+-func (r *Repository) saveBlobAsync(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool, cb func(newID restic.ID, known bool, size int, err error)) {
+-	r.mainWg.Go(func() error {
+-		if ctx.Err() != nil {
+-			// fail fast if the context is cancelled
+-			cb(restic.ID{}, false, 0, ctx.Err())
+-			return ctx.Err()
+-		}
+-		newID, known, size, err := r.saveBlob(ctx, t, buf, id, storeDuplicate)
+-		cb(newID, known, size, err)
+-		return err
+-	})
+-}
+-
+-type backendLoadFn func(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error
+-type loadBlobFn func(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error)
+-
+-// Skip sections with more than 1MB unused blobs
+-const maxUnusedRange = 1 * 1024 * 1024
+-
+-// Limit each selected range to one quarter of a default pack. A single blob may be larger
+-// and is kept intact.
+-const maxStreamPackChunkSize = DefaultPackSize / 4
+-
+-// streamPackBufferPool retains at most two bounded range buffers across pack
+-// streams. Buffers are cleared before being retained because uncompressed
+-// blobs are decrypted in place into the range buffer.
+-var streamPackBufferPool = make(chan []byte, 2)
+-
+-func takeStreamPackBuffer() []byte {
+-	select {
+-	case buf := <-streamPackBufferPool:
+-		return buf[:0]
+-	default:
+-		return nil
+-	}
+-}
+-
+-func putStreamPackBuffer(buf []byte) {
+-	// Retain buffers only when they can serve another ordinary range. A
+-	// one-off range containing a blob larger than the split target should not
+-	// occupy the cross-stream pool after its callbacks finish.
+-	if cap(buf) == 0 || cap(buf) > maxStreamPackChunkSize {
+-		return
+-	}
+-	clear(buf[:cap(buf)])
+-	select {
+-	case streamPackBufferPool <- buf[:0]:
+-	default:
+-	}
+-}
+-
+-// LoadBlobsFromPack loads the listed blobs from the specified pack file. The plaintext blob is passed to
+-// the handleBlobFn callback or an error if decryption failed or the blob hash does not match.
+-// handleBlobFn is called at most once for each blob. If the callback returns an error,
+-// then LoadBlobsFromPack will abort and not retry it. The buf passed to the callback is only valid within
+-// this specific call. The callback must not keep a reference to buf.
+-func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	blobs, err := r.blobsInPack(packID, handles)
+-	if err != nil {
+-		return err
+-	}
+-	return r.loadBlobsFromPack(ctx, packID, blobs, handleBlobFn)
+-}
+-
+-func (r *Repository) blobsInPack(packID restic.ID, handles []restic.BlobHandle) (pack.Blobs, error) {
+-	blobs := make(pack.Blobs, 0, len(handles))
+-	for _, h := range handles {
+-		found := false
+-		for _, pb := range r.idx.Lookup(h) {
+-			if pb.PackID().Equal(packID) {
+-				blobs = append(blobs, pb.Blob)
+-				found = true
+-				break
+-			}
+-		}
+-		if !found {
+-			return nil, errors.Errorf("blob %v not found in pack %v", h, packID)
+-		}
+-	}
+-	return blobs, nil
+-}
+-
+-func (r *Repository) loadBlobsFromPack(ctx context.Context, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	acquire, bounded := restic.SmallRestoreLoad(ctx)
+-	if !bounded {
+-		return streamPack(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
+-	}
+-	// Revalidate the index entries actually selected by this loader. If the
+-	// classifier and loader disagree, retain the unrestricted ordinary path.
+-	for _, blob := range blobs {
+-		if blob.DataLength() > restic.SmallRestoreBlobLimit || blob.Length > restic.SmallRestoreCiphertextLimit {
+-			release, err := acquire(ctx)
+-			if err != nil {
+-				return err
+-			}
+-			defer release()
+-			return streamPack(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
+-		}
+-	}
+-	var release func()
+-	defer func() {
+-		if release != nil {
+-			release()
+-		}
+-	}()
+-	ensureOrdinary := func(recoveryCtx context.Context) error {
+-		// Keep the permit through synchronous callbacks and stream completion,
+-		// so an alternate large copy cannot overlap two ordinary large streams.
+-		if release == nil {
+-			var err error
+-			release, err = acquire(recoveryCtx)
+-			if err != nil {
+-				return err
+-			}
+-		}
+-		return nil
+-	}
+-	loadRecovery := func(recoveryCtx context.Context, h restic.BlobHandle, buf []byte) ([]byte, error) {
+-		if err := ensureOrdinary(recoveryCtx); err != nil {
+-			return nil, err
+-		}
+-		return r.LoadBlob(ctx, h, buf)
+-	}
+-	limitedDecoder, err := r.takeSmallRestoreDecoder()
+-	if err != nil {
+-		return err
+-	}
+-	defer r.putSmallRestoreDecoder(limitedDecoder)
+-	ctx = context.WithValue(ctx, smallRestoreDecodeKey{}, smallRestoreDecodePolicy{limitedDecoder, ensureOrdinary})
+-	return streamPackWithPolicy(sema.WithAdditionalLoadSlot(ctx), r.be.Load, loadRecovery,
+-		r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn, restic.SmallRestoreCiphertextLimit, false)
+-
+-}
+-
+-// takeSmallRestoreDecoder transfers exclusive ownership out of the one-entry
+-// cache. DecodeAll is synchronous; no plaintext or iterator escapes the stream.
+-func (r *Repository) takeSmallRestoreDecoder() (*zstd.Decoder, error) {
+-	r.smallRestoreDecoderMu.Lock()
+-	if r.smallRestoreClosed {
+-		r.smallRestoreDecoderMu.Unlock()
+-		return nil, zstd.ErrDecoderClosed
+-	}
+-	dec := r.smallRestoreDecoder
+-	r.smallRestoreDecoder = nil
+-	r.smallRestoreDecoderMu.Unlock()
+-	if dec != nil {
+-		return dec, nil
+-	}
+-	return zstd.NewReader(nil, zstd.WithDecoderConcurrency(1),
+-		zstd.WithDecoderMaxMemory(restic.SmallRestoreBlobLimit), zstd.WithDecodeAllCapLimit(true))
+-}
+-
+-func (r *Repository) putSmallRestoreDecoder(dec *zstd.Decoder) {
+-	r.smallRestoreDecoderMu.Lock()
+-	if !r.smallRestoreClosed && r.smallRestoreDecoder == nil {
+-		r.smallRestoreDecoder = dec
+-		dec = nil
+-	}
+-	r.smallRestoreDecoderMu.Unlock()
+-	if dec != nil {
+-		dec.Close()
+-	}
+-}
+-
+-type smallRestoreDecodeKey struct{}
+-type smallRestoreDecodePolicy struct {
+-	decoder        *zstd.Decoder
+-	ensureOrdinary func(context.Context) error
+-}
+-
+-func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	return streamPackWithPolicy(ctx, beLoad, loadBlobFn, dec, key, packID, blobs, handleBlobFn, maxStreamPackChunkSize, true)
+-}
+-
+-func streamPackWithPolicy(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error, maxChunkSize uint, pooled bool) error {
+-	if len(blobs) == 0 {
+-		// nothing to do
+-		return nil
+-	}
+-	blobs.Sort()
+-
+-	lowerIdx := 0
+-	lastPos := blobs[0].Offset
+-	// Parts are loaded sequentially. Reuse the largest range buffer for this
+-	// stream instead of allocating a new one for every part. Retain a small
+-	// number across streams to reuse allocations between packs as well.
+-	var data []byte
+-	if pooled {
+-		data = takeStreamPackBuffer()
+-	}
+-	defer func() {
+-		if pooled {
+-			putStreamPackBuffer(data)
+-		}
+-	}()
+-	loadPart := func(part pack.Blobs) error {
+-		return streamPackPartWithBuffer(ctx, beLoad, loadBlobFn, dec, key, packID, part, &data, handleBlobFn)
+-	}
+-
+-	for i := range blobs {
+-		if blobs[i].Offset < lastPos {
+-			// don't wait for streamPackPart to fail
+-			return errors.Errorf("overlapping blobs in pack %v", packID)
+-		}
+-
+-		chunkSizeAfter := (blobs[i].Offset + blobs[i].Length) - blobs[lowerIdx].Offset
+-		split := false
+-		// split if the chunk would become larger than maxChunkSize. Oversized chunks are
+-		// handled by the requirement that the chunk contains at least one blob (i > lowerIdx)
+-		if i > lowerIdx && chunkSizeAfter >= maxChunkSize {
+-			split = true
+-		}
+-		// skip too large gaps as a new request is typically much cheaper than data transfers
+-		if blobs[i].Offset-lastPos > maxUnusedRange {
+-			split = true
+-		}
+-
+-		if split {
+-			// load everything up to the skipped file section
+-			err := loadPart(blobs[lowerIdx:i])
+-			if err != nil {
+-				return err
+-			}
+-			lowerIdx = i
+-		}
+-		lastPos = blobs[i].Offset + blobs[i].Length
+-	}
+-	// load remainder
+-	return loadPart(blobs[lowerIdx:])
+-}
+-
+-func streamPackPart(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	var data []byte
+-	return streamPackPartWithBuffer(ctx, beLoad, loadBlobFn, dec, key, packID, blobs, &data, handleBlobFn)
+-}
+-
+-func streamPackPartWithBuffer(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, data *[]byte, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	h := backend.Handle{Type: backend.PackFile, Name: packID.String(), IsMetadata: blobs[0].Type.IsMetadata()}
+-
+-	dataStart := blobs[0].Offset
+-	dataEnd := blobs[len(blobs)-1].Offset + blobs[len(blobs)-1].Length
+-
+-	debug.Log("streaming pack %v (%d to %d bytes), blobs: %v", packID, dataStart, dataEnd, len(blobs))
+-
+-	dataSize := int(dataEnd - dataStart)
+-	if cap(*data) < dataSize {
+-		*data = make([]byte, dataSize)
+-	} else {
+-		*data = (*data)[:dataSize]
+-	}
+-	err := beLoad(ctx, h, dataSize, int64(dataStart), func(rd io.Reader) error {
+-		_, cerr := io.ReadFull(rd, *data)
+-		return cerr
+-	})
+-	// prevent callbacks after cancellation
+-	if ctx.Err() != nil {
+-		return ctx.Err()
+-	}
+-	if err != nil {
+-		// the context is only still valid if handleBlobFn never returned an error
+-		if loadBlobFn != nil {
+-			// check whether we can get the remaining blobs somewhere else
+-			for _, entry := range blobs {
+-				if ctx.Err() != nil {
+-					return ctx.Err()
+-				}
+-				buf, ierr := loadBlobFn(ctx, entry.BlobHandle, nil)
+-				if ctx.Err() != nil {
+-					return ctx.Err()
+-				}
+-				err = handleBlobFn(entry.BlobHandle, buf, ierr)
+-				if err != nil {
+-					break
+-				}
+-				if ctx.Err() != nil {
+-					return ctx.Err()
+-				}
+-			}
+-		}
+-		return errors.Wrap(err, "StreamPack")
+-	}
+-
+-	it := newPackBlobIterator(packID, newByteReader(*data), dataStart, blobs, key, dec)
+-	if policy, ok := ctx.Value(smallRestoreDecodeKey{}).(smallRestoreDecodePolicy); ok {
+-		it.smallDecoder = policy.decoder
+-		it.ensureOrdinary = func() error { return policy.ensureOrdinary(ctx) }
+-		var maxPlaintext uint
+-		for _, blob := range blobs {
+-			if blob.IsCompressed() && blob.DataLength() > maxPlaintext {
+-				maxPlaintext = blob.DataLength()
+-			}
+-		}
+-		it.decode = make([]byte, 0, maxPlaintext)
+-	}
+-
+-	for {
+-		if ctx.Err() != nil {
+-			return ctx.Err()
+-		}
+-
+-		val, err := it.Next()
+-		if ctx.Err() != nil {
+-			return ctx.Err()
+-		}
+-		if err == errPackEOF {
+-			break
+-		} else if err != nil {
+-			return err
+-		}
+-
+-		if val.Err != nil && loadBlobFn != nil {
+-			var ierr error
+-			// check whether we can get a valid copy somewhere else
+-			buf, ierr := loadBlobFn(ctx, val.Handle, nil)
+-			if ctx.Err() != nil {
+-				return ctx.Err()
+-			}
+-			if ierr == nil {
+-				// success
+-				val.Plaintext = buf
+-				val.Err = nil
+-			}
+-		}
+-
+-		err = handleBlobFn(val.Handle, val.Plaintext, val.Err)
+-		if err != nil {
+-			return err
+-		}
+-		// ensure that each blob is only passed once to handleBlobFn
+-		blobs = blobs[1:]
+-	}
+-
+-	return errors.Wrap(err, "StreamPack")
+-}
+-
+-// discardReader allows the PackBlobIterator to perform zero copy
+-// reads if the underlying data source is a byte slice.
+-type discardReader interface {
+-	Discard(n int) (discarded int, err error)
+-	// ReadFull reads the next n bytes into a byte slice. The caller must not
+-	// retain a reference to the byte. Modifications are only allowed within
+-	// the boundaries of the returned slice.
+-	ReadFull(n int) (buf []byte, err error)
+-}
+-
+-type byteReader struct {
+-	buf []byte
+-}
+-
+-func newByteReader(buf []byte) *byteReader {
+-	return &byteReader{
+-		buf: buf,
+-	}
+-}
+-
+-func (b *byteReader) Discard(n int) (discarded int, err error) {
+-	if len(b.buf) < n {
+-		return 0, io.ErrUnexpectedEOF
+-	}
+-	b.buf = b.buf[n:]
+-	return n, nil
+-}
+-
+-func (b *byteReader) ReadFull(n int) (buf []byte, err error) {
+-	if len(b.buf) < n {
+-		return nil, io.ErrUnexpectedEOF
+-	}
+-	buf = b.buf[:n]
+-	b.buf = b.buf[n:]
+-	return buf, nil
+-}
+-
+-type packBlobIterator struct {
+-	packID        restic.ID
+-	rd            discardReader
+-	currentOffset uint
+-
+-	blobs pack.Blobs
+-	key   *crypto.Key
+-	dec   *zstd.Decoder
+-
+-	smallDecoder   *zstd.Decoder
+-	ensureOrdinary func() error
+-	decode         []byte
+-	blobHash       hash.Hash
+-}
+-
+-type packBlobValue struct {
+-	Handle    restic.BlobHandle
+-	Plaintext []byte
+-	Err       error
+-}
+-
+-var errPackEOF = errors.New("reached EOF of pack file")
+-
+-func newPackBlobIterator(packID restic.ID, rd discardReader, currentOffset uint,
+-	blobs pack.Blobs, key *crypto.Key, dec *zstd.Decoder) *packBlobIterator {
+-	return &packBlobIterator{
+-		packID:        packID,
+-		rd:            rd,
+-		currentOffset: currentOffset,
+-		blobs:         blobs,
+-		key:           key,
+-		dec:           dec,
+-	}
+-}
+-
+-// Next returns the next blob, an error or ErrPackEOF if all blobs were read
+-func (b *packBlobIterator) Next() (packBlobValue, error) {
+-	entry, buf, err := b.readBlob()
+-	if err != nil {
+-		return packBlobValue{}, err
+-	}
+-	h := restic.BlobHandle{ID: entry.ID, Type: entry.Type}
+-
+-	// decryption errors are likely permanent, give the caller a chance to skip them
+-	nonce, ciphertext := buf[:b.key.NonceSize()], buf[b.key.NonceSize():]
+-	plaintext, err := b.key.Open(ciphertext[:0], nonce, ciphertext, nil)
+-	if err != nil {
+-		err = fmt.Errorf("decrypting blob %v from pack %v failed: %w", h, b.packID.String(), err)
+-	}
+-	if err == nil && entry.IsCompressed() {
+-		// DecodeAll will allocate a slice if it is not large enough since it
+-		// knows the decompressed size (because we're using EncodeAll)
+-		if b.smallDecoder != nil {
+-			b.decode, err = b.smallDecoder.DecodeAll(plaintext, b.decode[:0])
+-			if err != nil {
+-				// Size policy is not a corruption verdict. Retry with the original
+-				// decoder under ordinary allocation admission to preserve diagnostics.
+-				if admissionErr := b.ensureOrdinary(); admissionErr != nil {
+-					return packBlobValue{}, admissionErr
+-				}
+-				b.decode, err = b.dec.DecodeAll(plaintext, b.decode[:0])
+-			}
+-		} else {
+-			b.decode, err = b.dec.DecodeAll(plaintext, b.decode[:0])
+-		}
+-		plaintext = b.decode
+-		if err != nil {
+-			err = fmt.Errorf("decompressing blob %v from pack %v failed: %w", h, b.packID.String(), err)
+-		}
+-	}
+-	if err == nil {
+-		id := restic.Hash(plaintext)
+-		if !id.Equal(entry.ID) {
+-			debug.Log("read blob %v/%v from pack %v: wrong data returned, hash is %v",
+-				h.Type, h.ID, b.packID.String(), id)
+-			err = fmt.Errorf("read blob %v from pack %v: wrong data returned, hash is %v",
+-				h, b.packID.String(), id)
+-		}
+-	}
+-
+-	return packBlobValue{entry.BlobHandle, plaintext, err}, nil
+-}
+-
+-// NextHash verifies the next blob without keeping its decompressed contents.
+-// It is used by the checker, which only needs the plaintext hash.
+-func (b *packBlobIterator) NextHash() (packBlobValue, error) {
+-	entry, buf, err := b.readBlob()
+-	if err != nil {
+-		return packBlobValue{}, err
+-	}
+-	h := restic.BlobHandle{ID: entry.ID, Type: entry.Type}
+-
+-	nonce, ciphertext := buf[:b.key.NonceSize()], buf[b.key.NonceSize():]
+-	plaintext, err := b.key.Open(ciphertext[:0], nonce, ciphertext, nil)
+-	if err != nil {
+-		err = fmt.Errorf("decrypting blob %v from pack %v failed: %w", h, b.packID.String(), err)
+-	} else if entry.IsCompressed() {
+-		if b.blobHash == nil {
+-			b.blobHash = sha256.New()
+-		} else {
+-			b.blobHash.Reset()
+-		}
+-
+-		err = b.dec.Reset(bytes.NewReader(plaintext))
+-		if err == nil {
+-			_, err = io.Copy(b.blobHash, b.dec)
+-		}
+-		if err != nil {
+-			err = fmt.Errorf("decompressing blob %v from pack %v failed: %w", h, b.packID.String(), err)
+-		} else {
+-			var sum [sha256.Size]byte
+-			var got restic.ID
+-			copy(got[:], b.blobHash.Sum(sum[:0]))
+-			if !got.Equal(entry.ID) {
+-				debug.Log("  read blob %v/%v from pack %v: wrong data returned, hash is %v", h.Type, h.ID, b.packID.String(), got)
+-				err = fmt.Errorf("read blob %v from pack %v: wrong data returned, hash is %v", h, b.packID.String(), got)
+-			}
+-		}
+-	} else if got := restic.Hash(plaintext); !got.Equal(entry.ID) {
+-		debug.Log("  read blob %v/%v from pack %v: wrong data returned, hash is %v", h.Type, h.ID, b.packID.String(), got)
+-		err = fmt.Errorf("read blob %v from pack %v: wrong data returned, hash is %v", h, b.packID.String(), got)
+-	}
+-
+-	return packBlobValue{Handle: h, Err: err}, nil
+-}
+-
+-func (b *packBlobIterator) readBlob() (pack.Blob, []byte, error) {
+-	if len(b.blobs) == 0 {
+-		return pack.Blob{}, nil, errPackEOF
+-	}
+-
+-	entry := b.blobs[0]
+-	b.blobs = b.blobs[1:]
+-
+-	skipBytes := int(entry.Offset - b.currentOffset)
+-	if skipBytes < 0 {
+-		return pack.Blob{}, nil, fmt.Errorf("overlapping blobs in pack %v", b.packID)
+-	}
+-
+-	_, err := b.rd.Discard(skipBytes)
+-	if err != nil {
+-		return pack.Blob{}, nil, err
+-	}
+-	b.currentOffset = entry.Offset
+-
+-	h := restic.BlobHandle{ID: entry.ID, Type: entry.Type}
+-	debug.Log("  process blob %v, skipped %d, %v", h, skipBytes, entry)
+-
+-	buf, err := b.rd.ReadFull(int(entry.Length))
+-	if err != nil {
+-		debug.Log("    read error %v", err)
+-		return pack.Blob{}, nil, fmt.Errorf("readFull: %w", err)
+-	}
+-
+-	b.currentOffset = entry.Offset + entry.Length
+-
+-	if int(entry.Length) <= b.key.NonceSize() {
+-		debug.Log("%v", b.blobs)
+-		return pack.Blob{}, nil, fmt.Errorf("invalid blob length %v", entry)
+-	}
+-
+-	return entry, buf, nil
+-}
+-
+-func (r *Repository) zeroChunk() restic.ID {
+-	r.zeroChunkOnce.Do(func() {
+-		r.zeroChunkID = restic.Hash(make([]byte, chunker.MinSize))
+-	})
+-	return r.zeroChunkID
+-}
+diff --git a/internal/repository/stream_pack_released.go b/internal/repository/stream_pack_released.go
+index e7d9d6989f3a7a494e40aab66cc8d8d074dbb9f3..fd6d49ef086eb37ee315535bf1401cb33b680d3d 100644
+--- a/internal/repository/stream_pack_released.go
++++ b/internal/repository/stream_pack_released.go
+@@ -9,14 +9,15 @@ import (
+ 
+ // loadBlobsFromPackReleased is loadBlobsFromPack for handlers that use the
+ // backend themselves (repack and copy save the blobs, repair packs uploads
+-// them again). Each window is read into memory, the backend connection is
++// them again). Each range is read into memory, the backend connection is
+ // released, and only then are the blobs decoded and handed to the handler, so
+ // a handler never runs inside the backend's Load callback. With a single
+ // backend connection a handler that saves from inside Load waits for the
+ // connection its own reader holds.
+ //
+-// The price is one backend request per window instead of one per pack range.
+-// The windows, the range buffer and every check are those of the restore path.
++// The price is one backend request per range of at most
++// maxStreamPackChunkSize instead of one per pack range. The range buffer and
++// every check are those of the restore path.
+ func (r *Repository) loadBlobsFromPackReleased(ctx context.Context, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+-	return streamPackWindowed(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn, restoreStreamWindow, true)
++	return streamPack(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
+ }
+diff --git a/internal/repository/stream_pack_released_test.go b/internal/repository/stream_pack_released_test.go
+index d96f1a6b358ade88673d4e153b3618f0ce314be5..4d20344053439c994e5a7d0193968963ab3ccb8f 100644
+--- a/internal/repository/stream_pack_released_test.go
++++ b/internal/repository/stream_pack_released_test.go
+@@ -165,7 +165,7 @@ func TestRepackHandlerRunsOutsideLoad(t *testing.T) {
+ 	if n := uploader.insideLoad.Load(); n != 0 {
+ 		t.Fatalf("%d of %d saves were requested inside the backend Load callback of the pack read", n, len(ids))
+ 	}
+-	// 6 blobs of 1 MiB in windows of 2 MiB: one blob per window, one request each
+-	test.Equals(t, int32(len(ids)), probe.loads.Load())
++	// 6 blobs of 1 MiB in ranges below 4 MiB: three blobs per request
++	test.Equals(t, int32(2), probe.loads.Load())
+ 	test.Equals(t, 0, keep.Len())
+ }
+diff --git a/internal/repository/stream_pack_table_test.go b/internal/repository/stream_pack_table_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a0ed29e6b75267b88e81222c567a30ea4dd031e
+--- /dev/null
++++ b/internal/repository/stream_pack_table_test.go
+@@ -0,0 +1,154 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"strings"
++	"testing"
++
++	"github.com/cenkalti/backoff/v4"
++	"github.com/google/go-cmp/cmp"
++	"github.com/klauspost/compress/zstd"
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/errors"
++	"github.com/restic/restic/internal/repository/crypto"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// The table of TestStreamPack (blobs, expected number of backend requests,
++// a short first read, the three invalid uses), run against both pack streams
++// that production uses: streamPack for repack, copy and repair packs, where
++// the handler runs after Load has returned, and streamPackWithPolicy for
++// restore, where one request serves a pack range and is decoded in windows.
++// TestStreamPack itself calls streamPack only.
++func TestStreamPackTableOnProductionPaths(t *testing.T) {
++	type streamFn func(ctx context.Context, load backendLoadFn, dec *zstd.Decoder, key *crypto.Key, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error
++	for _, path := range []struct {
++		name   string
++		stream streamFn
++	}{
++		{"repack and repair", func(ctx context.Context, load backendLoadFn, dec *zstd.Decoder, key *crypto.Key, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error {
++			// what Repository.loadBlobsFromPackReleased calls
++			return streamPack(ctx, load, nil, dec, key, restic.ID{}, blobs, handle)
++		}},
++		{"restore", func(ctx context.Context, load backendLoadFn, dec *zstd.Decoder, key *crypto.Key, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error {
++			// what Repository.loadBlobsFromPack calls for an ordinary restore worker
++			return streamPackWithPolicy(ctx, load, nil, dec, key, restic.ID{}, blobs, handle, restoreStreamWindow, true)
++		}},
++	} {
++		for _, version := range []uint{1, 2} {
++			t.Run(fmt.Sprintf("%s/v%d", path.name, version), func(t *testing.T) {
++				testStreamPackTable(t, version, func(ctx context.Context, load backendLoadFn, dec *zstd.Decoder, key *crypto.Key, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error {
++					return path.stream(ctx, load, dec, key, blobs, handle)
++				})
++			})
++		}
++	}
++}
++
++func testStreamPackTable(t *testing.T, version uint, stream func(ctx context.Context, load backendLoadFn, dec *zstd.Decoder, key *crypto.Key, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error) {
++	dec, err := zstd.NewReader(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer dec.Close()
++	key := testKey(t)
++	blobSizes := []int{1522811, 10, 5231, 18812, 123123, 12301, 892242, 28616, 13351, 252287, 188883, 18883}
++	packfileBlobs, packfile := buildPackfileWithoutHeader(blobSizes, &key, version == 2)
++
++	loadCalls := 0
++	shortFirstLoad := false
++	loadBytes := func(length int, offset int64) []byte {
++		data := packfile
++		if offset > int64(len(data)) {
++			offset = 0
++			length = 0
++		}
++		data = data[offset:]
++		if length > len(data) {
++			length = len(data)
++		}
++		if shortFirstLoad {
++			length /= 2
++			shortFirstLoad = false
++		}
++		return data[:length]
++	}
++	load := func(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
++		data := loadBytes(length, offset)
++		loadCalls++
++		err := fn(bytes.NewReader(data))
++		if err == nil {
++			return nil
++		}
++		var permanent *backoff.PermanentError
++		if errors.As(err, &permanent) {
++			return err
++		}
++		return fn(bytes.NewReader(loadBytes(length, offset)))
++	}
++	production := func(ctx context.Context, blobs pack.Blobs, handle func(restic.BlobHandle, []byte, error) error) error {
++		return stream(ctx, load, dec, &key, blobs, handle)
++	}
++
++	regular := []struct {
++		blobs          pack.Blobs
++		calls          int
++		shortFirstLoad bool
++	}{
++		{packfileBlobs[1:2], 1, false},
++		{packfileBlobs[2:5], 1, false},
++		{packfileBlobs[2:8], 1, false},
++		{pack.Blobs{packfileBlobs[0], packfileBlobs[4], packfileBlobs[2]}, 1, false},
++		{pack.Blobs{packfileBlobs[0], packfileBlobs[len(packfileBlobs)-1]}, 2, false},
++		{packfileBlobs[:], 1, true},
++	}
++	for i, test := range regular {
++		blobs := append(pack.Blobs(nil), test.blobs...)
++		gotBlobs := make(map[restic.ID]int)
++		wantBlobs := make(map[restic.ID]int)
++		for _, blob := range blobs {
++			wantBlobs[blob.ID] = 1
++		}
++		loadCalls = 0
++		shortFirstLoad = test.shortFirstLoad
++		err := production(t.Context(), blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
++			gotBlobs[blob.ID]++
++			if id := restic.Hash(buf); !id.Equal(blob.ID) {
++				t.Fatalf("v%d regular %d: wrong id %v for blob %v", version, i, id, blob.ID)
++			}
++			return err
++		})
++		if err != nil {
++			t.Fatalf("v%d regular %d: %v", version, i, err)
++		}
++		if !cmp.Equal(wantBlobs, gotBlobs) {
++			t.Fatalf("v%d regular %d: %s", version, i, cmp.Diff(wantBlobs, gotBlobs))
++		}
++		if loadCalls != test.calls {
++			t.Errorf("v%d regular %d: %d load calls, the table of TestStreamPack expects %d", version, i, loadCalls, test.calls)
++		}
++	}
++	shortFirstLoad = false
++
++	invalid := []struct {
++		blobs pack.Blobs
++		err   string
++	}{
++		{pack.Blobs{packfileBlobs[3], packfileBlobs[8], packfileBlobs[3], packfileBlobs[4]}, "overlapping blobs in pack"},
++		{pack.Blobs{{Offset: 123, Length: 20000}}, "ciphertext verification failed"},
++		{pack.Blobs{{Offset: 123, Length: 10}}, "invalid blob length"},
++	}
++	for i, test := range invalid {
++		err := production(t.Context(), test.blobs, func(_ restic.BlobHandle, _ []byte, err error) error { return err })
++		if err == nil {
++			t.Fatalf("v%d invalid %d: wanted error %q, got nil", version, i, test.err)
++		}
++		if !strings.Contains(err.Error(), test.err) {
++			t.Fatalf("v%d invalid %d: error should contain %q but was %q", version, i, test.err, err)
++		}
++	}
++}
+diff --git a/internal/restic/restore_hold_budget.go b/internal/restic/restore_hold_budget.go
+index 28e5631951cbf2cd11549dc357afec6cff984cc1..c86df64d08673354e6e4bae1ba92f9a7ea0ee4fa 100644
+--- a/internal/restic/restore_hold_budget.go
++++ b/internal/restic/restore_hold_budget.go
+@@ -10,9 +10,11 @@ import "context"
+ // room (Acquire), so it only adds to what the others hold while that is low.
+ // The implementation is the restorer's.
+ //
+-// This file declares types only, on purpose: this package is placed before
+-// the key derivation code in the binary, and that code runs about 3% slower
+-// or faster depending on where it lands (6 ms per process).
++// This file declares types only; the implementation is in the restorer
++// package. On the build that was measured, code added to this package moved
++// the key derivation code in the binary, and its run time changed by about
++// 3% (6 ms per process) in one direction or the other. The effect belongs to
++// one compiler version, one linker layout and one machine.
+ type RestoreHoldBudget interface {
+ 	// Force takes n bytes without waiting and returns the amount taken.
+ 	Force(n int64) int64

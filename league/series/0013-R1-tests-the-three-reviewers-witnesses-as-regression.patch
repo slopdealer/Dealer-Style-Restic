@@ -1,0 +1,726 @@
+From a80a696d75204f9427cdb1aecc03e72263cb5b5e Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:02:57 +0000
+Subject: [PATCH 13/49] R1 tests: the three reviewers' witnesses as regression
+ tests
+
+lock_wait_stale_witness_test.go is the read-side review's command-level
+witness (backup beside prune loses the backup; prune beside backup and restore
+beside prune fail where stock succeeds), unchanged apart from its header.
+
+lock_wait_dwell_witness_test.go ports the storage and the backup review's
+API-level witnesses from internal/repository to cmd/restic, so that they
+drive the wait work the commands use (backupIndexWaitWork). The stock-order
+control is kept (TestWitnessLockDwellStockOrder).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ cmd/restic/lock_wait_dwell_witness_test.go | 305 ++++++++++++++++
+ cmd/restic/lock_wait_stale_witness_test.go | 386 +++++++++++++++++++++
+ 2 files changed, 691 insertions(+)
+ create mode 100644 cmd/restic/lock_wait_dwell_witness_test.go
+ create mode 100644 cmd/restic/lock_wait_stale_witness_test.go
+
+diff --git a/cmd/restic/lock_wait_dwell_witness_test.go b/cmd/restic/lock_wait_dwell_witness_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c03f9a4400ae06cf0fced0fa548c8e0d7a9f919
+--- /dev/null
++++ b/cmd/restic/lock_wait_dwell_witness_test.go
+@@ -0,0 +1,305 @@
++package main
++
++// Regression tests for the lock-wait defect (repair R1): reads taken during the
++// lock's settle delay were used after the lock was confirmed, although another
++// process had completed exclusive work in between.
++//
++// These are the two API-level witnesses of the soundness reviews
++// (review/witness-storage/lock_dwell_witness_test.go and
++// review/witness-backup/lock_dwell_stale_index_witness_test.go), ported from
++// internal/repository to this package so that they drive the wait work the
++// commands really use (backupIndexWaitWork) instead of a copy of it.
++//
++// Two "processes" share one in-memory backend, each with its own repository
++// handle. Nothing in the schedule is forbidden by restic's lock protocol:
++//
++//  1. B (a backup, non-exclusive lock) checks for locks (none) and starts
++//     saving its lock file. The save is slow: the file is not visible yet.
++//  2. P (a prune, exclusive lock) checks for locks (none), creates its lock,
++//     waits, checks again. B's lock is still not visible, so P is confirmed.
++//  3. B's lock file lands. B starts its settle wait. The defective order reads
++//     the snapshot list and the index now.
++//  4. P finishes: it removes the index file and the pack that hold the unused
++//     blob X, and unlocks.
++//  5. B's settle wait ends. B sees no competing lock: its lock is confirmed.
++//
++// Stock loads the index after step 5: X is gone and a backup uploads it again.
++// The defective order kept the index of step 3: X is "known", is not uploaded,
++// and the new snapshot references a blob that no longer exists.
++//
++// TestWitnessLockDwellStockOrder is the control: the same schedule with the
++// index loaded after the lock call returns. It passes in every tree.
++// The other two tests fail on a tree with the defect and pass once it is
++// repaired, whichever way: either B reads nothing during its wait because it
++// saw P's lock, or B notices after confirmation that what it read is gone.
++//
++// The settle delay is scaled to 1 s (production: 200 ms) so that the order of
++// the steps holds on a loaded machine. Run:
++//
++//	go test -run 'TestWitnessLockDwell' -count=1 -v ./cmd/restic
++
++import (
++	"context"
++	"io"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/backend/mem"
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++)
++
++const dwellSettleDelay = 1 * time.Second
++
++// dwellSlowLockBackend is B's view of the shared backend. Its first lock-file
++// save is held back until the test releases it, and it reports when B has
++// listed the index and loaded an index file.
++type dwellSlowLockBackend struct {
++	backend.Backend
++	saveOnce    sync.Once
++	saveStarted chan struct{}
++	release     chan struct{}
++	saved       chan struct{}
++
++	mu          sync.Mutex
++	indexListed bool
++	readOnce    sync.Once
++	indexRead   chan struct{}
++}
++
++func newDwellSlowLockBackend(be backend.Backend) *dwellSlowLockBackend {
++	return &dwellSlowLockBackend{
++		Backend:     be,
++		saveStarted: make(chan struct{}),
++		release:     make(chan struct{}),
++		saved:       make(chan struct{}),
++		indexRead:   make(chan struct{}),
++	}
++}
++
++func (be *dwellSlowLockBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
++	if h.Type != backend.LockFile {
++		return be.Backend.Save(ctx, h, rd)
++	}
++	first := false
++	be.saveOnce.Do(func() {
++		first = true
++		close(be.saveStarted)
++	})
++	if !first {
++		return be.Backend.Save(ctx, h, rd)
++	}
++	<-be.release
++	err := be.Backend.Save(ctx, h, rd)
++	close(be.saved)
++	return err
++}
++
++func (be *dwellSlowLockBackend) List(ctx context.Context, t backend.FileType, fn func(backend.FileInfo) error) error {
++	err := be.Backend.List(ctx, t, fn)
++	if t == backend.IndexFile {
++		be.mu.Lock()
++		be.indexListed = true
++		be.mu.Unlock()
++	}
++	return err
++}
++
++func (be *dwellSlowLockBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
++	err := be.Backend.Load(ctx, h, length, offset, fn)
++	if h.Type == backend.IndexFile {
++		be.mu.Lock()
++		listed := be.indexListed
++		be.mu.Unlock()
++		if listed {
++			be.readOnce.Do(func() { close(be.indexRead) })
++		}
++	}
++	return err
++}
++
++type dwellResult struct {
++	// known: B's index, as B uses it after its lock was confirmed, lists X
++	known bool
++	// loadErr: reading X through B's index
++	loadErr error
++	// readDuringWait: B listed and loaded the index before its lock was confirmed
++	readDuringWait bool
++	// savedKnown: a backup of X through B reported the blob as already stored
++	savedKnown bool
++	// readBackErr: reading X from a fresh repository handle after B's backup
++	readBackErr error
++}
++
++// runLockDwell drives the schedule. With stockOrder B loads the index after
++// the lock call returned; otherwise it uses backup's wait work. With save, B
++// then stores X as a backup would.
++func runLockDwell(t *testing.T, stockOrder bool, save bool) dwellResult {
++	ctx := context.Background()
++	shared := mem.New()
++	repository.TestSetLockTimeout(t, dwellSettleDelay)
++	defer repository.TestSetLockTimeout(t, 0)
++
++	// A repository holding one unused data blob X in one pack, described by
++	// one index file.
++	setup, _ := repository.TestRepositoryWithBackend(t, shared, 0, repository.Options{})
++	blobX := []byte("contents of a file that an interrupted backup already uploaded")
++	var idX restic.ID
++	if err := setup.WithBlobUploader(ctx, func(ctx context.Context, up restic.BlobSaverWithAsync) error {
++		var err error
++		idX, _, _, err = up.SaveBlob(ctx, restic.DataBlob, blobX, restic.ID{}, false)
++		return err
++	}); err != nil {
++		t.Fatal(err)
++	}
++	handleX := restic.BlobHandle{Type: restic.DataBlob, ID: idX}
++	var obsolete []backend.Handle
++	for _, tpe := range []backend.FileType{backend.IndexFile, backend.PackFile} {
++		if err := shared.List(ctx, tpe, func(fi backend.FileInfo) error {
++			obsolete = append(obsolete, backend.Handle{Type: tpe, Name: fi.Name})
++			return nil
++		}); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if len(obsolete) != 2 {
++		t.Fatalf("setup: want one index file and one pack, got %v", obsolete)
++	}
++
++	slow := newDwellSlowLockBackend(shared)
++	repoB := repository.TestOpenBackend(t, slow)   // the backup process
++	repoP := repository.TestOpenBackend(t, shared) // the prune process
++
++	var indexLoad *backupIndexLoad
++	type lockResult struct {
++		unlock func()
++		err    error
++	}
++	lockedB := make(chan lockResult, 1)
++	noRetryMessage := func(string) {}
++	go func() {
++		var unlock func()
++		var err error
++		if stockOrder {
++			unlock, _, err = repository.LockRepo(ctx, repoB, false, 0, noRetryMessage, t.Logf)
++		} else {
++			work := backupIndexWaitWork(&indexLoad, true)
++			unlock, _, err = repository.LockRepoWithWaitWork(ctx, repoB, false, 0, noRetryMessage, t.Logf, func(lockCtx context.Context) func(bool) {
++				return work(lockCtx, repoB)
++			})
++		}
++		lockedB <- lockResult{unlock, err}
++	}()
++
++	// 1. B has checked for locks and is saving its lock file (not visible yet).
++	select {
++	case <-slow.saveStarted:
++	case <-time.After(30 * time.Second):
++		t.Fatal("B did not start saving its lock")
++	}
++
++	// 2. P takes the exclusive lock; B's lock is not visible, so P is confirmed.
++	unlockP, _, err := repository.LockRepo(ctx, repoP, true, 0, noRetryMessage, t.Logf)
++	if err != nil {
++		t.Fatalf("P could not lock exclusively: %v", err)
++	}
++
++	// 3. B's lock file lands; B starts its settle wait.
++	close(slow.release)
++	<-slow.saved
++	var res dwellResult
++	select {
++	case <-slow.indexRead:
++		res.readDuringWait = true
++	case <-time.After(dwellSettleDelay * 3 / 10):
++		// B reads nothing during its wait (stock order, or it saw P's lock)
++	}
++
++	// 4. P removes the index file and the pack with X and unlocks, inside B's
++	// settle wait.
++	for _, h := range obsolete {
++		if err := shared.Remove(ctx, h); err != nil {
++			t.Fatal(err)
++		}
++	}
++	unlockP()
++
++	// 5. B's second check finds no competing lock.
++	locked := <-lockedB
++	if locked.err != nil {
++		t.Fatalf("schedule not reached (B was refused the lock, the machine may be overloaded): %v", locked.err)
++	}
++	defer locked.unlock()
++	if indexLoad != nil {
++		defer indexLoad.discard()
++	}
++
++	// B continues as backup does: parent snapshot search, then the index.
++	if indexLoad != nil {
++		if err := indexLoad.parentSearchRepo(repoB).List(ctx, restic.SnapshotFile, func(restic.ID, int64) error { return nil }); err != nil {
++			t.Fatal(err)
++		}
++		err = indexLoad.wait(restic.NoopTerminalCounterFactory)
++	} else {
++		err = repoB.LoadIndex(ctx, restic.NoopTerminalCounterFactory)
++	}
++	if err != nil {
++		t.Fatalf("B could not load the index after its lock was confirmed: %v", err)
++	}
++
++	_, res.known = repoB.LookupBlobSize(handleX)
++	_, res.loadErr = repoB.LoadBlob(ctx, handleX, nil)
++	t.Logf("B's lock is confirmed. B read the index during its wait: %v. B's index lists X: %v; loading X through it: err=%v",
++		res.readDuringWait, res.known, res.loadErr)
++
++	if save {
++		if err := repoB.WithBlobUploader(ctx, func(ctx context.Context, up restic.BlobSaverWithAsync) error {
++			var err error
++			_, res.savedKnown, _, err = up.SaveBlob(ctx, restic.DataBlob, blobX, restic.ID{}, false)
++			return err
++		}); err != nil {
++			t.Fatal(err)
++		}
++		verify := repository.TestOpenBackend(t, shared)
++		if err := verify.LoadIndex(ctx, restic.NoopTerminalCounterFactory); err != nil {
++			t.Fatal(err)
++		}
++		_, res.readBackErr = verify.LoadBlob(ctx, handleX, nil)
++		t.Logf("B saved X: reported as already stored = %v; reading X back from the repository: err=%v", res.savedKnown, res.readBackErr)
++	}
++	return res
++}
++
++// TestWitnessLockDwellStockOrder is the control: stock's order on the same
++// schedule.
++func TestWitnessLockDwellStockOrder(t *testing.T) {
++	res := runLockDwell(t, true, true)
++	if res.readDuringWait {
++		t.Fatal("stock order read the index during the lock wait")
++	}
++	if res.known || res.savedKnown || res.readBackErr != nil {
++		t.Fatalf("stock order: the index loaded after confirmation still lists the pruned blob (known=%v, saved as known=%v, read back: %v)",
++			res.known, res.savedKnown, res.readBackErr)
++	}
++}
++
++// TestWitnessLockDwellPreloadedIndexIsStale is the storage review's witness.
++func TestWitnessLockDwellPreloadedIndexIsStale(t *testing.T) {
++	res := runLockDwell(t, false, false)
++	if res.known {
++		t.Fatal("the lock was confirmed, but the index B uses still lists a blob whose pack a concurrent prune deleted; " +
++			"a backup would deduplicate against it")
++	}
++}
++
++// TestWitnessLockDwellStaleIndex is the backup review's witness.
++func TestWitnessLockDwellStaleIndex(t *testing.T) {
++	res := runLockDwell(t, false, true)
++	if res.known || res.savedKnown || res.readBackErr != nil {
++		t.Fatalf("stale index used after a confirmed lock: blob X was treated as already stored (index lists it: %v, saved as known: %v) "+
++			"although prune had removed it; reading it back: %v. A snapshot written now references missing data.",
++			res.known, res.savedKnown, res.readBackErr)
++	}
++}
+diff --git a/cmd/restic/lock_wait_stale_witness_test.go b/cmd/restic/lock_wait_stale_witness_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..65960ccca0eefdd21149cc38e9491abb84145e3b
+--- /dev/null
++++ b/cmd/restic/lock_wait_stale_witness_test.go
+@@ -0,0 +1,386 @@
++package main
++
++// Regression tests for the lock-wait defect (repair R1), at command level.
++// This is the read-side review's witness
++// (review/witness-readside/cmd_lock_wait_stale_witness_test.go), unchanged
++// below this paragraph. It fails on a tree with the defect, and passes on
++// stock and on a repaired tree.
++//
++// WITNESS (readside review): reads taken during the lock settle delay, before
++// the lock is confirmed, are used after confirmation even when another restic
++// process completed a whole run in between.
++//
++// Files under test: cmd/restic/wait_index_load.go (startRepositoryIndexLoad*,
++// consume), cmd/restic/lock.go, internal/repository/lock_file.go
++// (newLockWithWaitWork), cmd/restic/cmd_prune.go, cmd/restic/cmd_restore.go.
++//
++// Stock protocol: list locks, write own lock, sleep, list locks again, and only
++// then read snapshots and the index. A process P2 that slipped in while P1's
++// lock file was still being written (its write took longer than the settle
++// delay) is either still running at P1's second check (P1 fails with "already
++// locked") or has finished (P1 then reads the repository as P2 left it).
++// Either way P1 is correct.
++//
++// Candidate: P1 starts listing snapshots and loading the index as soon as its
++// lock file is written. If P2 finishes inside P1's settle delay, P1's second
++// check succeeds and P1 goes on with an index that predates P2's changes.
++//
++// The test scales the settle delay to 1 s (production: 200 ms) so that the
++// ordering is robust on a loaded machine; the precondition in production is
++// "P1's lock-file write takes longer than 200 ms" (ordinary for SFTP, B2,
++// rclone or a WAN link) while P2 is fast (for example local to the storage).
++//
++//   Scenario A: P1 = prune, P2 = backup. Stock: prune succeeds. Candidate:
++//     prune fails ("failed finding blobs"/"not found in repository") because
++//     it sees P2's snapshot (listed after confirmation) with the stale index.
++//   Scenario B: P1 = restore <snapshot>, P2 = prune that repacks. Stock:
++//     restore succeeds. Candidate: restore reports errors, because its stale
++//     index points at packs P2 deleted.
++//
++//   Scenario C: P1 = backup, P2 = prune (cmd/restic/cmd_backup.go:545-601 and
++//     backup_index_load.go use the same wait work). The data P1 is about to
++//     back up is already in the repository but unused (its snapshot was
++//     forgotten), so P2 deletes it. Stock: P1 loads the index after P2 and
++//     uploads the data again; check passes. Candidate: P1 deduplicates against
++//     the index it loaded before P2 ran, uploads nothing, reports success, and
++//     writes a snapshot that points at deleted packs: DATA LOSS (the new
++//     backup cannot be restored; check fails).
++//
++// No data is lost in scenarios A and B (the test re-checks the repository), the
++// commands fail where stock succeeds. Scenario C loses the backup.
++//
++// The file uses only helpers present in the stock test suite, so the same file
++// runs in both trees.
++// OS: any. Run:
++//   go test -run 'TestWitnessLockWaitStale' -count=1 -v ./cmd/restic
++// Expected: PASS on stock, FAIL on the candidate.
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/global"
++	"github.com/restic/restic/internal/repository"
++	rtest "github.com/restic/restic/internal/test"
++)
++
++const (
++	witnessSettleDelay   = 1 * time.Second
++	witnessLockSaveDelay = 2500 * time.Millisecond
++)
++
++type witnessEvents struct {
++	t0             time.Time
++	lockSaveBegin  chan struct{}
++	lockSaved      chan struct{}
++	p1IndexListed  chan struct{}
++	onceBegin      sync.Once
++	onceSaved      sync.Once
++	onceListed     sync.Once
++	onceGate       sync.Once
++	mu             sync.Mutex
++	log            []string
++	listedAt       time.Duration
++	lockSavedAt    time.Duration
++	p2GateOpenedAt time.Duration
++}
++
++func newWitnessEvents() *witnessEvents {
++	return &witnessEvents{
++		t0:            time.Now(),
++		lockSaveBegin: make(chan struct{}),
++		lockSaved:     make(chan struct{}),
++		p1IndexListed: make(chan struct{}),
++	}
++}
++
++func (e *witnessEvents) since() time.Duration { return time.Since(e.t0).Round(time.Millisecond) }
++
++// witnessSlowLockBackend is P1's backend: its first lock-file write is slow.
++type witnessSlowLockBackend struct {
++	backend.Backend
++	ev *witnessEvents
++}
++
++func (b *witnessSlowLockBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
++	if h.Type != backend.LockFile {
++		return b.Backend.Save(ctx, h, rd)
++	}
++	first := false
++	b.ev.onceBegin.Do(func() { first = true; close(b.ev.lockSaveBegin) })
++	if first {
++		time.Sleep(witnessLockSaveDelay)
++	}
++	err := b.Backend.Save(ctx, h, rd)
++	b.ev.onceSaved.Do(func() {
++		b.ev.mu.Lock()
++		b.ev.lockSavedAt = b.ev.since()
++		b.ev.mu.Unlock()
++		close(b.ev.lockSaved)
++	})
++	return err
++}
++
++func (b *witnessSlowLockBackend) List(ctx context.Context, t backend.FileType, fn func(backend.FileInfo) error) error {
++	err := b.Backend.List(ctx, t, fn)
++	if t == backend.IndexFile {
++		b.ev.onceListed.Do(func() {
++			b.ev.mu.Lock()
++			b.ev.listedAt = b.ev.since()
++			b.ev.mu.Unlock()
++			close(b.ev.p1IndexListed)
++		})
++	}
++	return err
++}
++
++// witnessGatedBackend is P2's backend: its first index write waits until P1's
++// lock file exists, then gives P1 a moment (P1 lists the index in that moment
++// only if it works during the settle delay), then goes on.
++type witnessGatedBackend struct {
++	backend.Backend
++	ev *witnessEvents
++}
++
++func (b *witnessGatedBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
++	if h.Type == backend.IndexFile {
++		b.ev.onceGate.Do(func() {
++			<-b.ev.lockSaved
++			select {
++			case <-b.ev.p1IndexListed:
++			case <-time.After(300 * time.Millisecond):
++			}
++			// let P1 finish loading the index files it listed
++			time.Sleep(150 * time.Millisecond)
++			b.ev.mu.Lock()
++			b.ev.p2GateOpenedAt = b.ev.since()
++			b.ev.mu.Unlock()
++		})
++	}
++	return b.Backend.Save(ctx, h, rd)
++}
++
++func witnessWriteRandomFile(t *testing.T, name string, size uint) {
++	t.Helper()
++	rtest.OK(t, os.MkdirAll(filepath.Dir(name), 0o700))
++	rtest.OK(t, appendRandomData(name, size))
++}
++
++func witnessHooks(env *testEnvironment, ev *witnessEvents) (p1, p2 global.Options) {
++	p1 = env.gopts
++	p1.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
++		return &witnessSlowLockBackend{Backend: r, ev: ev}, nil
++	}
++	p2 = env.gopts
++	p2.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
++		return &witnessGatedBackend{Backend: r, ev: ev}, nil
++	}
++	return p1, p2
++}
++
++func witnessReport(t *testing.T, ev *witnessEvents, settleEnd time.Duration) {
++	ev.mu.Lock()
++	defer ev.mu.Unlock()
++	t.Logf("timeline: P1 lock file written at %v; P1 listed the index at %v; P2 index write released at %v; P1 second lock check not before %v",
++		ev.lockSavedAt, ev.listedAt, ev.p2GateOpenedAt, settleEnd)
++	if ev.listedAt != 0 && ev.listedAt < settleEnd {
++		t.Logf("P1 listed the index BEFORE its lock was confirmed (work during the settle delay)")
++	} else {
++		t.Logf("P1 listed the index after its lock was confirmed (stock order)")
++	}
++}
++
++// Scenario A: P1 = prune, P2 = backup.
++func TestWitnessLockWaitStalePruneVsBackup(t *testing.T) {
++	env, cleanup := withTestEnvironment(t)
++	defer cleanup()
++
++	testRunInit(t, env.gopts)
++	witnessWriteRandomFile(t, filepath.Join(env.testdata, "a", "one"), 200*1024)
++	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
++
++	// P2 will back this up: a new file means a new tree and a new index file
++	witnessWriteRandomFile(t, filepath.Join(env.testdata, "a", "two"), 200*1024)
++
++	repository.TestSetLockTimeout(t, witnessSettleDelay)
++	defer repository.TestSetLockTimeout(t, 0)
++
++	ev := newWitnessEvents()
++	p1opts, p2opts := witnessHooks(env, ev)
++
++	var p2err error
++	p2done := make(chan struct{})
++	go func() {
++		defer close(p2done)
++		<-ev.lockSaveBegin // P1 has passed its first lock check and is writing its lock
++		p2err = testRunBackupAssumeFailure(t, "", []string{env.testdata}, BackupOptions{}, p2opts)
++		t.Logf("P2 backup finished at %v: err=%v", ev.since(), p2err)
++	}()
++
++	p1err := withTermStatus(t, p1opts, func(ctx context.Context, gopts global.Options) error {
++		return runPrune(context.TODO(), PruneOptions{MaxUnused: "5%"}, gopts, gopts.Term)
++	})
++	t.Logf("P1 prune finished at %v: err=%v", ev.since(), p1err)
++	<-p2done
++
++	ev.mu.Lock()
++	settleEnd := ev.lockSavedAt + witnessSettleDelay
++	ev.mu.Unlock()
++	witnessReport(t, ev, settleEnd)
++
++	if p2err != nil {
++		t.Fatalf("orchestration invalid (P2 backup must succeed in both trees): %v", p2err)
++	}
++
++	// the repository must be intact whatever P1 did
++	repository.TestSetLockTimeout(t, 0)
++	env.gopts.BackendTestHook = nil
++	testListSnapshots(t, env.gopts, 2)
++	testRunCheck(t, env.gopts)
++	t.Logf("repository intact after the race: 2 snapshots, check --read-data passes")
++
++	if p1err != nil {
++		t.Errorf("WRONG RESULT: prune failed although no other process held a lock when its lock was confirmed (stock succeeds): %v", p1err)
++	}
++}
++
++// Scenario B: P1 = restore, P2 = prune that repacks.
++func TestWitnessLockWaitStaleRestoreVsPrune(t *testing.T) {
++	env, cleanup := withTestEnvironment(t)
++	defer cleanup()
++
++	testRunInit(t, env.gopts)
++	dirX := filepath.Join(env.testdata, "x")
++	dirY := filepath.Join(env.testdata, "y")
++	witnessWriteRandomFile(t, filepath.Join(dirX, "keep"), 200*1024)
++	witnessWriteRandomFile(t, filepath.Join(dirY, "drop"), 200*1024)
++
++	// snapshot 1 = x + y (one data pack), snapshot 2 = x only
++	// relative paths, so that the snapshot holds only x and y (restoring the
++	// metadata of the temp directory's parents fails on Windows in any tree)
++	testRunBackup(t, env.testdata, []string{"x", "y"}, BackupOptions{}, env.gopts)
++	first := testListSnapshots(t, env.gopts, 1)[0]
++	testRunBackup(t, env.testdata, []string{"x"}, BackupOptions{}, env.gopts)
++	var second string
++	for _, id := range testListSnapshots(t, env.gopts, 2) {
++		if id != first {
++			second = id.String()
++		}
++	}
++	// forget snapshot 1 without pruning: y's data is now unused in a pack that
++	// also holds x's data, so a prune with --max-unused 0 repacks that pack
++	testRunForget(t, env.gopts, ForgetOptions{}, first.String())
++
++	repository.TestSetLockTimeout(t, witnessSettleDelay)
++	defer repository.TestSetLockTimeout(t, 0)
++
++	ev := newWitnessEvents()
++	p1opts, p2opts := witnessHooks(env, ev)
++
++	var p2err error
++	p2done := make(chan struct{})
++	go func() {
++		defer close(p2done)
++		<-ev.lockSaveBegin
++		p2err = withTermStatus(t, p2opts, func(ctx context.Context, gopts global.Options) error {
++			return runPrune(context.TODO(), PruneOptions{MaxUnused: "0"}, gopts, gopts.Term)
++		})
++		t.Logf("P2 prune finished at %v: err=%v", ev.since(), p2err)
++	}()
++
++	target := filepath.Join(env.base, "restore")
++	p1err := testRunRestoreAssumeFailure(t, second, RestoreOptions{Target: target}, p1opts)
++	t.Logf("P1 restore finished at %v: err=%v", ev.since(), p1err)
++	<-p2done
++
++	ev.mu.Lock()
++	settleEnd := ev.lockSavedAt + witnessSettleDelay
++	ev.mu.Unlock()
++	witnessReport(t, ev, settleEnd)
++
++	if p2err != nil {
++		t.Fatalf("orchestration invalid (P2 prune must succeed in both trees): %v", p2err)
++	}
++
++	repository.TestSetLockTimeout(t, 0)
++	env.gopts.BackendTestHook = nil
++	testRunCheck(t, env.gopts)
++	t.Logf("repository intact after the race: check --read-data passes")
++
++	if p1err != nil {
++		t.Errorf("WRONG RESULT: restore failed although no other process held a lock when its lock was confirmed (stock succeeds): %v", p1err)
++	}
++}
++
++// Scenario C: P1 = backup, P2 = prune.
++func TestWitnessLockWaitStaleBackupVsPrune(t *testing.T) {
++	env, cleanup := withTestEnvironment(t)
++	defer cleanup()
++
++	testRunInit(t, env.gopts)
++	dir0 := filepath.Join(env.testdata, "d0")
++	dir1 := filepath.Join(env.testdata, "d1")
++	witnessWriteRandomFile(t, filepath.Join(dir0, "other"), 200*1024)
++	witnessWriteRandomFile(t, filepath.Join(dir1, "precious"), 200*1024)
++
++	// snapshot 0 = d0 (stays), snapshot 1 = d1 (forgotten below, not pruned)
++	testRunBackup(t, "", []string{dir0}, BackupOptions{}, env.gopts)
++	keep := testListSnapshots(t, env.gopts, 1)[0]
++	testRunBackup(t, "", []string{dir1}, BackupOptions{}, env.gopts)
++	for _, id := range testListSnapshots(t, env.gopts, 2) {
++		if id != keep {
++			testRunForget(t, env.gopts, ForgetOptions{}, id.String())
++		}
++	}
++	// d1's data and trees are now in the repository but unused: the next prune
++	// deletes them, the next backup of d1 needs them.
++
++	repository.TestSetLockTimeout(t, witnessSettleDelay)
++	defer repository.TestSetLockTimeout(t, 0)
++
++	ev := newWitnessEvents()
++	p1opts, p2opts := witnessHooks(env, ev)
++
++	var p2err error
++	p2done := make(chan struct{})
++	go func() {
++		defer close(p2done)
++		<-ev.lockSaveBegin
++		p2err = withTermStatus(t, p2opts, func(ctx context.Context, gopts global.Options) error {
++			return runPrune(context.TODO(), PruneOptions{MaxUnused: "0"}, gopts, gopts.Term)
++		})
++		t.Logf("P2 prune finished at %v: err=%v", ev.since(), p2err)
++	}()
++
++	p1err := testRunBackupAssumeFailure(t, "", []string{dir1}, BackupOptions{}, p1opts)
++	t.Logf("P1 backup finished at %v: err=%v", ev.since(), p1err)
++	<-p2done
++
++	ev.mu.Lock()
++	settleEnd := ev.lockSavedAt + witnessSettleDelay
++	ev.mu.Unlock()
++	witnessReport(t, ev, settleEnd)
++
++	if p2err != nil {
++		t.Fatalf("orchestration invalid (P2 prune must succeed in both trees): %v", p2err)
++	}
++	if p1err != nil {
++		t.Fatalf("P1 backup failed (not the scenario under test): %v", p1err)
++	}
++
++	repository.TestSetLockTimeout(t, 0)
++	env.gopts.BackendTestHook = nil
++	testListSnapshots(t, env.gopts, 2)
++	stdout, stderr, checkErr := testRunCheckOutput(t, env.gopts, false)
++	t.Logf("check --read-data after the race: err=%v", checkErr)
++	if checkErr != nil {
++		t.Logf("check stdout: %s", stdout)
++		t.Logf("check stderr: %s", stderr)
++		t.Errorf("DATA LOSS: the backup reported success, but its snapshot references data the concurrent prune deleted (stock uploads the data again and check passes): %v", checkErr)
++	}
++}

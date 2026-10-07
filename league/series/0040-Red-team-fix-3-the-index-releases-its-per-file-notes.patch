@@ -1,0 +1,129 @@
+From 28c859c5c7e962b3d0b9b5df1ae2c919ded6e95f Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:19:27 +0000
+Subject: [PATCH 40/49] Red team fix 3: the index releases its per-file notes
+ when it is cleared
+
+The notes of the loaded index files (pack IDs and blob counts, used by the
+index rewrite) were kept when the index was cleared and loaded again, so a
+long-lived process that sees index files replaced (mount --no-lock beside a
+prune) kept one note for every index file it had ever loaded. clear now
+releases them; the files loaded afterwards are noted again. Rewrite decides
+which files it keeps before it clears the index, from the same notes as
+before.
+
+Test (seat 2 finding 5, carried in): TestIndexNotesReleasedOnReload fails
+before this commit (100 notes for one live file) and passes after.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../index/index_notes_release_test.go         | 64 +++++++++++++++++++
+ internal/repository/index/master_index.go     | 10 ++-
+ 2 files changed, 71 insertions(+), 3 deletions(-)
+ create mode 100644 internal/repository/index/index_notes_release_test.go
+
+diff --git a/internal/repository/index/index_notes_release_test.go b/internal/repository/index/index_notes_release_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb3a8b41739a075e779805e4ae6e49eabf2e92fb
+--- /dev/null
++++ b/internal/repository/index/index_notes_release_test.go
+@@ -0,0 +1,64 @@
++package index
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"testing"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++type replacedIndexFiles map[restic.ID][]byte
++
++func (f replacedIndexFiles) Connections() uint { return 2 }
++func (f replacedIndexFiles) List(ctx context.Context, typ restic.FileType, consume func(restic.ID, int64) error) error {
++	if typ != restic.IndexFile {
++		return fmt.Errorf("unexpected type %v", typ)
++	}
++	for id, content := range f {
++		if err := consume(id, int64(len(content))); err != nil {
++			return err
++		}
++	}
++	return ctx.Err()
++}
++func (f replacedIndexFiles) LoadUnpacked(ctx context.Context, typ restic.FileType, id restic.ID) ([]byte, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if typ != restic.IndexFile {
++		return nil, fmt.Errorf("unexpected type %v", typ)
++	}
++	content, ok := f[id]
++	if !ok {
++		return nil, fmt.Errorf("missing %s", id)
++	}
++	return bytes.Clone(content), nil
++}
++
++// Incremental Load explicitly supports replacement of old index files (e.g.
++// after a concurrent prune). The number of live files/blobs remains one.
++func TestIndexNotesReleasedOnReload(t *testing.T) {
++	mi := NewMasterIndex()
++	for round := 0; round < 100; round++ {
++		idx := NewIndex()
++		id := restic.Hash([]byte(fmt.Sprintf("generation %d", round)))
++		idx.StorePack(id, pack.Blobs{{BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: id}, Length: 64}})
++		var encoded bytes.Buffer
++		if err := idx.Encode(&encoded); err != nil {
++			t.Fatal(err)
++		}
++		fileID := restic.Hash(encoded.Bytes())
++		if err := mi.Load(context.Background(), replacedIndexFiles{fileID: encoded.Bytes()}, restic.NoopCounter, nil); err != nil {
++			t.Fatal(err)
++		}
++		if len(mi.IDs()) != 1 || mi.idx[0].Len(restic.DataBlob) != 1 {
++			t.Fatal("live index grew; probe did not isolate historical metadata")
++		}
++	}
++	if len(mi.fileNotes) != 1 {
++		t.Fatalf("one live index/blob retains %d historical index notes and their pack-ID slices", len(mi.fileNotes))
++	}
++}
+diff --git a/internal/repository/index/master_index.go b/internal/repository/index/master_index.go
+index 45ca0cdbac34e1819222b10f382b226646862ad0..3c5326f32133369e2e0f932303710b5cc3b2551a 100644
+--- a/internal/repository/index/master_index.go
++++ b/internal/repository/index/master_index.go
+@@ -33,6 +33,9 @@ func (mi *MasterIndex) clear() {
+ 	mi.idx = []*Index{NewIndex()}
+ 	mi.idx[0].Finalize()
+ 	mi.clearPendingBlobs()
++	// the notes describe the index files that were loaded into the state
++	// given up here; whatever is loaded next is noted again
++	mi.fileNotes = nil
+ }
+ 
+ func (mi *MasterIndex) clearPendingBlobs() {
+@@ -420,6 +423,10 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
+ 	}
+ 	p.SetMax(uint64(len(indexes)))
+ 
++	// index files that stay as they are need not be read again; this is
++	// decided from the notes of the loaded files, which clear releases
++	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
++
+ 	// reset state which is not necessary for Rewrite and just consumes a lot of memory
+ 	// the index state would be invalid after Rewrite completes anyways
+ 	mi.clear()
+@@ -433,9 +440,6 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
+ 	debug.Log("start rebuilding index of %d indexes, excludePacks: %v", len(indexes), excludePacks)
+ 	wg, wgCtx := errgroup.WithContext(ctx)
+ 
+-	// index files that stay as they are need not be read again
+-	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
+-
+ 	idxCh := make(chan restic.ID)
+ 	wg.Go(func() error {
+ 		defer close(idxCh)

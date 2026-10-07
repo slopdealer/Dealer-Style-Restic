@@ -1,0 +1,44 @@
+From bf039acc68ceb74d78d9a6a61d99dc5480b487e9 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 15:09:32 +0000
+Subject: [PATCH 17/49] R10 (3/3): internal/debug/debug.go back to stock
+ (IsEnabled has no caller left; the reordering in Log did nothing)
+
+---
+ internal/debug/debug.go | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/internal/debug/debug.go b/internal/debug/debug.go
+index 82540ed3d8b1810f064e62d105be2da1b1043185..5e4f8aad0c3263512178db73be9da71c6065c213 100644
+--- a/internal/debug/debug.go
++++ b/internal/debug/debug.go
+@@ -36,11 +36,6 @@ func initDebug() bool {
+ 	return true
+ }
+ 
+-// IsEnabled reports whether this process will emit debug log records.
+-func IsEnabled() bool {
+-	return opts.isEnabled
+-}
+-
+ func initDebugLogger() {
+ 	debugfile := os.Getenv("DEBUG_LOG")
+ 	if debugfile == "" {
+@@ -191,15 +186,16 @@ func Log(f string, args ...any) {
+ 	pos := fmt.Sprintf("%s/%s:%d", dir, file, line)
+ 
+ 	formatString := fmt.Sprintf("%s\t%s\t%d\t%s", pos, fn, goroutine, f)
++
+ 	dbgprint := func() {
+ 		fmt.Fprintf(os.Stderr, formatString, args...)
+ 	}
+ 
+-	filename := fmt.Sprintf("%s/%s:%d", dir, file, line)
+ 	if opts.logger != nil {
+ 		opts.logger.Printf(formatString, args...)
+ 	}
+ 
++	filename := fmt.Sprintf("%s/%s:%d", dir, file, line)
+ 	if checkFilter(opts.files, filename) {
+ 		dbgprint()
+ 		return

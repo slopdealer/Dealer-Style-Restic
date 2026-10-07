@@ -1,0 +1,250 @@
+From 1c9678c88ecf2043e915efe81efefac4d91b94b7 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:08:37 +0000
+Subject: [PATCH 04/49] R5: index-load workers follow the backend's
+ connections, as in stock
+
+The worker count was min(connections+GOMAXPROCS, max(2, GOMAXPROCS)): on a
+machine with one or two CPUs two index files were downloaded at a time
+whatever the backend allowed (stock: all 5 connections of S3 or REST), and
+with four CPUs four instead of five.
+
+Now max(connections+min(GOMAXPROCS, 2), GOMAXPROCS): on one and two CPUs
+this is stock's connections+GOMAXPROCS; everywhere all connections can
+download while up to two index files are decoded; the count is never above
+stock's. Two connections on four CPUs (the local backend) keep four workers.
+
+The league's TestIndexLoadAdmissionAndCancellation asserted the removed cap
+(at most max(2, GOMAXPROCS) loads with 32 connections); its bound is now the
+worker count.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../index/index_load_concurrency_test.go      |   4 +-
+ .../repository/index/index_load_workers.go    |  19 +++
+ .../index/index_load_workers_test.go          | 159 ++++++++++++++++++
+ internal/repository/index/index_parallel.go   |   4 +-
+ 4 files changed, 182 insertions(+), 4 deletions(-)
+ create mode 100644 internal/repository/index/index_load_workers.go
+ create mode 100644 internal/repository/index/index_load_workers_test.go
+
+diff --git a/internal/repository/index/index_load_concurrency_test.go b/internal/repository/index/index_load_concurrency_test.go
+index 288bddd4fa7043e8fd01a4a538bed13c53d5c5f6..221c81f0983bb35a58d544191eb648b20290f4d7 100644
+--- a/internal/repository/index/index_load_concurrency_test.go
++++ b/internal/repository/index/index_load_concurrency_test.go
+@@ -52,7 +52,9 @@ func (l admissionTestLister) List(_ context.Context, _ restic.FileType, fn func(
+ }
+ 
+ func TestIndexLoadAdmissionAndCancellation(t *testing.T) {
+-	width := max(2, runtime.GOMAXPROCS(0))
++	// the loader reports 32 connections: the admitted loads are the workers of
++	// ForAllIndexes, which follow the connections and not the CPU count alone
++	width := int(indexLoadWorkers((*admissionTestLoader)(nil).Connections(), runtime.GOMAXPROCS(0)))
+ 	for _, canceled := range []bool{false, true} {
+ 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ 		r := &admissionTestLoader{entered: make(chan struct{}, 4*width), release: make(chan struct{})}
+diff --git a/internal/repository/index/index_load_workers.go b/internal/repository/index/index_load_workers.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5685d2edd8598b4d6cb51575a06beba378b80325
+--- /dev/null
++++ b/internal/repository/index/index_load_workers.go
+@@ -0,0 +1,19 @@
++package index
++
++// indexLoadWorkers is the number of workers that load and decode index files.
++//
++// A worker either downloads an index file or decodes one. Downloads are
++// limited by the backend's connections, decoding by the CPUs. Stock runs
++// connections+GOMAXPROCS workers, so that all connections stay busy while
++// every CPU decodes. Here the decoders beyond the connections are limited to
++// two, because each worker also owns the plaintext of an index file until it
++// is decoded: connections downloads stay in flight while up to two files are
++// decoded, and with many CPUs there is still one worker per CPU.
++//
++// With one or two CPUs this is stock's count. It is never smaller than
++// connections+1, never larger than stock's, and it does not fall with the
++// number of CPUs: the downloads follow the connections.
++func indexLoadWorkers(connections uint, procs int) uint {
++	procs = max(procs, 1)
++	return max(connections+uint(min(procs, 2)), uint(procs))
++}
+diff --git a/internal/repository/index/index_load_workers_test.go b/internal/repository/index/index_load_workers_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e600ba9cae74d43460b7a22460594dd008584294
+--- /dev/null
++++ b/internal/repository/index/index_load_workers_test.go
+@@ -0,0 +1,159 @@
++package index
++
++import (
++	"bytes"
++	"context"
++	"runtime"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/restic"
++)
++
++func TestIndexLoadWorkers(t *testing.T) {
++	stock := func(connections uint, procs int) uint { return connections + uint(procs) }
++
++	for connections := uint(1); connections <= 16; connections++ {
++		for procs := 1; procs <= 64; procs++ {
++			got := indexLoadWorkers(connections, procs)
++			// one and two CPUs: exactly stock
++			if procs <= 2 && got != stock(connections, procs) {
++				t.Errorf("connections=%d procs=%d: %d workers, stock has %d", connections, procs, got, stock(connections, procs))
++			}
++			// every connection can download while an index file is decoded
++			if got < connections+1 {
++				t.Errorf("connections=%d procs=%d: %d workers cannot keep %d downloads in flight", connections, procs, got, connections)
++			}
++			if got > stock(connections, procs) {
++				t.Errorf("connections=%d procs=%d: %d workers, more than stock's %d", connections, procs, got, stock(connections, procs))
++			}
++			if got < uint(procs) {
++				t.Errorf("connections=%d procs=%d: %d workers, fewer than CPUs", connections, procs, got)
++			}
++			// fewer CPUs must never mean fewer downloads than with more CPUs allows
++			if procs > 1 && min(got, connections) < min(indexLoadWorkers(connections, procs-1), connections) {
++				t.Errorf("connections=%d: download slots fall from %d to %d CPUs", connections, procs-1, procs)
++			}
++		}
++	}
++
++	for _, c := range []struct {
++		connections uint
++		procs       int
++		want        uint
++	}{
++		{2, 1, 3}, {2, 2, 4}, {5, 1, 6}, {5, 2, 7}, // as stock
++		{2, 4, 4}, // local backend, four CPUs: unchanged by this repair
++		{5, 4, 7}, {5, 96, 96}, {2, 0, 3},
++	} {
++		if got := indexLoadWorkers(c.connections, c.procs); got != c.want {
++			t.Errorf("connections=%d procs=%d: %d workers, want %d", c.connections, c.procs, got, c.want)
++		}
++	}
++}
++
++// connectionLimitedIndexRepo serves the same index file under many names and
++// admits as many loads at a time as it has connections, like a backend.
++type connectionLimitedIndexRepo struct {
++	connections uint
++	files       int
++	index       []byte
++
++	slots chan struct{}
++
++	mu       sync.Mutex
++	inFlight uint
++	maxSeen  uint
++	full     chan struct{}
++	fullOnce sync.Once
++}
++
++func (r *connectionLimitedIndexRepo) Connections() uint { return r.connections }
++
++func (r *connectionLimitedIndexRepo) List(ctx context.Context, _ restic.FileType, fn func(restic.ID, int64) error) error {
++	for i := 0; i < r.files; i++ {
++		if ctx.Err() != nil {
++			return ctx.Err()
++		}
++		if err := fn(restic.Hash([]byte{byte(i), byte(i >> 8)}), int64(len(r.index))); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func (r *connectionLimitedIndexRepo) LoadUnpacked(ctx context.Context, _ restic.FileType, _ restic.ID) ([]byte, error) {
++	select {
++	case r.slots <- struct{}{}:
++	case <-ctx.Done():
++		return nil, ctx.Err()
++	}
++	defer func() { <-r.slots }()
++
++	r.mu.Lock()
++	r.inFlight++
++	r.maxSeen = max(r.maxSeen, r.inFlight)
++	if r.inFlight == r.connections {
++		r.fullOnce.Do(func() { close(r.full) })
++	}
++	r.mu.Unlock()
++
++	// a download takes a while: stay until every connection is in use
++	select {
++	case <-r.full:
++	case <-time.After(2 * time.Second):
++	case <-ctx.Done():
++	}
++
++	r.mu.Lock()
++	r.inFlight--
++	r.mu.Unlock()
++	return bytes.Clone(r.index), ctx.Err()
++}
++
++// The number of index files that are downloaded at the same time is the
++// backend's connection count, also on a machine with one or two CPUs.
++func TestForAllIndexesDownloadsOnEveryConnection(t *testing.T) {
++	var encoded bytes.Buffer
++	idx := NewIndex()
++	idx.Finalize()
++	if err := idx.Encode(&encoded); err != nil {
++		t.Fatal(err)
++	}
++
++	for _, procs := range []int{1, 2, 4} {
++		for _, connections := range []uint{2, 5} {
++			old := runtime.GOMAXPROCS(procs)
++			repo := &connectionLimitedIndexRepo{
++				connections: connections,
++				files:       40,
++				index:       encoded.Bytes(),
++				slots:       make(chan struct{}, connections),
++				full:        make(chan struct{}),
++			}
++			seen := 0
++			err := ForAllIndexes(context.Background(), repo, repo, func(_ restic.ID, idx *Index, err error) error {
++				if err != nil {
++					return err
++				}
++				if idx == nil {
++					t.Error("no index")
++				}
++				seen++
++				return nil
++			})
++			runtime.GOMAXPROCS(old)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if seen != repo.files {
++				t.Errorf("GOMAXPROCS=%d connections=%d: %d of %d index files delivered", procs, connections, seen, repo.files)
++			}
++			if repo.maxSeen != connections {
++				t.Errorf("GOMAXPROCS=%d connections=%d: at most %d index files were downloaded at the same time, stock downloads %d",
++					procs, connections, repo.maxSeen, connections)
++			}
++		}
++	}
++}
+diff --git a/internal/repository/index/index_parallel.go b/internal/repository/index/index_parallel.go
+index c28eef884525fd45ae2196c600642c04397ce248..6fee0742b7c10e0c1c319655d628af5ec5a851c6 100644
+--- a/internal/repository/index/index_parallel.go
++++ b/internal/repository/index/index_parallel.go
+@@ -16,9 +16,7 @@ func ForAllIndexes(ctx context.Context, lister restic.Lister, repo restic.Loader
+ 
+ 	// decoding an index can take quite some time such that this can be both CPU- or IO-bound
+ 	// Each active load also owns decompressed plaintext until decoding completes.
+-	// Keep enough workers to use the CPUs, without adding another connection's
+-	// worth of transient plaintext. Two workers still overlap IO on one core.
+-	workerCount := min(repo.Connections()+uint(runtime.GOMAXPROCS(0)), uint(max(2, runtime.GOMAXPROCS(0))))
++	workerCount := indexLoadWorkers(repo.Connections(), runtime.GOMAXPROCS(0))
+ 
+ 	var m sync.Mutex
+ 	return restic.ParallelList(ctx, lister, restic.IndexFile, workerCount, func(ctx context.Context, id restic.ID, size int64) error {

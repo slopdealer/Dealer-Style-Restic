@@ -1,0 +1,44 @@
+{
+ "check": "x11",
+ "title": "restores of 0.6, 1.0 and 2.0 million directories: wall time and peak RSS in rotated order, all CPUs and four cores",
+ "verdict": "PASS",
+ "summary": "rotated order; median wall time and peak RSS: 606060 dirs, all 16 check CPUs: stock 68.0 s / 58.5 MiB, tree 75.3 s / 66.0 MiB (+10.7%)",
+ "tree": "/opt/league/restic-final/trees/rc-8",
+ "label": "final3-b8cf439",
+ "seconds": 620,
+ "numbers": {
+  "table": {
+   "606060 | all 16 check CPUs | stock": {
+    "seconds": [
+     68.2,
+     68.0,
+     67.8
+    ],
+    "median_seconds": 68.0,
+    "cpu_seconds_median": 71.4,
+    "rss_mib_max": 58.5,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 0.0
+   },
+   "606060 | all 16 check CPUs | tree": {
+    "seconds": [
+     75.3,
+     74.7,
+     75.6
+    ],
+    "median_seconds": 75.3,
+    "cpu_seconds_median": 98.7,
+    "rss_mib_max": 66.0,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 10.7
+   }
+  }
+ },
+ "fails": [],
+ "notes": [],
+ "finished_at": "2026-10-07T20:48:09Z"
+}

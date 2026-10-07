@@ -1,0 +1,429 @@
+From 05a104a4c2b79ad0589dc14e7674e29f5e0f1b97 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:18:06 +0000
+Subject: [PATCH 39/49] Red team fix 8: collected terminal output keeps the
+ message boundaries
+
+Output for a regular file is collected and written in one call. When that
+call failed, the remainder was cut by lines: a write that stopped exactly at
+the end of a message cost the next message, which stock writes, and a message
+of several lines lost only one line where stock gives up the message.
+
+The batch now carries the offset at which each message ends, from Print and
+from the output writer (stock prints the complete lines of one Write as one
+message). After a failed write the message in which it stopped is given up
+and every later message is written once on its own. A write that stopped
+exactly between two messages stopped in none, so the next one is written;
+when that write repeats the reported error it is the same failure (a disk
+that is full fails the next message with nothing written, in stock too) and
+is reported once.
+
+Tests: TestBatchErrorAtMessageBoundary (seat 3 finding 3, carried in; the
+call passes the message ends) fails before and passes after;
+TestBatchErrorFollowsMessagesNotLines, TestBatchOnFullDiskFollowsMessages and
+TestOutputWriterKeepsMessageOfOneWrite compare file content and reports with
+stock's one write per message for every failing byte.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/ui/termstatus/status.go              |  92 +++++++---
+ .../termstatus/status_batch_boundary_test.go  | 164 ++++++++++++++++++
+ internal/ui/termstatus/stdio_wrapper.go       |  25 ++-
+ 3 files changed, 254 insertions(+), 27 deletions(-)
+ create mode 100644 internal/ui/termstatus/status_batch_boundary_test.go
+
+diff --git a/internal/ui/termstatus/status.go b/internal/ui/termstatus/status.go
+index fa16239f97a7db2a2a607a0a869debe9c41852cb..4832abab51b8d7f34ee4020ce06bc5f508152b92 100644
+--- a/internal/ui/termstatus/status.go
++++ b/internal/ui/termstatus/status.go
+@@ -2,7 +2,6 @@ package termstatus
+ 
+ import (
+ 	"bufio"
+-	"bytes"
+ 	"context"
+ 	"fmt"
+ 	"io"
+@@ -53,7 +52,10 @@ type terminal struct {
+ }
+ 
+ type message struct {
+-	line    string
++	line string
++	// ends is set when line holds several messages of stock, collected by the
++	// output writer: the offset at which each of them ends
++	ends    []int
+ 	err     bool
+ 	barrier chan struct{}
+ }
+@@ -200,9 +202,16 @@ func (t *terminal) OutputWriter() io.Writer {
+ 	defer t.outputMu.Unlock()
+ 
+ 	t.outputWriterOnce.Do(func() {
+-		t.outputWriter = newTerminalLineWriter(func(line string) {
++		w := newTerminalLineWriter(func(line string) {
+ 			t.enqueueOutput(line, false)
+ 		}, &t.outputMu, t.batchStdout, t.outputBatchWindow)
++		w.printMessages = func(batch string, ends []int) {
++			select {
++			case t.msg <- message{line: batch, ends: ends}:
++			case <-t.closed:
++			}
++		}
++		t.outputWriter = w
+ 	})
+ 	return t.outputWriter
+ }
+@@ -390,7 +399,9 @@ func findUnchangedLines(curr, last []string) []bool {
+ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 	var lastStatus []string
+ 	// batch holds the messages collected for one stream, batchErr says which
++	// and batchEnds where each message ends in it
+ 	var batch []byte
++	var batchEnds []int
+ 	var batchErr bool
+ 	var batchTimer *time.Timer
+ 	var batchTimerC <-chan time.Time
+@@ -431,8 +442,9 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 		if batchErr {
+ 			dst = t.errWriter
+ 		}
+-		t.writeBatch(dst, batch)
++		t.writeBatch(dst, batch, batchEnds)
+ 		batch = batch[:0]
++		batchEnds = batchEnds[:0]
+ 	}
+ 	for {
+ 		select {
+@@ -458,7 +470,14 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 				if batch == nil {
+ 					batch = make([]byte, 0, maxOutputBatchSize)
+ 				}
++				base := len(batch)
+ 				batch = append(batch, msg.line...)
++				for _, end := range msg.ends {
++					batchEnds = append(batchEnds, base+end)
++				}
++				if msg.ends == nil {
++					batchEnds = append(batchEnds, len(batch))
++				}
+ 				batchErr = msg.err
+ 				startBatchTimer()
+ 				continue
+@@ -471,6 +490,10 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 				dst = t.wr
+ 			}
+ 
++			if msg.ends != nil {
++				t.writeBatch(dst, []byte(msg.line), msg.ends)
++				continue
++			}
+ 			_, err := io.WriteString(dst, msg.line)
+ 			t.logWriteErr(err)
+ 
+@@ -494,35 +517,54 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 	}
+ }
+ 
+-// writeBatch writes the messages collected for one stream. A writer that works
+-// gets them in one call. When that call fails, the outcome is the one of
+-// writing line by line, which is what stock does with these messages: the
+-// error is reported, the line in which the write stopped is given up, and
+-// every later line is written once on its own, each failure reported. No byte
+-// is written twice and nothing is kept for another attempt. As in stock, the
+-// number of bytes a writer reports is not examined when it reports no error.
+-func (t *terminal) writeBatch(dst io.Writer, batch []byte) {
++// writeBatch writes the messages collected for one stream; ends holds the
++// offset at which each message ends. A writer that works gets them in one
++// call. When that call fails, the outcome is the one of writing message by
++// message, which is what stock does: the error is reported, the message in
++// which the write stopped is given up, and every later message is written once
++// on its own, each failure reported. A write that stopped exactly between two
++// messages stopped in none: the message after it is written like every later
++// one. No byte is written twice and nothing is kept for another attempt. As in
++// stock, the number of bytes a writer reports is not examined when it reports
++// no error.
++func (t *terminal) writeBatch(dst io.Writer, batch []byte, ends []int) {
+ 	n, err := dst.Write(batch)
+ 	if err == nil {
+ 		return
+ 	}
+ 	t.logWriteErr(err)
+ 
+-	rest := batch[min(max(n, 0), len(batch)):]
+-	// the line that was being written is lost, like a message in stock
+-	i := bytes.IndexByte(rest, '\n')
+-	if i < 0 {
+-		return
+-	}
+-	rest = rest[i+1:]
+-	for len(rest) > 0 {
+-		end := bytes.IndexByte(rest, '\n') + 1
+-		if end == 0 {
+-			end = len(rest)
++	n = min(max(n, 0), len(batch))
++	// next is the first message that has not been written completely
++	next := 0
++	for next < len(ends) && ends[next] <= n {
++		next++
++	}
++	start := 0
++	if next > 0 {
++		start = ends[next-1]
++	}
++	switch {
++	case n > start || next == 0:
++		// the message in which the write stopped is lost, like a message in
++		// stock; so is the first one when nothing was written at all
++		next++
++	case next < len(ends):
++		// The write stopped exactly between two messages. Stock either got
++		// this error with the message before, which is complete, and then
++		// wrote the next one; or it got the error for the next one, of which
++		// nothing was written. The next message is therefore written on its
++		// own, and a failure that repeats the reported one is the same
++		// failure, not a second one.
++		_, again := dst.Write(batch[start:ends[next]])
++		if again != nil && again.Error() != err.Error() {
++			t.logWriteErr(again)
+ 		}
+-		_, err := dst.Write(rest[:end])
++		next++
++	}
++	for ; next < len(ends); next++ {
++		_, err := dst.Write(batch[ends[next-1]:ends[next]])
+ 		t.logWriteErr(err)
+-		rest = rest[end:]
+ 	}
+ }
+ 
+diff --git a/internal/ui/termstatus/status_batch_boundary_test.go b/internal/ui/termstatus/status_batch_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..61ad4c27ec3a411b28ccc0d9b9f480da0444f8c9
+--- /dev/null
++++ b/internal/ui/termstatus/status_batch_boundary_test.go
+@@ -0,0 +1,164 @@
++package termstatus
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"io"
++	"testing"
++	"time"
++)
++
++// boundaryWriter fails its first Write after taking limit bytes of it and
++// works from then on.
++type boundaryWriter struct {
++	bytes.Buffer
++	first bool
++	limit int
++}
++
++func (w *boundaryWriter) Write(p []byte) (int, error) {
++	if !w.first {
++		w.first = true
++		n := min(w.limit, len(p))
++		_, _ = w.Buffer.Write(p[:n])
++		return n, errors.New("injected disk-full error")
++	}
++	return w.Buffer.Write(p)
++}
++
++// TestBatchErrorAtMessageBoundary is the red team's test (seat 3, finding 3):
++// a write error that lands exactly on a message boundary must not cost the
++// next message, which stock writes.
++func TestBatchErrorAtMessageBoundary(t *testing.T) {
++	const first = "first\n"
++	const second = "second\n"
++	stock := &boundaryWriter{limit: len(first)}
++	// The exact upstream runWithoutStatus operations for two Print calls.
++	_, _ = io.WriteString(struct{ io.Writer }{stock}, first)
++	_, _ = io.WriteString(struct{ io.Writer }{stock}, second)
++	if stock.String() != first+second {
++		t.Fatalf("invalid upstream control: %q", stock.String())
++	}
++	modified := &boundaryWriter{limit: len(first)}
++	var stderr bytes.Buffer
++	term := new(nil, modified, &stderr, true)
++	term.writeBatch(modified, []byte(first+second), []int{len(first), len(first) + len(second)})
++	if modified.String() != stock.String() {
++		t.Fatalf("upstream writes %q; batching writes %q; diagnostics=%q", stock.String(), modified.String(), stderr.String())
++	}
++}
++
++// offsetWriter fails the Write that reaches its limit, after taking the bytes
++// up to the limit, and works from then on.
++type offsetWriter struct {
++	bytes.Buffer
++	tripped bool
++	limit   int
++}
++
++func (w *offsetWriter) Write(p []byte) (int, error) {
++	if !w.tripped && w.Len()+len(p) >= w.limit {
++		w.tripped = true
++		n := w.limit - w.Len()
++		_, _ = w.Buffer.Write(p[:n])
++		return n, errors.New("injected disk-full error")
++	}
++	return w.Buffer.Write(p)
++}
++
++// TestBatchErrorFollowsMessagesNotLines compares the batch with stock's one
++// write per message for every offset at which the output can fail, with
++// messages that hold more than one line: what is written and what is reported
++// must be the same.
++func TestBatchErrorFollowsMessagesNotLines(t *testing.T) {
++	messages := []string{"one\n", "two\nstill two\n", "three\n", "\n", "five\nfive\nfive\n"}
++	var batch []byte
++	var ends []int
++	for _, msg := range messages {
++		batch = append(batch, msg...)
++		ends = append(ends, len(batch))
++	}
++	for limit := 0; limit <= len(batch); limit++ {
++		stock := &offsetWriter{limit: limit}
++		var stockErr bytes.Buffer
++		stockTerm := new(nil, stock, &stockErr, true)
++		for _, msg := range messages {
++			// the upstream runWithoutStatus operations for one Print call
++			_, err := io.WriteString(struct{ io.Writer }{stock}, msg)
++			stockTerm.logWriteErr(err)
++		}
++
++		modified := &offsetWriter{limit: limit}
++		var stderr bytes.Buffer
++		term := new(nil, modified, &stderr, true)
++		term.writeBatch(modified, batch, ends)
++		if modified.String() != stock.String() {
++			t.Fatalf("failure at byte %d: stock writes %q; batching writes %q", limit, stock.String(), modified.String())
++		}
++		if stderr.String() != stockErr.String() {
++			t.Fatalf("failure at byte %d: stock reports %q; batching reports %q", limit, stockErr.String(), stderr.String())
++		}
++	}
++}
++
++// A disk that fills up fails every write from the byte at which it is full.
++// For every such byte the batch must leave the file and the reports of stock,
++// which makes one write per message.
++func TestBatchOnFullDiskFollowsMessages(t *testing.T) {
++	messages := []string{"one\n", "two\nstill two\n", "three\n", "\n", "five\nfive\nfive\n"}
++	var batch []byte
++	var ends []int
++	for _, msg := range messages {
++		batch = append(batch, msg...)
++		ends = append(ends, len(batch))
++	}
++	for free := 0; free <= len(batch); free++ {
++		stock := &quotaWriter{free: free}
++		var stockErr bytes.Buffer
++		stockTerm := new(nil, stock, &stockErr, true)
++		for _, msg := range messages {
++			_, err := io.WriteString(struct{ io.Writer }{stock}, msg)
++			stockTerm.logWriteErr(err)
++		}
++
++		modified := &quotaWriter{free: free}
++		var stderr bytes.Buffer
++		term := new(nil, modified, &stderr, true)
++		term.writeBatch(modified, batch, ends)
++		if !bytes.Equal(modified.data, stock.data) {
++			t.Fatalf("%d bytes free: stock leaves %q; batching leaves %q", free, stock.data, modified.data)
++		}
++		if stderr.String() != stockErr.String() {
++			t.Fatalf("%d bytes free: stock reports %q; batching reports %q", free, stockErr.String(), stderr.String())
++		}
++	}
++}
++
++// The complete lines of one Write to the output writer are one message in
++// stock. Collected with other messages they stay one: a write that stops in
++// its first line loses its second line too, and the next message is written.
++func TestOutputWriterKeepsMessageOfOneWrite(t *testing.T) {
++	const first, second = "a1\na2\n", "b\n"
++	for limit := 0; limit <= len(first)+len(second); limit++ {
++		stock := &offsetWriter{limit: limit}
++		_, _ = io.WriteString(struct{ io.Writer }{stock}, first)
++		_, _ = io.WriteString(struct{ io.Writer }{stock}, second)
++
++		modified := &offsetWriter{limit: limit}
++		var stderr bytes.Buffer
++		term := new(nil, modified, &stderr, true)
++		term.batchStdout = true
++		term.outputBatchWindow = time.Hour
++		ctx, cancel := context.WithCancel(context.Background())
++		go term.Run(ctx)
++		_, _ = term.OutputWriter().Write([]byte(first))
++		_, _ = term.OutputWriter().Write([]byte(second))
++		term.Flush()
++		cancel()
++		<-term.closed
++		if modified.String() != stock.String() {
++			t.Fatalf("failure at byte %d: stock writes %q; the collected output is %q", limit, stock.String(), modified.String())
++		}
++	}
++}
+diff --git a/internal/ui/termstatus/stdio_wrapper.go b/internal/ui/termstatus/stdio_wrapper.go
+index 541b8ad5ef8781b0227b736cdc815eb419811dc4..c670db565ceb6e510416ad1e1c21dd747773a6f4 100644
+--- a/internal/ui/termstatus/stdio_wrapper.go
++++ b/internal/ui/termstatus/stdio_wrapper.go
+@@ -18,10 +18,15 @@ type lineWriter struct {
+ 	timer       *time.Timer
+ 	lastWrite   time.Time
+ 	batch       []byte
+-	closed      bool
++	// batchEnds holds the offset in batch at which each message of stock
++	// ends: stock prints the complete lines of one Write as one message
++	batchEnds []int
++	closed    bool
+ 
+ 	buf   bytes.Buffer
+ 	print func(string)
++	// printMessages, when set, takes a batch together with its message ends
++	printMessages func(string, []int)
+ }
+ 
+ var _ io.WriteCloser = &lineWriter{}
+@@ -79,6 +84,7 @@ func (w *lineWriter) Write(data []byte) (n int, err error) {
+ 	}
+ 	if start > 0 {
+ 		w.buf.Next(start)
++		w.endMessageLocked()
+ 	}
+ 	if len(w.batch) > 0 {
+ 		w.scheduleIdleLocked()
+@@ -172,14 +178,29 @@ func (w *lineWriter) flushIdle() {
+ 	w.flushBatchLocked()
+ }
+ 
++// endMessageLocked notes that the lines collected so far end a message.
++func (w *lineWriter) endMessageLocked() {
++	if n := len(w.batch); n > 0 && (len(w.batchEnds) == 0 || w.batchEnds[len(w.batchEnds)-1] != n) {
++		w.batchEnds = append(w.batchEnds, n)
++	}
++}
++
+ func (w *lineWriter) flushBatchLocked() {
+ 	if len(w.batch) == 0 {
+ 		return
+ 	}
+ 	w.stopTimerLocked()
++	w.endMessageLocked()
+ 	line := string(w.batch)
+ 	w.batch = w.batch[:0]
+-	w.print(line)
++	if w.printMessages == nil {
++		w.batchEnds = w.batchEnds[:0]
++		w.print(line)
++		return
++	}
++	ends := append([]int(nil), w.batchEnds...)
++	w.batchEnds = w.batchEnds[:0]
++	w.printMessages(line, ends)
+ }
+ 
+ func (w *lineWriter) stopTimerLocked() {

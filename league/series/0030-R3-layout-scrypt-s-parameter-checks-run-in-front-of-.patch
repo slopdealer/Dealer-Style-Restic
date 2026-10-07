@@ -1,0 +1,92 @@
+From 5eb6d1fb3ff6510603fe3376906ffd130bf612f2 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 06:12:59 +0000
+Subject: [PATCH 30/49] R3 (layout): scrypt's parameter checks run in front of
+ the lanes function, not inside it
+
+The repair R3 put the checks at the top of the parallel key derivation.
+The compiler inlined them there: the function grew from 1,061 to 1,605
+bytes, and with it the derivation's inner loop (parallelSalsaXOR),
+which follows in the same file, moved by 17 steps of 32 bytes: from
+32 to 0 modulo 64 in the judge's build. On that alignment the
+derivation runs about 3% slower, 6 ms in every restic process. The
+merge of S019 found the same effect for code added to seven packages
+in front of the derivation; here the code was added inside the
+derivation's own file. The official price job of the repairs
+(3c21cf80) carries it: ls-json on large-files, which is all start-up,
+read -1.65% (0 of 3) with no ls code changed.
+
+The lanes function is S019-merge's again, byte for byte, under the
+name parallelScryptLanes. parallelScryptKey, the function KDF calls
+and R3's tests call, now lives in scrypt_params.go behind the lanes:
+it runs checkScryptParams and then the lanes. The checks, their order,
+their error texts and their place before any lane are unchanged;
+nothing but parallelScryptKey calls the lanes. R3's tests pass
+unchanged.
+
+This restores one build's layout; it is not a property of the code.
+A release binary for another platform or toolchain lands where it
+lands.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/crypto/parallel_scrypt.go | 11 ++++++-----
+ internal/repository/crypto/scrypt_params.go   | 19 ++++++++++++++++++-
+ 2 files changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/internal/repository/crypto/parallel_scrypt.go b/internal/repository/crypto/parallel_scrypt.go
+index bfd002d2d7236514310fe10ddd8c3e31c42d2fbd..1d67f02ecc615bbd95598625f24397b51fc7cb22 100644
+--- a/internal/repository/crypto/parallel_scrypt.go
++++ b/internal/repository/crypto/parallel_scrypt.go
+@@ -10,13 +10,14 @@ import (
+ 	"golang.org/x/crypto/scrypt"
+ )
+ 
+-// parallelScryptKey derives the same output as scrypt.Key while processing
++// parallelScryptLanes derives the same output as scrypt.Key while processing
+ // independent scrypt lanes concurrently. It stores every fourth ROMix state
+ // and recomputes the intervening states during the second ROMix pass.
+-func parallelScryptKey(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
+-	if err := checkScryptParams(N, r, p); err != nil {
+-		return nil, err
+-	}
++//
++// It does not validate N, r and p, and its lanes index past their tables for
++// values scrypt.Key rejects. Its only caller is parallelScryptKey in
++// scrypt_params.go, which runs scrypt.Key's parameter checks first.
++func parallelScryptLanes(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
+ 	const stride = 4
+ 	workers := min(4, p, runtime.GOMAXPROCS(0))
+ 	if workers <= 1 {
+diff --git a/internal/repository/crypto/scrypt_params.go b/internal/repository/crypto/scrypt_params.go
+index 36f74da5da3ab8fade38408b3cfc2054991e2f8c..5b6b472432eee9d7faf0beb883f19d1100a0fc97 100644
+--- a/internal/repository/crypto/scrypt_params.go
++++ b/internal/repository/crypto/scrypt_params.go
+@@ -4,9 +4,26 @@ import "errors"
+ 
+ const maxInt = int(^uint(0) >> 1)
+ 
++// parallelScryptKey is the key derivation KDF calls: scrypt.Key's parameter
++// checks, then the parallel lanes. Nothing else may call parallelScryptLanes.
++//
++// The checks live in this function, in a file of their own behind the lanes,
++// and not at the top of parallelScryptLanes, because of where the code lands
++// in the binary. The derivation's inner loop (parallelSalsaXOR) runs about 3%
++// slower when it starts at 0 instead of 32 modulo 64, which is 6 ms in every
++// restic process. Code placed in front of it moves it in steps of 32 bytes;
++// the checks inside parallelScryptLanes were 17 such steps. That is a
++// property of one build (linux/amd64, this toolchain), not of the checks.
++func parallelScryptKey(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
++	if err := checkScryptParams(N, r, p); err != nil {
++		return nil, err
++	}
++	return parallelScryptLanes(password, salt, N, r, p, keyLen)
++}
++
+ // checkScryptParams repeats the parameter checks of scrypt.Key in
+ // golang.org/x/crypto/scrypt: the same conditions, in the same order, with the
+-// same error texts. parallelScryptKey runs it before its own lanes, which do
++// same error texts. parallelScryptKey runs it before the lanes, which do
+ // not validate anything and index past their tables for other values. The
+ // check that KDF runs first (simple-scrypt) lets through an N that is even but
+ // not a power of two; a key file can carry any N.

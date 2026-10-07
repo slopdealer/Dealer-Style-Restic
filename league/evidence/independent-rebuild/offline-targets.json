@@ -1,0 +1,30 @@
+[
+  {
+    "target": "restic_0.19.1-dev-dealer.1_windows_amd64.exe",
+    "exit_code": 0,
+    "rebuilt_sha256": "7b4538e1902730a793542b28e881ce7193796105f8b08dd64a4c3646753e1382",
+    "published_sha256": "7b4538e1902730a793542b28e881ce7193796105f8b08dd64a4c3646753e1382",
+    "status": "MATCH"
+  },
+  {
+    "target": "restic_0.19.1-dev-dealer.1_linux_arm64",
+    "exit_code": 0,
+    "rebuilt_sha256": "7ed7c72be44fdbcb4eaa0935c4f674c1f7572c830a87f16a758d4dea28c087d5",
+    "published_sha256": "7ed7c72be44fdbcb4eaa0935c4f674c1f7572c830a87f16a758d4dea28c087d5",
+    "status": "MATCH"
+  },
+  {
+    "target": "restic_0.19.1-dev-dealer.1_darwin_amd64",
+    "exit_code": 0,
+    "rebuilt_sha256": "516332fc04af27fcf8816f7381efb867804e595faec8b25e32a1feeefa8bc010",
+    "published_sha256": "516332fc04af27fcf8816f7381efb867804e595faec8b25e32a1feeefa8bc010",
+    "status": "MATCH"
+  },
+  {
+    "target": "restic_0.19.1-dev-dealer.1_darwin_arm64",
+    "exit_code": 0,
+    "rebuilt_sha256": "e26c5e0bdcff313211874299bd0367f305d4ba14919839e0c643652713cc4c9a",
+    "published_sha256": "e26c5e0bdcff313211874299bd0367f305d4ba14919839e0c643652713cc4c9a",
+    "status": "MATCH"
+  }
+]

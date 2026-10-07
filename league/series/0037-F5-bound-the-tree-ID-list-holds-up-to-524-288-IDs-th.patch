@@ -1,0 +1,99 @@
+From 03d7373d2d4cdccdd1e53cb5f14f7a72a989a2a4 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 11:57:56 +0000
+Subject: [PATCH 37/49] F5 (bound): the tree-ID list holds up to 524,288 IDs,
+ the size at which nothing is lost that was measured
+
+The first form of the F5 fix bounded the list at 65,536 IDs (2 MiB).
+Measured afterwards with real binaries (linux/amd64, 4 CPUs, restore
+of 606,060 directories and three files, repository made by stock;
+wall seconds, two runs where two are given; peak RSS):
+
+  no bound (before F5)    52.8        80.0 MiB
+  524,288 IDs (16 MiB)    53.3, 51.2  57.0 MiB
+  262,144 IDs (8 MiB)     57.5, 58.4  56.2, 58.5 MiB
+  65,536 IDs (2 MiB)      74.0, 70.1  56.2 MiB
+  stock                   64.2        63.0 MiB
+
+Behind the end of the list the second pass loads every tree itself,
+which costs about 40 microseconds more per directory than the
+read-ahead. With 65,536 IDs a restore of half a million directories
+was 12% slower than stock, where the unbounded list had been 18%
+faster. The peak memory of the process is the key derivation at
+start-up (about 56 MiB), so a full list of 16 MiB does not show in it:
+57.0 MiB against 56.2. The bound is therefore set where the read-ahead
+is kept for snapshots of up to 524,288 directories and peak memory
+stays below stock's whatever the number of directories.
+
+Only the constant, its comment and the size the list test expects
+change. The mechanism and its tests are those of the F5 commit.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/restorer/tree_id_list.go      | 12 ++++++++++--
+ internal/restorer/tree_id_list_test.go |  8 ++++----
+ 2 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/internal/restorer/tree_id_list.go b/internal/restorer/tree_id_list.go
+index 00f8baecd974c7b9e7cc1c2e375f9b69de02f75f..eeafa5ad34818bf86c950240b07bd49acd1d2e95 100644
+--- a/internal/restorer/tree_id_list.go
++++ b/internal/restorer/tree_id_list.go
+@@ -3,7 +3,7 @@ package restorer
+ import "github.com/restic/restic/internal/restic"
+ 
+ // maxPrefetchTreeIDs bounds the list of tree IDs that the first pass of a
+-// restore records for the second pass's tree prefetch: 2 MiB of IDs.
++// restore records for the second pass's tree prefetch: 16 MiB of IDs.
+ //
+ // Stock keeps nothing per directory during a restore. The list used to hold
+ // one ID for every directory of the snapshot (32 bytes each, more while the
+@@ -18,7 +18,15 @@ import "github.com/restic/restic/internal/restic"
+ // needs it (restoreTreePrefetch.Load). So a snapshot with more directories
+ // than the bound restores as before, without the read-ahead for the trees
+ // past the bound; a snapshot with fewer is not affected at all.
+-const maxPrefetchTreeIDs = 1 << 16
++//
++// The size of the bound was measured (linux/amd64, 4 CPUs, restore of 606,060
++// directories and three files; wall seconds and peak RSS): no bound 53 s and
++// 80 MiB; 524,288 IDs 52 s and 57 MiB; 262,144 IDs 58 s and 57 MiB; 65,536
++// IDs 72 s and 56 MiB; stock 64 s and 63 MiB. Without the read-ahead the
++// second pass costs about 40 microseconds more per directory. The peak of the
++// process is the key derivation at start-up, so a full list of this size
++// does not show in it; a larger one would.
++const maxPrefetchTreeIDs = 1 << 19
+ 
+ // restoreTreeIDList is a list of tree IDs that never holds, and never
+ // allocates room for, more than limit IDs.
+diff --git a/internal/restorer/tree_id_list_test.go b/internal/restorer/tree_id_list_test.go
+index 352dcd909a0d2ff5d51c5dbdd08a1826aa3884dd..772577c138d62e36cc877079d164d349b39f1f37 100644
+--- a/internal/restorer/tree_id_list_test.go
++++ b/internal/restorer/tree_id_list_test.go
+@@ -29,7 +29,7 @@ func numberedTreeID(i int) (id restic.ID) {
+ // The list never holds more IDs than its limit and never allocates room for
+ // more, whatever is added; what it holds is the first IDs, in order.
+ func TestRestoreTreeIDListNeverExceedsItsLimit(t *testing.T) {
+-	for _, limit := range []int{0, 1, 2, 63, 64, 65, 1000, maxPrefetchTreeIDs} {
++	for _, limit := range []int{0, 1, 2, 63, 64, 65, 1000, 1 << 16, maxPrefetchTreeIDs} {
+ 		list := newRestoreTreeIDList(limit)
+ 		adds := 3*limit + 1000
+ 		for i := 0; i < adds; i++ {
+@@ -48,7 +48,7 @@ func TestRestoreTreeIDListNeverExceedsItsLimit(t *testing.T) {
+ 		}
+ 	}
+ 
+-	// two million directories against the production bound: 2 MiB, not 64
++	// two million directories against the production bound: 16 MiB, not 64
+ 	list := newRestoreTreeIDList(maxPrefetchTreeIDs)
+ 	for i := 0; i < 2_020_200; i++ {
+ 		list.add(numberedTreeID(i))
+@@ -56,8 +56,8 @@ func TestRestoreTreeIDListNeverExceedsItsLimit(t *testing.T) {
+ 	if len(list.ids) != maxPrefetchTreeIDs || cap(list.ids) != maxPrefetchTreeIDs {
+ 		t.Fatalf("2,020,200 additions: %d IDs kept with room for %d, the bound is %d", len(list.ids), cap(list.ids), maxPrefetchTreeIDs)
+ 	}
+-	if bytes := cap(list.ids) * len(restic.ID{}); bytes != 2<<20 {
+-		t.Fatalf("the full list takes %d bytes, expected 2 MiB", bytes)
++	if bytes := cap(list.ids) * len(restic.ID{}); bytes != 16<<20 {
++		t.Fatalf("the full list takes %d bytes, expected 16 MiB", bytes)
+ 	}
+ }
+ 

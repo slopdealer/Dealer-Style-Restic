@@ -1,0 +1,479 @@
+From fd3611ee7a15fc3f1403902515ae59d34ea62642 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:45:23 +0000
+Subject: [PATCH 45/49] Red team fix 4: the listings that validate lock-wait
+ reads are taken where stock lists
+
+Once the lock was confirmed, a goroutine listed the snapshot files and then
+the index files at once and decided from that what to keep of the reads of
+the wait. For restore that index listing came before the selected snapshot
+had been read, where stock lists the index files after it. On a backend
+whose listings lag behind, the index file of the newest snapshot could
+become visible in between: stock sees it and restores, this build had
+already decided on the older listing and failed on a healthy repository.
+
+The rule now holds for every command with wait work (backup, restore, ls,
+forget, prune): a listing that decides about reads of the wait is taken no
+earlier than the point at which stock lists that directory. The snapshot
+files are listed when the command asks for the listing, which is where it
+lists them in stock. The index files are listed when the command asks for
+the index, which is where stock calls LoadIndex: for restore, backup and
+forget after the snapshots were read. Nothing is listed at confirmation any
+more. With any backend this build knows at each point what stock knows
+there; what was read during the wait only saves the downloads.
+
+Tests (seat 1 R2, carried in): TestRestoreListsIndexAfterSnapshotRead (the
+restore command, production 200 ms delay) and
+TestLockWaitIndexListedAfterSnapshotRead fail before this commit and pass
+after. The reviewer's backend held the snapshot read until the early index
+listing had happened and failed after five seconds without one; here it
+goes on after 300 ms, since the listing no longer comes first.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ cmd/restic/lock_wait_duration_test.go   |  12 +-
+ cmd/restic/lock_wait_visibility_test.go | 210 ++++++++++++++++++++++++
+ cmd/restic/wait_index_load.go           | 133 +++++++--------
+ 3 files changed, 282 insertions(+), 73 deletions(-)
+ create mode 100644 cmd/restic/lock_wait_visibility_test.go
+
+diff --git a/cmd/restic/lock_wait_duration_test.go b/cmd/restic/lock_wait_duration_test.go
+index 4bfb6ce86a7a7f8ea2578d15539c2a03dc5eaa73..4a08ebe90eade70ac2eea0b95da2e609764c7d1d 100644
+--- a/cmd/restic/lock_wait_duration_test.go
++++ b/cmd/restic/lock_wait_duration_test.go
+@@ -210,8 +210,16 @@ func TestLockWaitIsNeverShortened(t *testing.T) {
+ 					p := &schedProc{spec: &schedProcSpec{kind: kind}, run: &schedRun{spec: spec}}
+ 					c := &schedCommand{p: p, repo: repo}
+ 					work := c.waitWork()
+-					unlock, lockCtx, lockErr := repository.LockRepoWithWaitWork(ctx, repo, kind.exclusive(), schedRetryLock, func(string) {}, func(string, ...any) {},
+-						func(lockCtx context.Context) func(bool) { return work(lockCtx, repo) })
++					var unlock func()
++					var lockCtx context.Context
++					var lockErr error
++					if work == nil {
++						// check has no wait work and takes the plain lock call
++						unlock, lockCtx, lockErr = repository.LockRepo(ctx, repo, kind.exclusive(), schedRetryLock, func(string) {}, func(string, ...any) {})
++					} else {
++						unlock, lockCtx, lockErr = repository.LockRepoWithWaitWork(ctx, repo, kind.exclusive(), schedRetryLock, func(string) {}, func(string, ...any) {},
++							func(lockCtx context.Context) func(bool) { return work(lockCtx, repo) })
++					}
+ 					returnedAt := probe.now()
+ 					probe.mu.Lock()
+ 					probe.returned = true
+diff --git a/cmd/restic/lock_wait_visibility_test.go b/cmd/restic/lock_wait_visibility_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f3904dbc530b7bfc4c3578be1d6c432598c6212
+--- /dev/null
++++ b/cmd/restic/lock_wait_visibility_test.go
+@@ -0,0 +1,210 @@
++package main
++
++import (
++	"context"
++	"io"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/data"
++	"github.com/restic/restic/internal/global"
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++	rtest "github.com/restic/restic/internal/test"
++)
++
++// indexVisibilityBackend models the visibility window of a completed
++// concurrent backup: its snapshot and packs are visible, but its new index
++// file is absent from early listings. The index listing catches up while the
++// command reads the content of the snapshot it selected. Stock lists the
++// index files after that read and sees the new one.
++//
++// With validated set, the snapshot read waits for the second index listing,
++// so that a build which lists the index files before the snapshot was read
++// gets to do so; when none comes for a while, the read goes on.
++type indexVisibilityBackend struct {
++	backend.Backend
++	mu            sync.Mutex
++	hidden        restic.IDSet
++	visible       bool
++	indexListings int
++	validated     chan struct{}
++	validatedOnce sync.Once
++}
++
++func (be *indexVisibilityBackend) List(ctx context.Context, typ backend.FileType, fn func(backend.FileInfo) error) error {
++	be.mu.Lock()
++	visible := be.visible
++	if typ == backend.IndexFile {
++		be.indexListings++
++	}
++	secondIndexList := typ == backend.IndexFile && be.indexListings == 2
++	be.mu.Unlock()
++	err := be.Backend.List(ctx, typ, func(fi backend.FileInfo) error {
++		if typ == backend.IndexFile && !visible {
++			id, err := restic.ParseID(fi.Name)
++			if err == nil && be.hidden.Has(id) {
++				return nil
++			}
++		}
++		return fn(fi)
++	})
++	if secondIndexList && be.validated != nil {
++		be.validatedOnce.Do(func() { close(be.validated) })
++	}
++	return err
++}
++
++func (be *indexVisibilityBackend) Load(ctx context.Context, h backend.Handle, n int, offset int64, fn func(io.Reader) error) error {
++	if h.Type == backend.SnapshotFile && be.validated != nil {
++		select {
++		case <-be.validated:
++		case <-ctx.Done():
++			return ctx.Err()
++		case <-time.After(300 * time.Millisecond):
++			// no index listing comes before the snapshot is read
++		}
++	}
++	err := be.Backend.Load(ctx, h, n, offset, fn)
++	if h.Type == backend.SnapshotFile && err == nil {
++		be.mu.Lock()
++		be.visible = true
++		be.mu.Unlock()
++	}
++	return err
++}
++
++// TestRestoreListsIndexAfterSnapshotRead is the red team's test (seat 1 R2)
++// with the restore command and the production settle delay: the index file
++// of the newest snapshot becomes visible while restore reads that snapshot.
++// Stock lists the index files afterwards and restores; so must this build.
++func TestRestoreListsIndexAfterSnapshotRead(t *testing.T) {
++	env, cleanup := withTestEnvironment(t)
++	defer cleanup()
++	env.gopts.NoCache = true
++	env.gopts.BackendTestHook = nil
++	testRunInit(t, env.gopts)
++	hidden := restic.NewIDSet()
++	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, opts global.Options) error {
++		writer, err := global.OpenRepository(ctx, opts, restic.NewNoopPrinter())
++		if err != nil {
++			return err
++		}
++		_, err = schedStoreSnapshot(ctx, writer, 45, []int{0}, time.Now().Add(-time.Hour))
++		if err != nil {
++			return err
++		}
++		previous := restic.NewIDSet()
++		if err := writer.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
++			previous.Insert(id)
++			return nil
++		}); err != nil {
++			return err
++		}
++		_, err = schedStoreSnapshot(ctx, writer, 45, []int{1}, time.Now())
++		if err != nil {
++			return err
++		}
++		return writer.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
++			if !previous.Has(id) {
++				hidden.Insert(id)
++			}
++			return nil
++		})
++	}))
++	if len(hidden) == 0 {
++		t.Fatal("fixture did not add an index")
++	}
++	env.gopts.BackendTestHook = func(be backend.Backend) (backend.Backend, error) {
++		return &indexVisibilityBackend{Backend: be, hidden: hidden, validated: make(chan struct{})}, nil
++	}
++	repository.TestSetLockTimeout(t, 200*time.Millisecond)
++	defer repository.TestSetLockTimeout(t, 0)
++	target := filepath.Join(env.base, "restore")
++	restoreError := testRunRestoreAssumeFailure(t, "latest", RestoreOptions{Target: target}, env.gopts)
++
++	// the same visibility without a settle delay, as the control
++	env.gopts.BackendTestHook = func(be backend.Backend) (backend.Backend, error) {
++		return &indexVisibilityBackend{Backend: be, hidden: hidden}, nil
++	}
++	repository.TestSetLockTimeout(t, 0)
++	controlTarget := filepath.Join(env.base, "control-restore")
++	rtest.OK(t, testRunRestoreAssumeFailure(t, "latest", RestoreOptions{Target: controlTarget}, env.gopts))
++	want, err := os.ReadFile(filepath.Join(controlTarget, "file-00"))
++	rtest.OK(t, err)
++	rtest.Equals(t, schedBlob(45, 1), want)
++
++	if restoreError != nil {
++		t.Fatalf("restore failed although the snapshot and all its data are present: %v", restoreError)
++	}
++	got, err := os.ReadFile(filepath.Join(target, "file-00"))
++	rtest.OK(t, err)
++	rtest.Equals(t, want, got)
++}
++
++// TestLockWaitIndexListedAfterSnapshotRead is the same schedule on the wait
++// work itself (seat 1 R2, lifecycle form).
++func TestLockWaitIndexListedAfterSnapshotRead(t *testing.T) {
++	ctx := context.Background()
++	writer, shared := repository.TestRepositoryWithBackend(t, nil, 2, repository.Options{})
++	_, err := schedStoreSnapshot(ctx, writer, 43, []int{0}, time.Now().Add(-time.Hour))
++	rtest.OK(t, err)
++	previousIndexes := restic.NewIDSet()
++	rtest.OK(t, writer.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
++		previousIndexes.Insert(id)
++		return nil
++	}))
++	_, err = schedStoreSnapshot(ctx, writer, 43, []int{1}, time.Now())
++	rtest.OK(t, err)
++	newIndexes := restic.NewIDSet()
++	rtest.OK(t, writer.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
++		if !previousIndexes.Has(id) {
++			newIndexes.Insert(id)
++		}
++		return nil
++	}))
++	if len(newIndexes) == 0 {
++		t.Fatal("new snapshot did not add an index file")
++	}
++
++	be := &indexVisibilityBackend{Backend: shared, hidden: newIndexes, validated: make(chan struct{})}
++	repo, err := schedOpenRepository(ctx, be)
++	rtest.OK(t, err)
++	load := startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
++	defer load.discard()
++	// the wait is over when the index of the wait has been listed and loaded
++	deadline := time.After(5 * time.Second)
++	for len(load.result) == 0 {
++		select {
++		case <-deadline:
++			t.Fatal("the index load of the wait did not finish")
++		default:
++			time.Sleep(time.Millisecond)
++		}
++	}
++	load.settle(true)
++	sn, _, err := (&data.SnapshotFilter{}).FindLatest(ctx, load.snapshotLister(repo), repo, "latest")
++	rtest.OK(t, err)
++	rtest.OK(t, load.consume(restic.NoopTerminalCounterFactory))
++	_, treeError := data.LoadTree(ctx, repo, *sn.Tree)
++
++	fresh, err := schedOpenRepository(ctx, &indexVisibilityBackend{Backend: shared, hidden: newIndexes})
++	rtest.OK(t, err)
++	// stock's order in restore: select and read the snapshot, then list and
++	// load the index, then read the selected tree
++	freshSnapshot, _, err := (&data.SnapshotFilter{}).FindLatest(ctx, fresh, fresh, "latest")
++	rtest.OK(t, err)
++	rtest.OK(t, fresh.LoadIndex(ctx, restic.NoopTerminalCounterFactory))
++	_, err = data.LoadTree(ctx, fresh, *freshSnapshot.Tree)
++	rtest.OK(t, err)
++	rtest.Equals(t, *freshSnapshot.ID(), *sn.ID())
++	if treeError != nil {
++		t.Fatalf("the selected snapshot cannot be read on a healthy repository: %v (index files %v, stock's order loads %v)",
++			treeError, repo.LoadedIndexIDs(), fresh.LoadedIndexIDs())
++	}
++	rtest.Equals(t, fresh.LoadedIndexIDs(), repo.LoadedIndexIDs())
++}
+diff --git a/cmd/restic/wait_index_load.go b/cmd/restic/wait_index_load.go
+index 8f0f8015180a29af0c78d78a6dd058917125547a..e4545dbce57b50bbaf4e569fb64246e69127cf31 100644
+--- a/cmd/restic/wait_index_load.go
++++ b/cmd/restic/wait_index_load.go
+@@ -16,7 +16,14 @@ import (
+ // reads nothing before the check.
+ //
+ // Nothing read during the wait is therefore used as it is. Once the lock is
+-// confirmed, the snapshot files and then the index files are listed again:
++// confirmed, the snapshot files and then the index files are listed again.
++// Each of the two listings is taken where the command takes it in stock and
++// no earlier: the snapshot files when the command selects its snapshots, the
++// index files when it loads the index, which for restore, backup and forget
++// is after it has read the snapshots it selected. With any backend, also one
++// whose listings lag behind what was written, this build therefore knows at
++// each of these points what stock knows there; what was read during the wait
++// only saves the downloads.
+ //
+ //   - The command always works with the snapshot listing taken after
+ //     confirmation.
+@@ -49,35 +56,14 @@ const (
+ 
+ var errLockWaitSnapshotListing = errors.New("the snapshot listing taken during the lock wait failed")
+ 
+-// lockWaitValidation is the comparison made after the lock is confirmed.
+-type lockWaitValidation struct {
+-	done chan struct{}
+-	// snapshots is the listing taken after confirmation. It is nil when the
+-	// command prepares no snapshot listing.
+-	snapshots *preparedSnapshots
+-	verdict   lockWaitVerdict
+-	// added: with extendLockWaitReads, the index files (ID to size) that are
+-	// listed now and were not when the index was loaded
+-	added map[restic.ID]int64
+-}
+-
+-// startLockWaitValidation must only be called once the lock is confirmed.
+-// join waits for the reads started during the wait and returns their error.
+-func startLockWaitValidation(ctx context.Context, repo *repository.Repository, waited *preparedSnapshots, join func() error) *lockWaitValidation {
+-	v := &lockWaitValidation{done: make(chan struct{})}
+-	if waited != nil {
+-		v.snapshots = newPreparedSnapshots()
+-	}
+-	go func() {
+-		defer close(v.done)
+-		// Snapshots are listed before the index here too.
+-		v.snapshots.list(ctx, repo)
+-		waitErr := join()
+-		v.verdict, v.added = validateLockWaitReads(ctx, repo, waited, v.snapshots, waitErr)
+-	}()
+-	return v
+-}
+-
++// validateLockWaitReads compares what was read during the wait with the
++// repository as it is now. It lists the index files, so it must be called
++// where the command loads the index, and only once the lock is confirmed.
++// waited and confirmed are the snapshot listings of the wait and of the
++// command (nil when the command prepares none), waitErr is the error of the
++// reads of the wait. With extendLockWaitReads the second result holds the
++// index files (ID to size) that are listed now and were not when the index
++// was loaded.
+ func validateLockWaitReads(ctx context.Context, repo *repository.Repository, waited, confirmed *preparedSnapshots, waitErr error) (lockWaitVerdict, map[restic.ID]int64) {
+ 	if waitErr != nil {
+ 		return rereadLockWaitReads, nil
+@@ -142,18 +128,22 @@ func snapshotsRemoved(ctx context.Context, before, after restic.Lister) (bool, e
+ // second lock check succeeded and the prepared state was validated against
+ // the repository as it is then.
+ type repositoryIndexLoad struct {
+-	ctx        context.Context // the lock's context
+-	loadCtx    context.Context
+-	repo       *repository.Repository
+-	cancel     context.CancelFunc
+-	result     chan error
+-	progress   *delayedTerminalCounterFactory
+-	snapshots  *preparedSnapshots  // listed during the wait; only compared
+-	validation *lockWaitValidation // exists once the lock is confirmed
+-	err        error
+-	done       bool
+-	used       bool
+-	reread     bool
++	ctx       context.Context // the lock's context
++	loadCtx   context.Context
++	repo      *repository.Repository
++	cancel    context.CancelFunc
++	result    chan error
++	progress  *delayedTerminalCounterFactory
++	snapshots *preparedSnapshots // listed during the wait; only compared
++	// confirmed is the listing the command took after the lock was confirmed
++	confirmed *preparedSnapshots
++	verdict   lockWaitVerdict
++	waitErr   error
++	err       error
++	joined    bool
++	done      bool
++	used      bool
++	reread    bool
+ }
+ 
+ func startRepositoryIndexLoad(ctx context.Context, repo *repository.Repository) *repositoryIndexLoad {
+@@ -190,15 +180,19 @@ func startRepositoryIndexLoadAfterSnapshots(ctx context.Context, repo *repositor
+ 	return load
+ }
+ 
+-// snapshotLister returns the snapshot listing taken after the lock was
+-// confirmed, or fallback if none was prepared or the listing failed. In the
+-// latter case the command lists again and reports the error as stock does.
++// snapshotLister lists the snapshot files and returns the listing, or
++// fallback if the load prepares none or the listing failed. In the latter
++// case the command lists again and reports the error as stock does. The
++// command calls it where it lists the snapshot files in stock; it must not be
++// called before the lock is confirmed.
+ func (load *repositoryIndexLoad) snapshotLister(fallback restic.Lister) restic.Lister {
+ 	if load == nil || load.snapshots == nil {
+ 		return fallback
+ 	}
+-	load.confirm()
+-	return load.validation.snapshots.get(fallback)
++	listed := newPreparedSnapshots()
++	listed.list(load.ctx, load.repo)
++	load.confirmed = listed
++	return listed.get(fallback)
+ }
+ 
+ // preparedSnapshots holds a snapshot file listing taken before the index
+@@ -273,49 +267,45 @@ func (load *repositoryIndexLoad) settle(confirmed bool) {
+ 	}
+ 	if !confirmed {
+ 		load.discard()
+-		return
+ 	}
+-	load.confirm()
++	// A confirmed lock starts nothing here: the listings that decide about
++	// what was read are taken where the command takes them.
+ }
+ 
+-// confirm starts the comparison with the repository as it is now. It must not
+-// be called before the lock is confirmed.
+-func (load *repositoryIndexLoad) confirm() {
+-	if load.validation != nil {
+-		return
+-	}
+-	load.validation = startLockWaitValidation(load.loadCtx, load.repo, load.snapshots, func() error {
+-		return <-load.result
+-	})
+-}
+-
+-// join waits for every goroutine of this load.
++// join waits for the reads of the wait.
+ func (load *repositoryIndexLoad) join() {
+-	if load.done {
++	if load.joined {
+ 		return
+ 	}
+-	if load.validation != nil {
+-		<-load.validation.done
+-	} else {
+-		<-load.result
+-	}
+-	load.done = true
++	load.waitErr = <-load.result
++	load.joined = true
+ }
+ 
++// consume returns the index to the command. The command calls it where it
++// loads the index in stock: the index files are listed here.
+ func (load *repositoryIndexLoad) consume(printer restic.TerminalCounterFactory) error {
+ 	load.used = true
+ 	if load.done {
+ 		return load.err
+ 	}
+-	load.confirm()
+ 	load.join()
+-	switch load.validation.verdict {
++	load.done = true
++	confirmed := load.confirmed
++	if load.snapshots != nil && confirmed == nil {
++		// The command has not listed the snapshot files. They are listed for
++		// the comparison only, before the index files as always.
++		confirmed = newPreparedSnapshots()
++		confirmed.list(load.ctx, load.repo)
++	}
++	var added map[restic.ID]int64
++	load.verdict, added = validateLockWaitReads(load.ctx, load.repo, load.snapshots, confirmed, load.waitErr)
++	switch load.verdict {
+ 	case keepLockWaitReads:
+ 		load.progress.activate(printer)
+ 	case extendLockWaitReads:
+ 		load.progress.activate(printer)
+ 		// only the added index files are read
+-		load.err = load.repo.LoadAddedIndexFiles(load.ctx, load.validation.added)
++		load.err = load.repo.LoadAddedIndexFiles(load.ctx, added)
+ 	default:
+ 		load.reread = true
+ 		load.repo.DiscardIndex()
+@@ -343,5 +333,6 @@ func (load *repositoryIndexLoad) discard() {
+ 	}
+ 	load.cancel()
+ 	load.join()
++	load.done = true
+ 	load.repo.DiscardIndex()
+ }

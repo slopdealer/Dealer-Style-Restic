@@ -1,0 +1,34 @@
+From 1c2a3a5ea3ab7716de53408850eeb13cc2dd9cae Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 06:42:09 +0000
+Subject: [PATCH 32/49] F1 (test): the index tests compile for 32 bit
+
+Release check F1. pack_membership_test.go built `uint(uint64(1) << 32)`
+inside a branch for 64-bit platforms; the compiler checks the constant
+conversion on every platform, so on linux/386 none of the package's
+tests could be built (stock's included). The value is now computed at
+run time. `GOARCH=386 go test ./internal/repository/index` passes.
+
+Test file only.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/index/pack_membership_test.go | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/internal/repository/index/pack_membership_test.go b/internal/repository/index/pack_membership_test.go
+index 449e294c3b87a36c18115a670aabf23bfa8c6aea..7ec5e774849cf327062adf02a297f07789b4eb63 100644
+--- a/internal/repository/index/pack_membership_test.go
++++ b/internal/repository/index/pack_membership_test.go
+@@ -78,7 +78,10 @@ func TestPackMembershipEqualityThroughMerge(t *testing.T) {
+ 		p[0] ^= 0x80
+ 		queries = append(queries, membershipQuery{p, q.blob})
+ 		if strconv.IntSize > 32 {
+-			wide := uint(uint64(1) << 32)
++			// a run-time value: the constant 1<<32 does not fit a 32-bit uint,
++			// and the compiler checks it there even inside this branch
++			one := uint64(1)
++			wide := uint(one << 32)
+ 			b = q.blob
+ 			b.Offset += wide
+ 			queries = append(queries, membershipQuery{q.packID, b})

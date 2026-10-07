@@ -1,0 +1,42 @@
+2026-10-07T18:27:02Z START x11 tree=/opt/league/restic-final/trees/rc-8 label=final3-b8cf439 quick=False
+2026-10-07T18:28:09Z 606060 directories and 3 files: snapshot written by stock
+2026-10-07T18:29:16Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 1, "binary": "stock", "position_in_round": 1, "rc": 0, "seconds": 66.5, "user_s": 28.2, "sys_s": 41.6, "rss_mib": 57.0}
+2026-10-07T18:30:49Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 1, "binary": "tree", "position_in_round": 2, "rc": 0, "seconds": 73.0, "user_s": 39.4, "sys_s": 56.8, "rss_mib": 58.1}
+2026-10-07T18:32:36Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 1, "binary": "rc7", "position_in_round": 3, "rc": 0, "seconds": 85.5, "user_s": 52.7, "sys_s": 65.8, "rss_mib": 57.5}
+2026-10-07T18:34:12Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 2, "binary": "tree", "position_in_round": 1, "rc": 0, "seconds": 74.7, "user_s": 39.8, "sys_s": 58.4, "rss_mib": 56.8}
+2026-10-07T18:35:58Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 2, "binary": "rc7", "position_in_round": 2, "rc": 0, "seconds": 85.6, "user_s": 52.5, "sys_s": 65.9, "rss_mib": 57.3}
+2026-10-07T18:37:27Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 2, "binary": "stock", "position_in_round": 3, "rc": 0, "seconds": 68.0, "user_s": 28.8, "sys_s": 42.6, "rss_mib": 56.2}
+2026-10-07T18:39:12Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 3, "binary": "rc7", "position_in_round": 1, "rc": 0, "seconds": 84.1, "user_s": 51.9, "sys_s": 64.8, "rss_mib": 56.9}
+2026-10-07T18:40:41Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 3, "binary": "stock", "position_in_round": 2, "rc": 0, "seconds": 67.2, "user_s": 28.6, "sys_s": 41.9, "rss_mib": 56.2}
+2026-10-07T18:42:16Z {"directories": 606060, "cpus": "all 16 check CPUs", "round": 3, "binary": "tree", "position_in_round": 3, "rc": 0, "seconds": 74.0, "user_s": 39.3, "sys_s": 57.8, "rss_mib": 57.7}
+2026-10-07T18:44:03Z {"directories": 606060, "cpus": "4 cores", "round": 1, "binary": "stock", "position_in_round": 1, "rc": 0, "seconds": 86.5, "user_s": 38.9, "sys_s": 53.9, "rss_mib": 61.5}
+2026-10-07T18:45:28Z {"directories": 606060, "cpus": "4 cores", "round": 1, "binary": "tree", "position_in_round": 2, "rc": 0, "seconds": 63.4, "user_s": 31.6, "sys_s": 48.1, "rss_mib": 55.6}
+2026-10-07T18:47:05Z {"directories": 606060, "cpus": "4 cores", "round": 1, "binary": "rc7", "position_in_round": 3, "rc": 0, "seconds": 76.1, "user_s": 43.2, "sys_s": 57.3, "rss_mib": 57.0}
+2026-10-07T18:48:29Z {"directories": 606060, "cpus": "4 cores", "round": 2, "binary": "tree", "position_in_round": 1, "rc": 0, "seconds": 63.3, "user_s": 31.9, "sys_s": 47.4, "rss_mib": 56.2}
+2026-10-07T18:50:09Z {"directories": 606060, "cpus": "4 cores", "round": 2, "binary": "rc7", "position_in_round": 2, "rc": 0, "seconds": 78.8, "user_s": 44.8, "sys_s": 60.1, "rss_mib": 56.9}
+2026-10-07T18:51:57Z {"directories": 606060, "cpus": "4 cores", "round": 2, "binary": "stock", "position_in_round": 3, "rc": 0, "seconds": 86.7, "user_s": 39.0, "sys_s": 53.8, "rss_mib": 62.2}
+2026-10-07T18:53:35Z {"directories": 606060, "cpus": "4 cores", "round": 3, "binary": "rc7", "position_in_round": 1, "rc": 0, "seconds": 77.6, "user_s": 43.6, "sys_s": 58.6, "rss_mib": 57.0}
+2026-10-07T18:55:23Z {"directories": 606060, "cpus": "4 cores", "round": 3, "binary": "stock", "position_in_round": 2, "rc": 0, "seconds": 86.5, "user_s": 39.0, "sys_s": 53.9, "rss_mib": 60.8}
+2026-10-07T18:56:47Z {"directories": 606060, "cpus": "4 cores", "round": 3, "binary": "tree", "position_in_round": 3, "rc": 0, "seconds": 63.0, "user_s": 31.7, "sys_s": 47.6, "rss_mib": 56.2}
+2026-10-07T18:57:08Z | directories | CPUs | binary | wall seconds per round | median s | against stock | CPU s (median) | peak RSS MiB (max) |
+2026-10-07T18:57:08Z |---|---|---|---|---|---|---|---|
+2026-10-07T18:57:08Z | 606060 | all 16 check CPUs | stock | [66.5, 68.0, 67.2] | 67.2 | +0.0% | 70.5 | 57.0 |
+2026-10-07T18:57:08Z | 606060 | all 16 check CPUs | tree | [73.0, 74.7, 74.0] | 74.0 | +10.1% | 97.1 | 58.1 |
+2026-10-07T18:57:08Z | 606060 | all 16 check CPUs | rc7 | [85.5, 85.6, 84.1] | 85.5 | +27.2% | 118.4 | 57.5 |
+2026-10-07T18:57:08Z | 606060 | 4 cores | stock | [86.5, 86.7, 86.5] | 86.5 | +0.0% | 92.8 | 62.2 |
+2026-10-07T18:57:08Z | 606060 | 4 cores | tree | [63.4, 63.3, 63.0] | 63.3 | -26.8% | 79.3 | 56.2 |
+2026-10-07T18:57:08Z | 606060 | 4 cores | rc7 | [76.1, 78.8, 77.6] | 77.6 | -10.3% | 102.2 | 57.0 |
+2026-10-07T18:57:08Z END x11 PASS rotated order; median wall time and peak RSS: 606060 dirs, all 16 check CPUs: stock 67.2 s / 57.0 MiB, tree 74.0 s / 58.1 MiB (+10.1%); 606060 dirs, 4 cores: stock 86.5 s / 62.2 MiB, tree 63.3 s / 56.2 MiB (-26.8%)
+2026-10-07T19:40:19Z START x11 tree=/opt/league/restic-final/trees/rc-8 label=final3-b8cf439 quick=False
+2026-10-07T19:42:08Z 1010100 directories and 5 files: snapshot written by stock
+2026-10-07T19:44:00Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 1, "binary": "stock", "position_in_round": 1, "rc": 0, "seconds": 111.9, "user_s": 46.7, "sys_s": 71.1, "rss_mib": 57.0}
+2026-10-07T19:46:35Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 1, "binary": "tree", "position_in_round": 2, "rc": 0, "seconds": 119.3, "user_s": 58.9, "sys_s": 86.6, "rss_mib": 59.6}
+2026-10-07T19:49:25Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 1, "binary": "rc7", "position_in_round": 3, "rc": 0, "seconds": 134.4, "user_s": 75.9, "sys_s": 98.4, "rss_mib": 56.2}
+2026-10-07T19:52:00Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 2, "binary": "tree", "position_in_round": 1, "rc": 0, "seconds": 119.3, "user_s": 58.7, "sys_s": 86.7, "rss_mib": 55.7}
+2026-10-07T19:54:50Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 2, "binary": "rc7", "position_in_round": 2, "rc": 0, "seconds": 135.9, "user_s": 76.6, "sys_s": 99.1, "rss_mib": 57.3}
+2026-10-07T19:57:15Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 2, "binary": "stock", "position_in_round": 3, "rc": 0, "seconds": 109.9, "user_s": 46.7, "sys_s": 69.0, "rss_mib": 57.8}
+2026-10-07T20:00:04Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 3, "binary": "rc7", "position_in_round": 1, "rc": 0, "seconds": 134.5, "user_s": 75.8, "sys_s": 98.4, "rss_mib": 55.7}
+2026-10-07T20:02:30Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 3, "binary": "stock", "position_in_round": 2, "rc": 0, "seconds": 110.7, "user_s": 46.7, "sys_s": 69.9, "rss_mib": 57.0}
+2026-10-07T20:05:03Z {"directories": 1010100, "cpus": "all 16 check CPUs", "round": 3, "binary": "tree", "position_in_round": 3, "rc": 0, "seconds": 118.2, "user_s": 58.2, "sys_s": 86.3, "rss_mib": 60.8}
+2026-10-07T20:08:02Z {"directories": 1010100, "cpus": "4 cores", "round": 1, "binary": "stock", "position_in_round": 1, "rc": 0, "seconds": 143.7, "user_s": 64.2, "sys_s": 90.0, "rss_mib": 64.5}
+2026-10-07T20:10:17Z {"directories": 1010100, "cpus": "4 cores", "round": 1, "binary": "tree", "position_in_round": 2, "rc": 0, "seconds": 100.4, "user_s": 46.8, "sys_s": 71.5, "rss_mib": 56.2}

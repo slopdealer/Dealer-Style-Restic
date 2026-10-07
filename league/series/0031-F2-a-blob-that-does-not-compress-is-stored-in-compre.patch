@@ -1,0 +1,362 @@
+From fc1c9d43b673e530e33602cfd4747e569c438d1e Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 06:42:09 +0000
+Subject: [PATCH 31/49] F2: a blob that does not compress is stored in
+ compressed form, as stock stores it
+
+Release check F2 (checks/FAILURES.md). Under --compression auto the
+tree stored a data blob of 512 KiB or more uncompressed when the
+encoder's output was not smaller (the league's ruling 2; repair R4 had
+made the rule exact). Such a blob is "uncompressed" in the index. So
+`prune --repack-uncompressed` rewrote it on every run and never came
+to rest (16,179 blobs before and after a real run on the check's
+repository; stock: 0), and `stats` reported compression progress
+79.84% where stock's repository reads 100%.
+
+The stored form is stock's again: under every mode but off the
+encoder's output is stored, whatever its size. The store-raw rule and
+its constant are gone; nothing is decided per blob. The encoder is
+still handed a destination of its own worst-case size from 512 KiB on
+(compress_presized.go, same bytes as EncodeAll(data, nil)).
+
+Tests: TestCompressionAutoStoresWhatStockStores (was ...NeverStores
+MoreThanStock): 80 blobs, 17 of them not shrunk by the encoder, every
+one stored in compressed form with stock's size; on the rule it
+replaces 15 are stored uncompressed. New
+TestPruneRepackUncompressedComesToRest: a repository written without
+compression is converted by one prune with RepackUncompressed under
+auto, and a second run has nothing to repack; on the rule it replaces
+the second run repacks again and the blobs of 512 KiB and more stay
+uncompressed.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/compress_presized.go      |  17 ++-
+ .../prune_repack_uncompressed_test.go         | 116 ++++++++++++++++++
+ internal/repository/repository.go             |  24 +---
+ .../repository_compression_auto_test.go       |  64 ++++------
+ 4 files changed, 157 insertions(+), 64 deletions(-)
+ create mode 100644 internal/repository/prune_repack_uncompressed_test.go
+
+diff --git a/internal/repository/compress_presized.go b/internal/repository/compress_presized.go
+index 79cde7c5d0254c2c6e4c8df72b475c2973005d9c..09402c215c355b53678400ba2542e5f1d74e6a44 100644
+--- a/internal/repository/compress_presized.go
++++ b/internal/repository/compress_presized.go
+@@ -1,7 +1,7 @@
+ package repository
+ 
+ // encodeBlob returns exactly what r.getZstdEncoder().EncodeAll(data, nil)
+-// returns.
++// returns: the bytes that are stored for a compressed blob, as in stock.
+ //
+ // EncodeAll appends to the destination it is given. For input below 1 MiB it
+ // starts from a buffer as large as the input; for larger input it starts from
+@@ -9,14 +9,13 @@ package repository
+ // and copied again and again while it grows. For a blob that does not
+ // compress this is several times the blob's size in allocations and copies
+ // (and one more reallocation for a smaller blob, whose output is a few bytes
+-// longer than its input). Since the decision under CompressionAuto is taken
+-// from the encoder's output for the whole blob, every such blob goes through
+-// here.
++// longer than its input).
+ //
+ // From presizedEncodeMinSize on, the destination is therefore allocated once,
+ // with room for the largest output the encoder can produce for that input
+ // size. Only the capacity of the destination differs: the encoder, its
+-// options and the bytes it produces are the same.
++// options and the bytes it produces are the same. Nothing is decided here:
++// every blob is encoded in full and its output is what is stored.
+ func (r *Repository) encodeBlob(data []byte) []byte {
+ 	enc := r.getZstdEncoder()
+ 	if len(data) < presizedEncodeMinSize {
+@@ -25,7 +24,7 @@ func (r *Repository) encodeBlob(data []byte) []byte {
+ 	return enc.EncodeAll(data, make([]byte, 0, enc.MaxEncodedSize(len(data))))
+ }
+ 
+-// presizedEncodeMinSize is the smallest blob that is stored uncompressed
+-// when it does not compress (autoCompressionMinRawSize): from here on a blob
+-// may be incompressible media data in bulk.
+-const presizedEncodeMinSize = autoCompressionMinRawSize
++// presizedEncodeMinSize is the smallest chunk the chunker cuts from a large
++// file (512 KiB): from here on a blob may be media or other data that does
++// not compress, in bulk.
++const presizedEncodeMinSize = 512 * 1024
+diff --git a/internal/repository/prune_repack_uncompressed_test.go b/internal/repository/prune_repack_uncompressed_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5231dcf41a853907cc7933934a703acdac5b409e
+--- /dev/null
++++ b/internal/repository/prune_repack_uncompressed_test.go
+@@ -0,0 +1,116 @@
++package repository_test
++
++import (
++	"bytes"
++	"context"
++	"math"
++	"math/rand"
++	"testing"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++	rtest "github.com/restic/restic/internal/test"
++)
++
++// `prune --repack-uncompressed` converts a repository once: after it has run,
++// a second run must find nothing to repack, as in stock. That fails when a
++// blob that does not compress is stored uncompressed again by the repack: it
++// stays "uncompressed" in the index and every later run rewrites it.
++func TestPruneRepackUncompressedComesToRest(t *testing.T) {
++	ctx := context.Background()
++	be := repository.TestBackend(t)
++	// written without compression: every data blob is uncompressed
++	repo, _ := repository.TestRepositoryWithBackend(t, be, 2, repository.Options{Compression: repository.CompressionOff})
++
++	rnd := rand.New(rand.NewSource(20261007))
++	random := func(n int) []byte {
++		buf := make([]byte, n)
++		rnd.Read(buf)
++		return buf
++	}
++	text := func(n int) []byte {
++		return bytes.Repeat([]byte("restic repack uncompressed "), n/27+1)[:n]
++	}
++	var blobs [][]byte
++	for range 6 {
++		blobs = append(blobs, random(1<<20)) // does not compress, 1 MiB
++	}
++	for range 3 {
++		blobs = append(blobs, random(512*1024+rnd.Intn(200*1024))) // does not compress, just above 512 KiB
++	}
++	for range 5 {
++		blobs = append(blobs, random(100*1024)) // does not compress, small
++	}
++	for i := range 4 {
++		blobs = append(blobs, text(700*1024+i)) // compresses
++	}
++
++	keep := restic.NewBlobSet()
++	content := map[restic.ID][]byte{}
++	rtest.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
++		for _, buf := range blobs {
++			id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, buf, restic.ID{}, false)
++			if err != nil {
++				return err
++			}
++			keep.Insert(restic.BlobHandle{Type: restic.DataBlob, ID: id})
++			content[id] = buf
++		}
++		return nil
++	}))
++	rtest.OK(t, repo.Close())
++
++	// every later step runs with the production default, CompressionAuto
++	// (the test helpers open with CompressionFastest)
++	open := func(be backend.Backend) *repository.Repository {
++		repo, err := repository.New(be, repository.Options{})
++		rtest.OK(t, err)
++		rtest.OK(t, repo.SearchKey(ctx, rtest.TestPassword, 10, ""))
++		rtest.OK(t, repo.LoadIndex(ctx, restic.NoopTerminalCounterFactory))
++		return repo
++	}
++	pruneRepackUncompressed := func() repository.PruneStats {
++		repo := open(be)
++		plan, err := repository.PlanPrune(ctx, repository.PruneOptions{
++			MaxRepackBytes:     math.MaxUint64,
++			MaxUnusedBytes:     func(uint64) uint64 { return 0 },
++			RepackUncompressed: true,
++		}, repo, func(_ context.Context, _ restic.Repository, usedBlobs restic.FindBlobSet) error {
++			for blob := range keep {
++				usedBlobs.Insert(blob)
++			}
++			return nil
++		}, restic.NewNoopPrinter())
++		rtest.OK(t, err)
++		stats := plan.Stats()
++		rtest.OK(t, plan.Execute(ctx, restic.NewNoopPrinter()))
++		rtest.OK(t, repo.Close())
++		return stats
++	}
++
++	first := pruneRepackUncompressed()
++	if len(keep) != len(blobs) || first.Blobs.Repack != uint(len(blobs)) {
++		t.Fatalf("first run repacks %d blobs, the repository holds %d uncompressed blobs (%d distinct)", first.Blobs.Repack, len(blobs), len(keep))
++	}
++
++	second := pruneRepackUncompressed()
++	if second.Blobs.Repack != 0 || second.Size.Uncompressed != 0 {
++		t.Errorf("second run still wants to repack %d blobs (%d uncompressed bytes); stock: 0",
++			second.Blobs.Repack, second.Size.Uncompressed)
++	}
++
++	repo = open(be)
++	repository.TestCheckRepo(t, repo)
++	for blob := range keep {
++		pbs := repo.LookupBlob(blob)
++		if len(pbs) != 1 || !pbs[0].IsCompressed() {
++			t.Errorf("blob %v (%d bytes) is not stored in compressed form after the conversion", blob.ID.Str(), len(content[blob.ID]))
++		}
++		got, err := repo.LoadBlob(ctx, blob, nil)
++		rtest.OK(t, err)
++		if !bytes.Equal(got, content[blob.ID]) {
++			t.Errorf("blob %v does not read back", blob.ID.Str())
++		}
++	}
++}
+diff --git a/internal/repository/repository.go b/internal/repository/repository.go
+index 306f1ccb0ab569597a3fc9db6fc8fb9cdd92f44a..feae0cf3bf9e421630588e47c3f90819699c1d8b 100644
+--- a/internal/repository/repository.go
++++ b/internal/repository/repository.go
+@@ -31,12 +31,6 @@ const MinPackSize = 4 * 1024 * 1024
+ const DefaultPackSize = 16 * 1024 * 1024
+ const MaxPackSize = 128 * 1024 * 1024
+ 
+-// Under CompressionAuto a data blob of at least this size is stored
+-// uncompressed when the encoder's output for the whole blob is not smaller.
+-// The decision is taken from that output and from nothing else: every blob is
+-// encoded, so what is stored is never larger than the compressed form.
+-const autoCompressionMinRawSize = 512 * 1024
+-
+ // Repository is used to access a repository in a backend.
+ type Repository struct {
+ 	be    backend.Backend
+@@ -411,18 +405,12 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
+ 		// cannot be compressed. This special case is only relevant for tests, normal operation does not
+ 		// generate zero-sized blobs.
+ 		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != restic.DataBlob) {
+-			autoRawData := t == restic.DataBlob && r.opts.Compression == CompressionAuto && len(data) >= autoCompressionMinRawSize
+-
+-			compressed := r.encodeBlob(data)
+-			if autoRawData && len(compressed)+4 >= len(data) {
+-				// A compressed pack entry carries a four-byte uncompressed
+-				// length. Keep the original bytes when that header and payload
+-				// would not save space.
+-				uncompressedLength = 0
+-			} else {
+-				uncompressedLength = len(data)
+-				data = compressed
+-			}
++			// As in stock, what is stored is the encoder's output, whatever
++			// its size: a blob that does not compress is stored compressed
++			// too. `prune --repack-uncompressed` and the compression
++			// statistics count an uncompressed blob as work left to do.
++			uncompressedLength = len(data)
++			data = r.encodeBlob(data)
+ 		}
+ 	}
+ 
+diff --git a/internal/repository/repository_compression_auto_test.go b/internal/repository/repository_compression_auto_test.go
+index b686fc47b94735b6b96f36858bbe1915ab53141e..68e4d17f144ad796a469cd67cedb30bf1b9a73dd 100644
+--- a/internal/repository/repository_compression_auto_test.go
++++ b/internal/repository/repository_compression_auto_test.go
+@@ -12,21 +12,16 @@ import (
+ 	"github.com/restic/restic/internal/test"
+ )
+ 
+-// Under the default CompressionAuto a data blob may be stored uncompressed
+-// only when it is truly incompressible. The bound that is guaranteed and
+-// tested here, for every data blob:
++// Under the default CompressionAuto every data blob is stored as stock stores
++// it: the encoder's output for the whole blob (EncodeAll, same encoder
++// options), whatever its size. A blob that does not compress is stored in
++// compressed form too, a few bytes larger than its data, so that the index
++// knows no "uncompressed" blob that `prune --repack-uncompressed` would
++// rewrite on every run.
+ //
+-//   - what is stored is never larger than what stock stores, which is the
+-//     encoder's output for the whole blob (EncodeAll, same encoder options);
+-//   - a blob is stored uncompressed if and only if it has at least
+-//     autoCompressionMinRawSize bytes and that output plus the four-byte
+-//     length field of a compressed pack entry is not smaller than the blob.
+-//
+-// So a blob that stock's compression shrinks by five bytes or more is always
+-// stored compressed, byte for byte as stock stores it. The inputs are built
+-// against decisions that look at a part of the blob only: redundancy at long
+-// range, short compressible stretches between incompressible ones, and
+-// compressible data behind an incompressible prefix.
++// The inputs are built against decisions that look at a part of the blob
++// only: redundancy at long range, short compressible stretches between
++// incompressible ones, and compressible data behind an incompressible prefix.
+ 
+ type autoCompressionCase struct {
+ 	name string
+@@ -97,8 +92,8 @@ func autoCompressionCases() []autoCompressionCase {
+ 	// the ordinary cases
+ 	add("random 1 MiB", random(MiB))
+ 	add("random 8 MiB", random(8*MiB))
+-	add("random, exactly the minimum size", random(autoCompressionMinRawSize))
+-	add("random, one byte below the minimum size", random(autoCompressionMinRawSize-1))
++	add("random, exactly 512 KiB", random(512*KiB))
++	add("random, one byte below 512 KiB", random(512*KiB-1))
+ 	add("random 4 KiB", random(4*KiB))
+ 	add("text 1 MiB", text(MiB))
+ 	add("zeros 1 MiB", make([]byte, MiB))
+@@ -130,7 +125,7 @@ func autoCompressionCases() []autoCompressionCase {
+ 	return cases
+ }
+ 
+-func TestCompressionAutoNeverStoresMoreThanStock(t *testing.T) {
++func TestCompressionAutoStoresWhatStockStores(t *testing.T) {
+ 	repo, _, _ := TestRepositoryWithVersion(t, 2)
+ 	// the production default; the test helper replaces Auto by Fastest
+ 	repo.opts.Compression = CompressionAuto
+@@ -148,7 +143,7 @@ func TestCompressionAutoNeverStoresMoreThanStock(t *testing.T) {
+ 		return nil
+ 	}))
+ 
+-	raw, compressed := 0, 0
++	incompressible := 0
+ 	for i, c := range cases {
+ 		h := restic.BlobHandle{Type: restic.DataBlob, ID: ids[i]}
+ 		pbs := repo.LookupBlob(h)
+@@ -158,25 +153,20 @@ func TestCompressionAutoNeverStoresMoreThanStock(t *testing.T) {
+ 		// stock stores the encoder's output for every data blob
+ 		stock := repo.getZstdEncoder().EncodeAll(c.data, nil)
+ 		stockStored := uint(crypto.CiphertextLength(len(stock)))
+-		stored := pbs[0].CiphertextLength()
++		if len(stock) >= len(c.data) {
++			incompressible++
++		}
+ 
+-		wantRaw := len(c.data) >= autoCompressionMinRawSize && len(stock)+4 >= len(c.data)
+-		if pbs[0].IsCompressed() == wantRaw {
+-			t.Errorf("%s: stored compressed=%v, but the encoder turns %d bytes into %d", c.name, pbs[0].IsCompressed(), len(c.data), len(stock))
++		if !pbs[0].IsCompressed() {
++			t.Errorf("%s: stored uncompressed (%d bytes of data, the encoder's output has %d); stock stores the encoder's output",
++				c.name, len(c.data), len(stock))
++			continue
+ 		}
+-		if stored > stockStored {
+-			t.Errorf("%s: %d bytes stored, stock stores %d (%.1f times smaller)", c.name, stored, stockStored, float64(stored)/float64(stockStored))
++		if stored := pbs[0].CiphertextLength(); stored != stockStored {
++			t.Errorf("%s: %d bytes stored, stock stores %d", c.name, stored, stockStored)
+ 		}
+-		if pbs[0].IsCompressed() {
+-			compressed++
+-			if stored != stockStored {
+-				t.Errorf("%s: compressed to %d bytes, stock stores %d", c.name, stored, stockStored)
+-			}
+-		} else {
+-			raw++
+-			if stored != uint(crypto.CiphertextLength(len(c.data))) {
+-				t.Errorf("%s: uncompressed blob has %d bytes for %d bytes of data", c.name, stored, len(c.data))
+-			}
++		if got := pbs[0].PlaintextLength(); got != uint(len(c.data)) {
++			t.Errorf("%s: plaintext length %d recorded for %d bytes of data", c.name, got, len(c.data))
+ 		}
+ 
+ 		got, err := repo.LoadBlob(context.Background(), h, nil)
+@@ -185,10 +175,10 @@ func TestCompressionAutoNeverStoresMoreThanStock(t *testing.T) {
+ 			t.Errorf("%s: blob does not read back", c.name)
+ 		}
+ 	}
+-	if raw == 0 || compressed == 0 {
+-		t.Fatalf("one-sided inputs: %d stored uncompressed, %d compressed", raw, compressed)
++	if incompressible < 5 || incompressible > len(cases)-5 {
++		t.Fatalf("one-sided inputs: the encoder does not shrink %d of %d blobs", incompressible, len(cases))
+ 	}
+-	t.Logf("%d blobs: %d stored uncompressed, %d compressed, none larger than stock's", len(cases), raw, compressed)
++	t.Logf("%d blobs, %d of them not shrunk by the encoder: all stored in compressed form with stock's size", len(cases), incompressible)
+ }
+ 
+ // With an explicit compression mode nothing is stored uncompressed.

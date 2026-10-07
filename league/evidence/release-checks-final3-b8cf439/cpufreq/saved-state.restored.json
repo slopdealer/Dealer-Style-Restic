@@ -1,0 +1,88 @@
+{
+ "restored_at": "2026-10-07T20:48:19Z",
+ "equal_to_saved_state": true,
+ "differences": [],
+ "errors": [],
+ "state_now": {
+  "10": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "11": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "16": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "17": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "18": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "23": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "46": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "47": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "58": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "59": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "64": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "65": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "66": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "71": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "94": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "95": {
+   "scaling_governor": "schedutil",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  }
+ }
+}

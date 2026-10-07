@@ -1,0 +1,11 @@
+{
+ "check": "x11",
+ "status": "running",
+ "stage": "restores",
+ "units_done": 11,
+ "units_total": 30,
+ "started_at": 1791402019.6895661,
+ "updated_at": 1791403817.451623,
+ "fails": 0,
+ "pid": 6614
+}

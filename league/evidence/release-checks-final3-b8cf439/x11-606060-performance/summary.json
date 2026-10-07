@@ -1,0 +1,72 @@
+{
+ "check": "x11",
+ "title": "restores of 0.6, 1.0 and 2.0 million directories: wall time and peak RSS in rotated order, all CPUs and four cores",
+ "verdict": "PASS",
+ "summary": "rotated order; median wall time and peak RSS: 606060 dirs, all 16 check CPUs: stock 53.3 s / 58.5 MiB, tree 44.7 s / 60.9 MiB (-16.1%); 606060 dirs, 4 cores: stock 53.5 s / 62.2 MiB, tree 44.1 s / 57.0 MiB (-17.6%)",
+ "tree": "/opt/league/restic-final/trees/rc-8",
+ "label": "final3-b8cf439",
+ "seconds": 895,
+ "numbers": {
+  "table": {
+   "606060 | all 16 check CPUs | stock": {
+    "seconds": [
+     53.2,
+     53.7,
+     53.3
+    ],
+    "median_seconds": 53.3,
+    "cpu_seconds_median": 55.0,
+    "rss_mib_max": 58.5,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 0.0
+   },
+   "606060 | all 16 check CPUs | tree": {
+    "seconds": [
+     44.7,
+     44.3,
+     44.7
+    ],
+    "median_seconds": 44.7,
+    "cpu_seconds_median": 56.5,
+    "rss_mib_max": 60.9,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": -16.1
+   },
+   "606060 | 4 cores | stock": {
+    "seconds": [
+     53.1,
+     53.7,
+     53.5
+    ],
+    "median_seconds": 53.5,
+    "cpu_seconds_median": 56.5,
+    "rss_mib_max": 62.2,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 0.0
+   },
+   "606060 | 4 cores | tree": {
+    "seconds": [
+     44.1,
+     43.6,
+     44.1
+    ],
+    "median_seconds": 44.1,
+    "cpu_seconds_median": 54.3,
+    "rss_mib_max": 57.0,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": -17.6
+   }
+  }
+ },
+ "fails": [],
+ "notes": [],
+ "finished_at": "2026-10-07T20:33:44Z"
+}

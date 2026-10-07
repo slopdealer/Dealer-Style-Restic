@@ -1,0 +1,11 @@
+{
+ "check": "x11",
+ "status": "PASS",
+ "stage": "finished",
+ "units_done": 12,
+ "units_total": 12,
+ "started_at": 1791404328.0459182,
+ "updated_at": 1791405224.0224228,
+ "fails": 0,
+ "pid": 26363
+}

@@ -1,0 +1,467 @@
+From afbb94b71bc3d17ad7e889eeed319ed298c7c9ca Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:27:46 +0000
+Subject: [PATCH 42/49] Red team fix 2: repack and copy save on the context of
+ their workers
+
+The saves of a repack were submitted with the uploader's context, not with
+the context of the repack's group of workers. When one worker failed to read
+a pack while a save of another worker waited for a free uploader and the
+uploads were stalled, nothing cancelled that save: the worker waited for it
+and the command hung where upstream returns the read error.
+
+Saves (synchronous and asynchronous) now run on the group context, as
+upstream's do. Upstream's saves run inside the workers; here they are
+submitted to the uploader's group, which takes the first error returned by
+any of its functions. A save given up because the repack was cancelled would
+hand that group "context canceled" before the repack returns the read error,
+and the command would print the wrong error (10 of 10 runs without this
+part). The group context of a repack is therefore marked, and a save that
+ends on a cancelled repack context reports nothing to the uploader's group;
+its callback still receives the error. Saves of the archiver are untouched.
+
+Test (seat 2 finding 4, carried in, the returned error compared with the
+stock control as well): TestRepackReadErrorCancelsQueuedSave hangs before
+this commit and returns stock's error after.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/repack.go                 |   5 +-
+ .../repository/repack_completion_overlap.go   |  13 +-
+ .../repack_read_error_cancellation_test.go    | 303 ++++++++++++++++++
+ internal/repository/repack_scope.go           |  31 ++
+ internal/repository/repository.go             |   4 +-
+ 5 files changed, 347 insertions(+), 9 deletions(-)
+ create mode 100644 internal/repository/repack_read_error_cancellation_test.go
+ create mode 100644 internal/repository/repack_scope.go
+
+diff --git a/internal/repository/repack.go b/internal/repository/repack.go
+index 9c61c76b0b2970fbc6847967c6cbc1ad1112edd4..79fa547aec4b8f934457a2e08ec495e25cf5b7bc 100644
+--- a/internal/repository/repack.go
++++ b/internal/repository/repack.go
+@@ -68,7 +68,8 @@ func repack(
+ 	logf LogFunc,
+ ) error {
+ 
+-	wg, wgCtx := errgroup.WithContext(ctx)
++	// reads and saves run on the context of this group (repack_scope.go)
++	wg, wgCtx := errgroup.WithContext(withRepackSaves(ctx))
+ 
+ 	if feature.Flag.Enabled(feature.S3Restore) {
+ 		job, err := repo.StartWarmup(ctx, packs)
+@@ -114,7 +115,7 @@ func repack(
+ 	// admitted has completed.
+ 	worker := func() error {
+ 		return runRepackCompletionOverlap(downloadQueue, func(t index.PackBlobs) *repackPackCompletion {
+-			return startRepackPackCompletion(ctx, wgCtx, repo, uploader, keepBlobs, &keepMutex, saveBudget, t)
++			return startRepackPackCompletion(wgCtx, wgCtx, repo, uploader, keepBlobs, &keepMutex, saveBudget, t)
+ 		}, p)
+ 	}
+ 
+diff --git a/internal/repository/repack_completion_overlap.go b/internal/repository/repack_completion_overlap.go
+index dcab3700e6fc1e42e8d2a8d59cc4c7ac9665879f..433c02b2300bb0a0c6ddfc095b2d65a362b9ebc4 100644
+--- a/internal/repository/repack_completion_overlap.go
++++ b/internal/repository/repack_completion_overlap.go
+@@ -85,12 +85,14 @@ func runRepackCompletionOverlap(queue <-chan index.PackBlobs, start func(index.P
+ 
+ // startRepackPackCompletion reads one pack and admits the saves of the blobs
+ // to keep. It returns when the pack has been read; the saves may still run.
++// The pack is read on wgCtx and the saves are submitted on saveCtx; repack
++// passes the context of its workers for both.
+ //
+ // The handler saves blobs, so the pack is read through
+ // loadBlobsFromPackReleased: the handler never runs inside the backend's
+ // Load callback, and a worker that waits for the save budget holds no backend
+ // connection.
+-func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, uploader restic.BlobSaverWithAsync, keepBlobs repackBlobSet, keepMutex *sync.Mutex, saveBudget *semaphore.Weighted, t index.PackBlobs) *repackPackCompletion {
++func startRepackPackCompletion(saveCtx, wgCtx context.Context, repo *Repository, uploader restic.BlobSaverWithAsync, keepBlobs repackBlobSet, keepMutex *sync.Mutex, saveBudget *semaphore.Weighted, t index.PackBlobs) *repackPackCompletion {
+ 	type saveResult struct {
+ 		blob restic.BlobHandle
+ 		err  error
+@@ -126,7 +128,7 @@ func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, upl
+ 		// Keep unusually large blobs on the synchronous path so the byte
+ 		// budget remains a strict bound on copied plaintext.
+ 		if int64(len(buf)) > maxAsyncRepackCopyBytes {
+-			_, _, _, saveErr := uploader.SaveBlob(ctx, blob.Type, buf, blob.ID, true)
++			_, _, _, saveErr := uploader.SaveBlob(saveCtx, blob.Type, buf, blob.ID, true)
+ 			resultMu.Lock()
+ 			results[resultID].err = saveErr
+ 			results[resultID].done = true
+@@ -144,9 +146,10 @@ func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, upl
+ 		}
+ 		owned := append([]byte(nil), buf...)
+ 		pending.Add(1)
+-		// The uploader context owns save lifetime. wgCtx is only for
+-		// stopping pack reads and can be canceled as workers finish.
+-		uploader.SaveBlobAsync(ctx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
++		// The save runs on the context of the repack's workers, as upstream's
++		// does: an error of another worker gives up a save that waits for
++		// an uploader. No worker returns while a save it admitted is pending.
++		uploader.SaveBlobAsync(saveCtx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
+ 			resultMu.Lock()
+ 			results[resultID].err = saveErr
+ 			results[resultID].done = true
+diff --git a/internal/repository/repack_read_error_cancellation_test.go b/internal/repository/repack_read_error_cancellation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..76b36802c24ba70fa7d482eaf33b6a4b03ab8bf3
+--- /dev/null
++++ b/internal/repository/repack_read_error_cancellation_test.go
+@@ -0,0 +1,303 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/debug"
++	"github.com/restic/restic/internal/feature"
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++	"golang.org/x/sync/errgroup"
++)
++
++type blockedUploadBackend struct {
++	backend.Backend
++	thirdSave, uploadsBusy, readFailed chan struct{}
++	bad                                restic.ID
++	uploads                            atomic.Int32
++	failOnce                           sync.Once
++}
++
++func (b *blockedUploadBackend) Properties() backend.Properties {
++	p := b.Backend.Properties()
++	p.Connections = 2
++	return p
++}
++
++func (b *blockedUploadBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
++	if h.Type != backend.PackFile {
++		return b.Backend.Save(ctx, h, rd)
++	}
++	if b.uploads.Add(1) == 2 {
++		close(b.uploadsBusy)
++	}
++	<-ctx.Done() // A stalled upload that correctly honors context cancellation.
++	return ctx.Err()
++}
++
++func (b *blockedUploadBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(io.Reader) error) error {
++	if h.Type != backend.PackFile || h.Name != b.bad.String() {
++		return b.Backend.Load(ctx, h, length, offset, fn)
++	}
++	for _, ready := range []<-chan struct{}{b.thirdSave, b.uploadsBusy} {
++		select {
++		case <-ready:
++		case <-ctx.Done():
++			return ctx.Err()
++		}
++	}
++	b.failOnce.Do(func() { close(b.readFailed) })
++	return fmt.Errorf("injected source pack read failure")
++}
++
++type countSaveUploader struct {
++	restic.BlobSaverWithAsync
++	calls atomic.Int32
++	third chan struct{}
++}
++
++func (u *countSaveUploader) started() {
++	if u.calls.Add(1) == 3 {
++		close(u.third)
++	}
++}
++
++func (u *countSaveUploader) SaveBlob(ctx context.Context, typ restic.BlobType, buf []byte, id restic.ID, duplicate bool) (restic.ID, bool, int, error) {
++	u.started()
++	return u.BlobSaverWithAsync.SaveBlob(ctx, typ, buf, id, duplicate)
++}
++
++func (u *countSaveUploader) SaveBlobAsync(ctx context.Context, typ restic.BlobType, buf []byte, id restic.ID, duplicate bool, cb func(restic.ID, bool, int, error)) {
++	u.started()
++	u.BlobSaverWithAsync.SaveBlobAsync(ctx, typ, buf, id, duplicate, cb)
++}
++
++// TestRepackReadErrorCancelsQueuedSave is the red team's test (seat 2, finding
++// 4), with the returned error compared as well.
++// Uses real pack queueing, blob savers and backend Save calls. The only injected
++// faults are one source read error and two destination transfers awaiting their
++// contexts. The stock control below is copied from stock/repack.go unchanged.
++func TestRepackReadErrorCancelsQueuedSave(t *testing.T) {
++	hung, stockErr := runBlockedCopy(t, true)
++	if hung {
++		t.Fatal("stock control hung")
++	}
++	hung, err := runBlockedCopy(t, false)
++	if hung {
++		t.Fatal("candidate cannot return source read error until caller cancels the parent upload context")
++	}
++	// the command must report the read error, not the cancellation of the
++	// save that was given up because of it
++	if !strings.Contains(stockErr.Error(), "injected source pack read failure") {
++		t.Fatalf("stock control returned %v", stockErr)
++	}
++	if err.Error() != stockErr.Error() {
++		t.Fatalf("returned %q, stock returns %q", err, stockErr)
++	}
++}
++
++func runBlockedCopy(t *testing.T, stock bool) (bool, error) {
++	t.Helper()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	be := &blockedUploadBackend{Backend: TestBackend(t), thirdSave: make(chan struct{}), uploadsBusy: make(chan struct{}), readFailed: make(chan struct{})}
++	sourceBackend := &blockedUploadBackend{Backend: TestBackend(t), thirdSave: be.thirdSave, uploadsBusy: be.uploadsBusy, readFailed: be.readFailed}
++	src, _ := TestRepositoryWithBackend(t, sourceBackend, 1, Options{PackSize: MinPackSize})
++	dst, _ := TestRepositoryWithBackend(t, be, 1, Options{PackSize: MinPackSize})
++	// One failed pack in the first nibble group gives one worker the read error;
++	// the other has three independently indexed, valid 5 MiB blobs to upload.
++	for n := 0; ; n++ {
++		be.bad = restic.Hash([]byte(fmt.Sprintf("bad pack %d", n)))
++		if be.bad[0]&15 == 0 {
++			break
++		}
++	}
++	sourceBackend.bad = be.bad
++	packs := restic.NewIDSet(be.bad)
++	badBlob := restic.Hash([]byte("unreadable blob"))
++	keep := restic.NewBlobSet()
++	keep.Insert(restic.BlobHandle{ID: badBlob, Type: restic.DataBlob})
++	if err := src.idx.StorePack(ctx, be.bad, pack.Blobs{{BlobHandle: restic.BlobHandle{ID: badBlob, Type: restic.DataBlob}, Length: 64}}, &internalRepository{src}); err != nil {
++		t.Fatal(err)
++	}
++	for n := 1; n <= 3; n++ {
++		plain := bytes.Repeat([]byte{byte(n)}, 5<<20)
++		blobID := restic.Hash(plain)
++		for salt := 1; ; salt++ {
++			nonce := bytes.Repeat([]byte{byte(salt)}, src.Key().NonceSize())
++			ciphertext := append(bytes.Clone(nonce), src.Key().Seal(nil, nonce, plain, nil)...)
++			var contents bytes.Buffer
++			p := pack.NewPacker(src.Key(), &contents)
++			if _, err := p.Add(restic.DataBlob, blobID, ciphertext, 0); err != nil {
++				t.Fatal(err)
++			}
++			if err := p.Finalize(); err != nil {
++				t.Fatal(err)
++			}
++			id := restic.Hash(contents.Bytes())
++			if id[0]&15 == 0 {
++				continue
++			}
++			// Bypass the stalled-write wrapper for setup only.
++			if err := sourceBackend.Backend.Save(ctx, backend.Handle{Type: backend.PackFile, Name: id.String()}, backend.NewByteReader(contents.Bytes(), sourceBackend.Hasher())); err != nil {
++				t.Fatal(err)
++			}
++			if err := src.idx.StorePack(ctx, id, p.Blobs(), &internalRepository{src}); err != nil {
++				t.Fatal(err)
++			}
++			packs.Insert(id)
++			keep.Insert(restic.BlobHandle{ID: blobID, Type: restic.DataBlob})
++			break
++		}
++	}
++	if err := src.idx.Flush(ctx, &internalRepository{src}); err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan error, 1)
++	go func() {
++		done <- dst.WithBlobUploader(ctx, func(uploadCtx context.Context, uploader restic.BlobSaverWithAsync) error {
++			u := &countSaveUploader{BlobSaverWithAsync: uploader, third: be.thirdSave}
++			if stock {
++				return stockRepackControl(uploadCtx, src, dst, u, packs, keep, restic.NoopCounter, func(string, ...any) {})
++			}
++			return CopyBlobs(uploadCtx, src, dst, u, packs, keep, restic.NoopCounter, nil)
++		})
++	}()
++	select {
++	case <-be.readFailed:
++	case err := <-done:
++		t.Fatalf("stock=%v finished before injecting read error: %v", stock, err)
++	case <-time.After(10 * time.Second):
++		cancel()
++		<-done
++		t.Fatalf("stock=%v setup failed to reach stalled upload/read error", stock)
++	}
++	select {
++	case err := <-done:
++		if err == nil {
++			t.Fatalf("stock=%v incorrectly succeeded", stock)
++		}
++		t.Logf("stock=%v returned without parent cancellation: %v", stock, err)
++		return false, err
++	case <-time.After(2 * time.Second):
++		cancel()
++		select {
++		case err := <-done:
++			t.Logf("stock=%v returned only after parent cancellation: %v", stock, err)
++		case <-time.After(5 * time.Second):
++			t.Fatal("test could not retire canceled copy")
++		}
++		return true, nil
++	}
++}
++func stockRepackControl(
++	ctx context.Context,
++	repo *Repository,
++	dstRepo restic.Repository,
++	uploader restic.BlobSaverWithAsync,
++	packs restic.IDSet,
++	keepBlobs repackBlobSet,
++	p restic.Counter,
++	logf LogFunc,
++) error {
++
++	wg, wgCtx := errgroup.WithContext(ctx)
++
++	if feature.Flag.Enabled(feature.S3Restore) {
++		job, err := repo.StartWarmup(ctx, packs)
++		if err != nil {
++			return err
++		}
++		if job.HandleCount() != 0 {
++			logf("warming up %d packs from cold storage, this may take a while...", job.HandleCount())
++			if err := job.Wait(ctx); err != nil {
++				return err
++			}
++		}
++	}
++
++	var keepMutex sync.Mutex
++	downloadQueue := make(chan index.PackBlobs)
++	wg.Go(func() error {
++		defer close(downloadQueue)
++		for pbs := range repo.listPacksFromIndex(wgCtx, packs) {
++			var packBlobs pack.Blobs
++			keepMutex.Lock()
++			// filter out unnecessary blobs
++			for _, entry := range pbs.Blobs {
++				h := restic.BlobHandle{ID: entry.ID, Type: entry.Type}
++				if keepBlobs.Has(h) {
++					packBlobs = append(packBlobs, entry)
++				}
++			}
++			keepMutex.Unlock()
++
++			select {
++			case downloadQueue <- index.PackBlobs{PackID: pbs.PackID, Blobs: packBlobs}:
++			case <-wgCtx.Done():
++				return wgCtx.Err()
++			}
++		}
++		return wgCtx.Err()
++	})
++
++	worker := func() error {
++		for t := range downloadQueue {
++			err := repo.loadBlobsFromPack(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
++				if err != nil {
++					// a required blob couldn't be retrieved
++					return err
++				}
++
++				keepMutex.Lock()
++				// recheck whether some other worker was faster
++				shouldKeep := keepBlobs.Has(blob)
++				if shouldKeep {
++					keepBlobs.Delete(blob)
++				}
++				keepMutex.Unlock()
++
++				if !shouldKeep {
++					return nil
++				}
++
++				// We do want to save already saved blobs!
++				_, _, _, err = uploader.SaveBlob(wgCtx, blob.Type, buf, blob.ID, true)
++				if err != nil {
++					return err
++				}
++
++				debug.Log("  saved blob %v", blob.ID)
++				return nil
++			})
++			if err != nil {
++				return err
++			}
++			p.Add(1)
++		}
++		return nil
++	}
++
++	// as packs are streamed the concurrency is limited by IO
++	// reduce by one to ensure that uploading is always possible
++	repackWorkerCount := int(repo.Connections() - 1)
++	if repo != dstRepo {
++		// no need to share the upload and download connections for different repositories
++		repackWorkerCount = int(repo.Connections())
++	}
++	for i := 0; i < repackWorkerCount; i++ {
++		wg.Go(worker)
++	}
++
++	return wg.Wait()
++}
+diff --git a/internal/repository/repack_scope.go b/internal/repository/repack_scope.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fef161f8bf35fd043e5a2949efb09c4b674dad73
+--- /dev/null
++++ b/internal/repository/repack_scope.go
+@@ -0,0 +1,31 @@
++package repository
++
++import "context"
++
++// A repack saves on the context of its own group of workers, as upstream
++// does: when one worker fails, a save of another worker that waits for a free
++// uploader is given up, and the repack returns the error although uploads are
++// stalled.
++//
++// Upstream's saves run inside the workers. Here they are submitted to the
++// uploader's group, which takes the first error any of its functions returns
++// as the error of the whole upload. A save that was given up because the
++// repack was cancelled must not report that cancellation there as a failure
++// of its own: the repack returns the reason, as it does upstream. The context
++// of the repack's workers is marked for this.
++type repackSaveKey struct{}
++
++// withRepackSaves returns the context from which a repack derives the context
++// of its workers and saves.
++func withRepackSaves(ctx context.Context) context.Context {
++	return context.WithValue(ctx, repackSaveKey{}, true)
++}
++
++// asyncSaveResult returns what an asynchronous save reports to the uploader's
++// group. The callback of the save has received err in every case.
++func asyncSaveResult(ctx context.Context, err error) error {
++	if err != nil && ctx.Err() != nil && ctx.Value(repackSaveKey{}) != nil {
++		return nil
++	}
++	return err
++}
+diff --git a/internal/repository/repository.go b/internal/repository/repository.go
+index feae0cf3bf9e421630588e47c3f90819699c1d8b..57e467f02df5ed48e3af9504158e5f13e4a16f8d 100644
+--- a/internal/repository/repository.go
++++ b/internal/repository/repository.go
+@@ -1373,11 +1373,11 @@ func (r *Repository) saveBlobAsync(ctx context.Context, t restic.BlobType, buf [
+ 		if ctx.Err() != nil {
+ 			// fail fast if the context is cancelled
+ 			cb(restic.ID{}, false, 0, ctx.Err())
+-			return ctx.Err()
++			return asyncSaveResult(ctx, ctx.Err())
+ 		}
+ 		newID, known, size, err := r.saveBlob(ctx, t, buf, id, storeDuplicate)
+ 		cb(newID, known, size, err)
+-		return err
++		return asyncSaveResult(ctx, err)
+ 	})
+ }
+ 

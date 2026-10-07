@@ -1,0 +1,100 @@
+{
+ "check": "x11",
+ "title": "restores of 0.6, 1.0 and 2.0 million directories: wall time and peak RSS in rotated order, all CPUs and four cores",
+ "verdict": "PASS",
+ "summary": "rotated order; median wall time and peak RSS: 606060 dirs, all 16 check CPUs: stock 67.2 s / 57.0 MiB, tree 74.0 s / 58.1 MiB (+10.1%); 606060 dirs, 4 cores: stock 86.5 s / 62.2 MiB, tree 63.3 s / 56.2 MiB (-26.8%)",
+ "tree": "/opt/league/restic-final/trees/rc-8",
+ "label": "final3-b8cf439",
+ "seconds": 1805,
+ "numbers": {
+  "table": {
+   "606060 | all 16 check CPUs | stock": {
+    "seconds": [
+     66.5,
+     68.0,
+     67.2
+    ],
+    "median_seconds": 67.2,
+    "cpu_seconds_median": 70.5,
+    "rss_mib_max": 57.0,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 0.0
+   },
+   "606060 | all 16 check CPUs | tree": {
+    "seconds": [
+     73.0,
+     74.7,
+     74.0
+    ],
+    "median_seconds": 74.0,
+    "cpu_seconds_median": 97.1,
+    "rss_mib_max": 58.1,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 10.1
+   },
+   "606060 | all 16 check CPUs | rc7": {
+    "seconds": [
+     85.5,
+     85.6,
+     84.1
+    ],
+    "median_seconds": 85.5,
+    "cpu_seconds_median": 118.4,
+    "rss_mib_max": 57.5,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 27.2
+   },
+   "606060 | 4 cores | stock": {
+    "seconds": [
+     86.5,
+     86.7,
+     86.5
+    ],
+    "median_seconds": 86.5,
+    "cpu_seconds_median": 92.8,
+    "rss_mib_max": 62.2,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": 0.0
+   },
+   "606060 | 4 cores | tree": {
+    "seconds": [
+     63.4,
+     63.3,
+     63.0
+    ],
+    "median_seconds": 63.3,
+    "cpu_seconds_median": 79.3,
+    "rss_mib_max": 56.2,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": -26.8
+   },
+   "606060 | 4 cores | rc7": {
+    "seconds": [
+     76.1,
+     78.8,
+     77.6
+    ],
+    "median_seconds": 77.6,
+    "cpu_seconds_median": 102.2,
+    "rss_mib_max": 57.0,
+    "exit_codes": [
+     0
+    ],
+    "against_stock_percent": -10.3
+   }
+  }
+ },
+ "fails": [],
+ "notes": [],
+ "finished_at": "2026-10-07T18:57:08Z"
+}

@@ -1,0 +1,114 @@
+From 8ffea10f9e69ed18dde1855496ec0cb288c8559f Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:36:34 +0000
+Subject: [PATCH 49/49] Review of final3: the kept index's contract stated
+ exactly, and a witness for fix 2's suppression
+
+Comment and test only; the binary is unchanged.
+
+cmd/restic/wait_index_load.go said that with any backend this build knows
+what stock knows at each point. That is more than the code does. The index
+read during the lock wait is validated by a listing, name and size, taken
+where stock lists; it is not validated by reading the files again. On a
+backend whose listing can still show a file after it was deleted, an index
+file removed by a concurrent prune is not noticed when its content was read
+during the wait. Stock notices it only without a copy of the file in its
+local cache; with the cached copy, the default, it behaves as this build.
+
+TestAsyncSaveResultSuppressionIsNarrow is the reviewer's witness for red
+team fix 2: a save's error is withheld from the uploader's group only on a
+repack's context that is cancelled, and reported on every other context.
+It catches the two mutations of fix 2 that the tests did not catch.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ cmd/restic/wait_index_load.go            | 21 +++++++++---
+ internal/repository/repack_scope_test.go | 43 ++++++++++++++++++++++++
+ 2 files changed, 60 insertions(+), 4 deletions(-)
+ create mode 100644 internal/repository/repack_scope_test.go
+
+diff --git a/cmd/restic/wait_index_load.go b/cmd/restic/wait_index_load.go
+index 89d0c7e084fcc6d891619f972fe966e844e3b53d..545c132c886b073e8630f33c2d30ddd4276bf6f4 100644
+--- a/cmd/restic/wait_index_load.go
++++ b/cmd/restic/wait_index_load.go
+@@ -21,10 +21,10 @@ import (
+ // Each of the two listings is taken where the command takes it in stock and
+ // no earlier: the snapshot files when the command selects its snapshots, the
+ // index files when it loads the index, which for restore, backup and forget
+-// is after it has read the snapshots it selected. With any backend, also one
+-// whose listings lag behind what was written, this build therefore knows at
+-// each of these points what stock knows there; what was read during the wait
+-// only saves the downloads.
++// is after it has read the snapshots it selected. So this build lists at each
++// of these points what stock lists there, also on a backend whose listings lag
++// behind what was written. What that listing proves and what it does not is
++// the contract stated at the end of this file.
+ //
+ //   - The command always works with the snapshot listing taken after
+ //     confirmation.
+@@ -355,3 +355,16 @@ func (load *repositoryIndexLoad) discard() {
+ 	load.reports.Drop()
+ 	load.repo.DiscardIndex()
+ }
++
++// The contract of the index kept from the lock wait, in full (this note
++// stands at the end of the file so that no line of code moves).
++//
++// The kept index is validated by a listing, name and size, taken where stock
++// lists. It is NOT validated by reading the files again. On a backend whose
++// listing can still show a file after it was deleted (the directory cache of
++// a network mount, an eventually consistent store), an index file that a
++// concurrent prune deleted is therefore not noticed when its content was
++// read during the wait: the index in memory is kept. Stock notices such a
++// file only when it has no copy of it in its local cache, where it fails
++// loudly on reading the file; with the file in its cache, which is the
++// default, stock uses the cached content and behaves as this build does.
+diff --git a/internal/repository/repack_scope_test.go b/internal/repository/repack_scope_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a177719d7b49452103e565ef2f38121d0581a18f
+--- /dev/null
++++ b/internal/repository/repack_scope_test.go
+@@ -0,0 +1,43 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"testing"
++)
++
++// TestAsyncSaveResultSuppressionIsNarrow is the reviewer's witness for red
++// team fix 2 (TestWitnessFinal3Fix2SuppressionIsNarrow): what a save reports
++// to the uploader's group. An error is withheld only when the context of the
++// save is a repack's AND that context is cancelled; on every other context
++// (the archiver's, cancelled or not) and on a live repack context the error
++// is reported as before.
++func TestAsyncSaveResultSuppressionIsNarrow(t *testing.T) {
++	failure := errors.New("a real save error")
++	live := context.Background()
++	dead, cancel := context.WithCancel(context.Background())
++	cancel()
++	markedLive := withRepackSaves(context.Background())
++	markedDead, cancel2 := context.WithCancel(withRepackSaves(context.Background()))
++	cancel2()
++
++	for _, tc := range []struct {
++		name string
++		ctx  context.Context
++		err  error
++		want error
++	}{
++		{"archiver context, save failed", live, failure, failure},
++		{"archiver context, cancelled, save failed", dead, failure, failure},
++		{"archiver context, cancelled, save cancelled", dead, context.Canceled, context.Canceled},
++		{"repack context, alive, save failed", markedLive, failure, failure},
++		{"repack context, alive, no error", markedLive, nil, nil},
++		{"repack context, cancelled, save cancelled", markedDead, context.Canceled, nil},
++		{"repack context, cancelled, save failed for another reason", markedDead, failure, nil},
++		{"repack context, cancelled, no error", markedDead, nil, nil},
++	} {
++		if got := asyncSaveResult(tc.ctx, tc.err); got != tc.want {
++			t.Errorf("%s: the uploader's group gets %v, want %v", tc.name, got, tc.want)
++		}
++	}
++}

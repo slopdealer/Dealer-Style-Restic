@@ -1,0 +1,160 @@
+From 60e037ca01229da86ab58f63b97f0276b1269e03 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 13:57:26 +0000
+Subject: [PATCH 02/49] R3: parallel scrypt validates its parameters exactly as
+ x/crypto's scrypt.Key
+
+The hand-written lanes did no validation. A key file with N=6, p=2 indexed
+past the stride table and crashed the process in a worker goroutine; N=12 or
+N=20 derived a key where stock stops with "scrypt: N must be > 1 and a power
+of 2". checkScryptParams repeats the three checks of scrypt.Key (same
+conditions, order and texts) and runs before anything else in
+parallelScryptKey.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/crypto/parallel_scrypt.go |  3 +
+ internal/repository/crypto/scrypt_params.go   | 24 +++++
+ .../repository/crypto/scrypt_params_test.go   | 88 +++++++++++++++++++
+ 3 files changed, 115 insertions(+)
+ create mode 100644 internal/repository/crypto/scrypt_params.go
+ create mode 100644 internal/repository/crypto/scrypt_params_test.go
+
+diff --git a/internal/repository/crypto/parallel_scrypt.go b/internal/repository/crypto/parallel_scrypt.go
+index 040f13d96e0775afc5cf967a44e6b6fdbea0b74e..bfd002d2d7236514310fe10ddd8c3e31c42d2fbd 100644
+--- a/internal/repository/crypto/parallel_scrypt.go
++++ b/internal/repository/crypto/parallel_scrypt.go
+@@ -14,6 +14,9 @@ import (
+ // independent scrypt lanes concurrently. It stores every fourth ROMix state
+ // and recomputes the intervening states during the second ROMix pass.
+ func parallelScryptKey(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
++	if err := checkScryptParams(N, r, p); err != nil {
++		return nil, err
++	}
+ 	const stride = 4
+ 	workers := min(4, p, runtime.GOMAXPROCS(0))
+ 	if workers <= 1 {
+diff --git a/internal/repository/crypto/scrypt_params.go b/internal/repository/crypto/scrypt_params.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..36f74da5da3ab8fade38408b3cfc2054991e2f8c
+--- /dev/null
++++ b/internal/repository/crypto/scrypt_params.go
+@@ -0,0 +1,24 @@
++package crypto
++
++import "errors"
++
++const maxInt = int(^uint(0) >> 1)
++
++// checkScryptParams repeats the parameter checks of scrypt.Key in
++// golang.org/x/crypto/scrypt: the same conditions, in the same order, with the
++// same error texts. parallelScryptKey runs it before its own lanes, which do
++// not validate anything and index past their tables for other values. The
++// check that KDF runs first (simple-scrypt) lets through an N that is even but
++// not a power of two; a key file can carry any N.
++func checkScryptParams(N, r, p int) error {
++	if N <= 1 || N&(N-1) != 0 {
++		return errors.New("scrypt: N must be > 1 and a power of 2")
++	}
++	if r <= 0 || p <= 0 {
++		return errors.New("scrypt: parameters must be > 0")
++	}
++	if uint64(r)*uint64(p) >= 1<<30 || r > maxInt/128/p || r > maxInt/256 || N > maxInt/128/r {
++		return errors.New("scrypt: parameters are too large")
++	}
++	return nil
++}
+diff --git a/internal/repository/crypto/scrypt_params_test.go b/internal/repository/crypto/scrypt_params_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a1aa42ce0dae6e84e3960e76944c5f36236951f
+--- /dev/null
++++ b/internal/repository/crypto/scrypt_params_test.go
+@@ -0,0 +1,88 @@
++package crypto
++
++import (
++	"bytes"
++	"math/rand"
++	"runtime"
++	"testing"
++
++	"golang.org/x/crypto/scrypt"
++)
++
++// parallelScryptKey must reject exactly the parameters that x/crypto's
++// scrypt.Key rejects, with the same error, and must never panic. The values
++// below are the ones scrypt.Key refuses at once, so calling it is cheap.
++func TestParallelScryptRejectsLikeXCrypto(t *testing.T) {
++	old := runtime.GOMAXPROCS(4)
++	defer runtime.GOMAXPROCS(old)
++	salt := bytes.Repeat([]byte{0x5a}, saltLength)
++
++	largestPow2 := maxInt>>1 + 1
++	for _, c := range []struct{ N, r, p int }{
++		// N is not a power of two: the lanes index past their table (N=6) or
++		// derive a key that is not scrypt (N=12, N=20)
++		{6, 8, 2}, {12, 8, 2}, {20, 1, 4}, {6, 8, 1}, {10, 1, 2}, {3, 1, 2}, {65534, 8, 4},
++		{0, 8, 2}, {1, 8, 2}, {-4, 8, 2}, {-1, 1, 4},
++		// r or p not positive
++		{16, 0, 2}, {16, -1, 2}, {16, 8, 0}, {16, 8, -3}, {16, 0, 0},
++		// too large
++		{16, 1 << 15, 1 << 15}, {16, 1 << 20, 1 << 10}, {16, 1, 1 << 30},
++		{largestPow2, 1, 2}, {largestPow2, 8, 2}, {largestPow2 >> 6, 1, 2},
++		{16, maxInt/256 + 1, 2}, {16, maxInt / 128 / 2, 2}, {16, maxInt/128/2 + 1, 2},
++	} {
++		_, want := scrypt.Key([]byte("pw"), salt, c.N, c.r, c.p, macKeySize+aesKeySize)
++		if want == nil {
++			t.Fatalf("N=%d r=%d p=%d: x/crypto accepted the parameters, the table is wrong", c.N, c.r, c.p)
++		}
++		_, got := parallelScryptKey([]byte("pw"), salt, c.N, c.r, c.p, macKeySize+aesKeySize)
++		if got == nil || got.Error() != want.Error() {
++			t.Errorf("N=%d r=%d p=%d: parallelScryptKey returned %v, x/crypto returns %v", c.N, c.r, c.p, got, want)
++		}
++		if err := checkScryptParams(c.N, c.r, c.p); err == nil || err.Error() != want.Error() {
++			t.Errorf("N=%d r=%d p=%d: checkScryptParams returned %v, x/crypto returns %v", c.N, c.r, c.p, err, want)
++		}
++	}
++
++	// a key file with such parameters must give an error, as in stock
++	for _, c := range []Params{{N: 6, R: 8, P: 2}, {N: 12, R: 8, P: 2}, {N: 20, R: 1, P: 4}} {
++		_, want := scrypt.Key([]byte("pw"), salt, c.N, c.R, c.P, macKeySize+aesKeySize)
++		_, err := KDF(c, salt, "pw")
++		if err == nil || want == nil || err.Error() != "scrypt.Key: "+want.Error() {
++			t.Errorf("KDF(%+v) returned %v, stock returns scrypt.Key: %v", c, err, want)
++		}
++	}
++}
++
++// Small parameters of every kind, valid or not: the same error or the same key.
++func TestParallelScryptSmallParamsDifferential(t *testing.T) {
++	old := runtime.GOMAXPROCS(4)
++	defer runtime.GOMAXPROCS(old)
++	rnd := rand.New(rand.NewSource(20261006))
++	rejected, derived := 0, 0
++	for i := 0; i < 4000; i++ {
++		N := rnd.Intn(72) - 3
++		r := rnd.Intn(5) - 1
++		p := rnd.Intn(8) - 1
++		password := make([]byte, rnd.Intn(20))
++		rnd.Read(password)
++		salt := make([]byte, saltLength)
++		rnd.Read(salt)
++		want, wantErr := scrypt.Key(password, salt, N, r, p, macKeySize+aesKeySize)
++		got, gotErr := parallelScryptKey(password, salt, N, r, p, macKeySize+aesKeySize)
++		if (wantErr == nil) != (gotErr == nil) || (wantErr != nil && wantErr.Error() != gotErr.Error()) {
++			t.Fatalf("N=%d r=%d p=%d: parallelScryptKey error %v, x/crypto error %v", N, r, p, gotErr, wantErr)
++		}
++		if wantErr != nil {
++			rejected++
++			continue
++		}
++		derived++
++		if !bytes.Equal(got, want) {
++			t.Fatalf("N=%d r=%d p=%d: key differs from x/crypto", N, r, p)
++		}
++	}
++	if rejected == 0 || derived == 0 {
++		t.Fatalf("one-sided sample: %d rejected, %d derived", rejected, derived)
++	}
++	t.Logf("%d parameter sets rejected with the same error, %d keys equal", rejected, derived)
++}

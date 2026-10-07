@@ -1,0 +1,1 @@
+x11 for 1,010,100 and 2,020,200 directories was stopped at 2026-10-07T20:12:54Z by order of the coordinator; 29 restores had finished (rows-completed-before-stop.json).

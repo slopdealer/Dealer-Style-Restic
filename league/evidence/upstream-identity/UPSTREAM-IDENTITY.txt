@@ -1,0 +1,38 @@
+Commit 1 of the published repository compared with upstream restic
+checked 2026-10-07T19:42Z through GitHub's API: GET repos/restic/restic/git/trees/ba802d42b7294c98b62c16d1157ea3e80820c019
+
+top-level entries of commit 1 (git ls-tree), and the object id upstream has for the same path:
+
+path     id in commit 1                             id upstream                                result
+LICENSE  29b2ee55a92ff2c5516d7b916224c85fa7e9139a   29b2ee55a92ff2c5516d7b916224c85fa7e9139a   EQUAL
+Makefile 7e07ec8a0f9dee18442e964d8d6801ad6580f771   7e07ec8a0f9dee18442e964d8d6801ad6580f771   EQUAL
+README.md b0861e60fc2a31d7a213d848a90241c21d3f4b4e   b0861e60fc2a31d7a213d848a90241c21d3f4b4e   EQUAL
+VERSION  c06d565cb5baf9aeb2d96c025441b68548b9aac9   c06d565cb5baf9aeb2d96c025441b68548b9aac9   EQUAL
+build.go a1447d9b00fb0991e166243418d5247e9ec3cf06   a1447d9b00fb0991e166243418d5247e9ec3cf06   EQUAL
+cmd      e92840f1ad84205e6e373f3712eb5d6b70e02992   e92840f1ad84205e6e373f3712eb5d6b70e02992   EQUAL
+doc.go   31527a78daae994fecfbe5c6e832fdf6a79b9fff   31527a78daae994fecfbe5c6e832fdf6a79b9fff   EQUAL
+go.mod   80d49207e0fa60a0dc4b2056eee683fb4e927686   80d49207e0fa60a0dc4b2056eee683fb4e927686   EQUAL
+go.sum   83190db9388e9fe03f142f2b4c8b54e5adc8a6db   83190db9388e9fe03f142f2b4c8b54e5adc8a6db   EQUAL
+helpers  3e56c6633755088ddfed1e2b0ba5bd8945b1144e   3e56c6633755088ddfed1e2b0ba5bd8945b1144e   EQUAL
+internal dde6ed7787e0715afb188e7471c7341ea08f5fe6   dde6ed7787e0715afb188e7471c7341ea08f5fe6   EQUAL
+
+upstream's top-level entries that are NOT in commit 1 (the subset leaves them out):
+  .codespellrc
+  .dockerignore
+  .gitattributes
+  .github
+  .gitignore
+  .golangci.yml
+  .readthedocs.yaml
+  CHANGELOG.md
+  CONTRIBUTING.md
+  GOVERNANCE.md
+  changelog
+  contrib
+  doc
+  docker
+
+files upstream marks executable or as links at that commit (recursive tree):
+  100755 docker/build.sh
+  100755 docker/entrypoint.sh
+  100755 helpers/verify-release-binaries.sh

@@ -1,0 +1,340 @@
+From 1b653c6a59e951731fe00b00a1c8e9bafa968a69 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 08:43:02 +0000
+Subject: [PATCH 25/49] S020 review (index): the stock listing loop that
+ nothing calls moves to the tests
+
+REVIEW-s020 section 7: after S020's listing routes MasterIndex.listPacks
+was always called with collect = true and ListPacks no longer called
+it, so stock's sixteen-pass loop behind the parameter was unreachable
+in the binary. The parameter and the loop are removed from the
+production file. The loop lives on unchanged as listPacksStock in a
+test file, because the listing tests compare every production path
+with it. League batch names are dropped from one test file name and
+its helper types.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../repository/index/list_packs_bounded.go    |  2 +-
+ .../repository/index/list_packs_stock_test.go | 51 +++++++++++++++++++
+ internal/repository/index/master_index.go     | 47 +++--------------
+ .../repository/index/repack_fallback_test.go  | 12 ++---
+ ...st.go => repack_routes_settlement_test.go} | 28 +++++-----
+ 5 files changed, 79 insertions(+), 61 deletions(-)
+ create mode 100644 internal/repository/index/list_packs_stock_test.go
+ rename internal/repository/index/{repack_routes_settlement_b26_test.go => repack_routes_settlement_test.go} (84%)
+
+diff --git a/internal/repository/index/list_packs_bounded.go b/internal/repository/index/list_packs_bounded.go
+index 6877fce6dcea9b1c6a1a62b76451f87708cede80..b0d004302bda67b032f79e1da036af3444c8ec9e 100644
+--- a/internal/repository/index/list_packs_bounded.go
++++ b/internal/repository/index/list_packs_bounded.go
+@@ -53,5 +53,5 @@ func (mi *MasterIndex) collectSelectedPacks(ctx context.Context, packs restic.ID
+ // An overflowing attempt publishes nothing, so the original path can start
+ // cleanly. Callers must cancel the context if they stop consuming the channel.
+ func (mi *MasterIndex) ListPacksForRepack(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
+-	return mi.listPacks(ctx, packs, true)
++	return mi.listPacks(ctx, packs)
+ }
+diff --git a/internal/repository/index/list_packs_stock_test.go b/internal/repository/index/list_packs_stock_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..567fe0e6d1c8a8a4142051b080243dc6590207b8
+--- /dev/null
++++ b/internal/repository/index/list_packs_stock_test.go
+@@ -0,0 +1,51 @@
++package index
++
++import (
++	"context"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// listPacksStock is stock's MasterIndex.ListPacks, unchanged: sixteen walks
++// over all index values. Production code does not call it any more; the
++// listing tests compare every listing path with it.
++func (mi *MasterIndex) listPacksStock(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
++	out := make(chan PackBlobs)
++	go func() {
++		defer close(out)
++		// only resort a part of the index to keep the memory overhead bounded
++		for i := range byte(16) {
++			packBlob := make(map[restic.ID]pack.Blobs)
++			for pack := range packs {
++				if pack[0]&0xf == i {
++					packBlob[pack] = nil
++				}
++			}
++			if len(packBlob) == 0 {
++				continue
++			}
++			for pb := range mi.Values() {
++				if ctx.Err() != nil {
++					return
++				}
++				packID := pb.PackID()
++				if packs.Has(packID) && packID[0]&0xf == i {
++					packBlob[packID] = append(packBlob[packID], pb.Blob)
++				}
++			}
++
++			// pass on packs
++			for packID, pbs := range packBlob {
++				// allow GC
++				packBlob[packID] = nil
++				select {
++				case out <- PackBlobs{PackID: packID, Blobs: pbs}:
++				case <-ctx.Done():
++					return
++				}
++			}
++		}
++	}()
++	return out
++}
+diff --git a/internal/repository/index/master_index.go b/internal/repository/index/master_index.go
+index ecbdb738b01ef8950b87e2ecf4634ba851af6a9e..45ca0cdbac34e1819222b10f382b226646862ad0 100644
+--- a/internal/repository/index/master_index.go
++++ b/internal/repository/index/master_index.go
+@@ -703,11 +703,14 @@ func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan
+ 	return mi.listPacksFallback(ctx, packs)
+ }
+ 
+-func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collect bool) <-chan PackBlobs {
++// listPacks lists the blobs of the packs to repack: a bounded single traversal
++// for small selections, then routes by pack ordinal over a single final
++// index, then the selective partition walk that ListPacks uses.
++func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
+ 	out := make(chan PackBlobs)
+ 	go func() {
+ 		defer close(out)
+-		if collect && len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
++		if len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
+ 			grouped, complete := mi.collectSelectedPacks(ctx, packs, listPacksCollectPackLimit, listPacksCollectBlobLimit)
+ 			if ctx.Err() != nil {
+ 				return
+@@ -730,47 +733,11 @@ func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collec
+ 			}
+ 		}
+ 
+-		if collect && len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
++		if len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
+ 			return
+ 		}
+ 
+-		if collect {
+-			mi.publishRepackFallback(ctx, packs, out)
+-			return
+-		}
+-
+-		// only resort a part of the index to keep the memory overhead bounded
+-		for i := range byte(16) {
+-			packBlob := make(map[restic.ID]pack.Blobs)
+-			for pack := range packs {
+-				if pack[0]&0xf == i {
+-					packBlob[pack] = nil
+-				}
+-			}
+-			if len(packBlob) == 0 {
+-				continue
+-			}
+-			for pb := range mi.Values() {
+-				if ctx.Err() != nil {
+-					return
+-				}
+-				packID := pb.PackID()
+-				if packs.Has(packID) && packID[0]&0xf == i {
+-					packBlob[packID] = append(packBlob[packID], pb.Blob)
+-				}
+-			}
+-
+-			// pass on packs
+-			for packID, pbs := range packBlob {
+-				// allow GC
+-				packBlob[packID] = nil
+-				select {
+-				case out <- PackBlobs{PackID: packID, Blobs: pbs}:
+-				case <-ctx.Done():
+-					return
+-				}
+-			}
+-		}
++		mi.publishRepackFallback(ctx, packs, out)
+ 	}()
+ 	return out
+ }
+diff --git a/internal/repository/index/repack_fallback_test.go b/internal/repository/index/repack_fallback_test.go
+index 3a9d443465e9bbf21290074fe859baa2253bc531..a1317715330c573ea6a99391129db93f4f90fde9 100644
+--- a/internal/repository/index/repack_fallback_test.go
++++ b/internal/repository/index/repack_fallback_test.go
+@@ -106,7 +106,7 @@ func TestB18FallbackDifferential(t *testing.T) {
+ 			t.Run(fmt.Sprintf("%s/selected%d", layout, selected), func(t *testing.T) {
+ 				mi, packs := routeFixture(130000, selected)
+ 				b18Layout(mi, layout)
+-				want := collectPackChannel(t, mi.listPacks(context.Background(), packs, false))
++				want := collectPackChannel(t, mi.listPacksStock(context.Background(), packs))
+ 				ordinary := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
+ 				if !reflect.DeepEqual(want, ordinary) {
+ 					t.Fatal("ordinary fallback differs from original pointer traversal")
+@@ -247,17 +247,17 @@ func TestB18FallbackPartialCancellation(t *testing.T) {
+ 	mi.idx[0].final = false
+ 	parent, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+-	gate := &b26RouteCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
++	gate := &routeCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
+ 	out := make(chan PackBlobs)
+ 	done := make(chan struct{})
+ 	go func() { mi.publishRepackFallback(gate, packs, out); close(out); close(done) }()
+-	b26Await(t, gate.entered, "partial fallback scan")
++	awaitSettlement(t, gate.entered, "partial fallback scan")
+ 	cancel()
+ 	close(gate.release)
+ 	for range out {
+ 		t.Fatal("partial canceled partition escaped")
+ 	}
+-	b26Await(t, done, "fallback producer settlement")
++	awaitSettlement(t, done, "fallback producer settlement")
+ 	unlocked := make(chan struct{})
+ 	go func() {
+ 		mi.idxMutex.Lock()
+@@ -266,7 +266,7 @@ func TestB18FallbackPartialCancellation(t *testing.T) {
+ 		mi.idxMutex.Unlock()
+ 		close(unlocked)
+ 	}()
+-	b26Await(t, unlocked, "fallback post-cancellation locks")
++	awaitSettlement(t, unlocked, "fallback post-cancellation locks")
+ }
+ 
+ func TestB18FallbackOwnsPublishedValues(t *testing.T) {
+@@ -293,7 +293,7 @@ func BenchmarkB18OrdinaryFallback(b *testing.B) {
+ 					if arm == "reject" {
+ 						out = mi.ListPacks(context.Background(), packs)
+ 					} else {
+-						out = mi.listPacks(context.Background(), packs, false)
++						out = mi.listPacksStock(context.Background(), packs)
+ 					}
+ 					count := 0
+ 					for pbs := range out {
+diff --git a/internal/repository/index/repack_routes_settlement_b26_test.go b/internal/repository/index/repack_routes_settlement_test.go
+similarity index 84%
+rename from internal/repository/index/repack_routes_settlement_b26_test.go
+rename to internal/repository/index/repack_routes_settlement_test.go
+index 826224d458b3f9387d3a8cb5507572cba68355a0..0d3d79751896f5fc9ab0a24fea0741a78457e7ca 100644
+--- a/internal/repository/index/repack_routes_settlement_b26_test.go
++++ b/internal/repository/index/repack_routes_settlement_test.go
+@@ -15,7 +15,7 @@ import (
+ // Gate an actual cancellation at an Err checkpoint, without scheduling sleeps
+ // or changing production code. The call count lets the test stop after some
+ // selected entries have been copied, rather than only before work begins.
+-type b26RouteCheckpoint struct {
++type routeCheckpoint struct {
+ 	context.Context
+ 	calls   atomic.Int64
+ 	stop    int64
+@@ -23,7 +23,7 @@ type b26RouteCheckpoint struct {
+ 	release chan struct{}
+ }
+ 
+-func (c *b26RouteCheckpoint) Err() error {
++func (c *routeCheckpoint) Err() error {
+ 	if c.calls.Add(1) == c.stop {
+ 		close(c.entered)
+ 		<-c.release
+@@ -31,7 +31,7 @@ func (c *b26RouteCheckpoint) Err() error {
+ 	return c.Context.Err()
+ }
+ 
+-func b26Await(t *testing.T, ch <-chan struct{}, what string) {
++func awaitSettlement(t *testing.T, ch <-chan struct{}, what string) {
+ 	t.Helper()
+ 	select {
+ 	case <-ch:
+@@ -40,13 +40,13 @@ func b26Await(t *testing.T, ch <-chan struct{}, what string) {
+ 	}
+ }
+ 
+-func TestB26RepackRoutesPartialCancellation(t *testing.T) {
++func TestRepackRoutesPartialCancellation(t *testing.T) {
+ 	for _, stage := range []string{"construction", "partition"} {
+ 		t.Run(stage, func(t *testing.T) {
+ 			mi, packs := routeFixture(20000, 19)
+ 			parent, cancel := context.WithCancel(context.Background())
+ 			defer cancel()
+-			gate := &b26RouteCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
++			gate := &routeCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
+ 			defer func() {
+ 				select {
+ 				case <-gate.release:
+@@ -75,10 +75,10 @@ func TestB26RepackRoutesPartialCancellation(t *testing.T) {
+ 					failure = "partial partition escaped"
+ 				}
+ 			}()
+-			b26Await(t, gate.entered, "partial-work checkpoint")
++			awaitSettlement(t, gate.entered, "partial-work checkpoint")
+ 			cancel()
+ 			close(gate.release)
+-			b26Await(t, done, "canceled work settlement")
++			awaitSettlement(t, done, "canceled work settlement")
+ 			if failure != "" {
+ 				t.Fatal(failure)
+ 			}
+@@ -91,12 +91,12 @@ func TestB26RepackRoutesPartialCancellation(t *testing.T) {
+ 				mi.idxMutex.Unlock()
+ 				close(unlocked)
+ 			}()
+-			b26Await(t, unlocked, "post-cancellation write locks")
++			awaitSettlement(t, unlocked, "post-cancellation write locks")
+ 		})
+ 	}
+ }
+ 
+-func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
++func TestRepackRoutesConcurrentGrowth(t *testing.T) {
+ 	mi, packs := routeFixture(20000, 19)
+ 	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
+ 	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
+@@ -118,7 +118,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
+ 		other.Finalize()
+ 		additions[batch] = other
+ 	}
+-	gate := &b26RouteCheckpoint{Context: context.Background(), stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
++	gate := &routeCheckpoint{Context: context.Background(), stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
+ 	defer func() {
+ 		select {
+ 		case <-gate.release:
+@@ -128,7 +128,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
+ 	}()
+ 	first := make(chan map[restic.ID]pack.Blobs, 1)
+ 	go func() { first <- routes.partition(gate, packs, 1) }()
+-	b26Await(t, gate.entered, "conversion holding captured-index read lock")
++	awaitSettlement(t, gate.entered, "conversion holding captured-index read lock")
+ 	started := make(chan struct{})
+ 	done := make(chan struct{})
+ 	var mergeErr error
+@@ -142,7 +142,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
+ 			}
+ 		}
+ 	}()
+-	b26Await(t, started, "merge started during conversion")
++	awaitSettlement(t, started, "merge started during conversion")
+ 	select {
+ 	case <-done:
+ 		t.Fatal("merge finished while partition held read lock")
+@@ -168,7 +168,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
+ 			t.Fatalf("partition %d retains its ordinal array", group)
+ 		}
+ 	}
+-	b26Await(t, done, "concurrent merges")
++	awaitSettlement(t, done, "concurrent merges")
+ 	if mergeErr != nil {
+ 		t.Fatal(mergeErr)
+ 	}
+@@ -183,7 +183,7 @@ func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
+ 	}
+ }
+ 
+-func TestB26RepackRoutesConsumerOwnership(t *testing.T) {
++func TestRepackRoutesConsumerOwnership(t *testing.T) {
+ 	mi, packs := routeFixture(20000, 19)
+ 	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
+ 	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)

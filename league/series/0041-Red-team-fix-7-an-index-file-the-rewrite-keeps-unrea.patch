@@ -1,0 +1,305 @@
+From 5ae8460912d19a3771cd7084dd3a1c784a43cabf Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:22:34 +0000
+Subject: [PATCH 41/49] Red team fix 7: an index file the rewrite keeps unread
+ is first compared with its name
+
+Prune's index rewrite keeps the index files that stay as they are without
+decoding them again. Upstream reads every index file again, so it fails on a
+file that was damaged or removed after it was loaded; the kept files were not
+looked at. Each kept file is now read as it is stored and its SHA-256 compared
+with its name (the repository's LoadRaw, with which upstream's reload begins;
+content that passes is the content this process decoded before). A file that
+cannot be read or has changed fails the rewrite with the error of upstream's
+reload, before any index file is removed. What is still saved is the
+decryption, decompression and decoding of the kept files. A repository
+wrapper without LoadRaw gets upstream's full reload.
+
+Tests: TestRewriteRejectsDamagedKeptIndex (seat 2 finding 3, carried in)
+fails before this commit and passes after; TestRewriteKeepsUnread now also
+requires one raw read per kept file; TestRewriteFailsOnChangedKeptFile covers
+a changed and a missing kept file.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../index/associated_position_merge_test.go   | 81 ++++++++++++++++++-
+ .../repository/index/index_rewrite_keep.go    | 18 +++++
+ internal/repository/index/master_index.go     | 16 +++-
+ .../index_rewrite_kept_damaged_test.go        | 62 ++++++++++++++
+ 4 files changed, 172 insertions(+), 5 deletions(-)
+ create mode 100644 internal/repository/index_rewrite_kept_damaged_test.go
+
+diff --git a/internal/repository/index/associated_position_merge_test.go b/internal/repository/index/associated_position_merge_test.go
+index ab7687e7db6300091490decc72cf07a2003f7f75..1cc33307dbbd06ee5b8c367a9ba0d5608e1fbcb8 100644
+--- a/internal/repository/index/associated_position_merge_test.go
++++ b/internal/repository/index/associated_position_merge_test.go
+@@ -2,7 +2,9 @@ package index
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"math/rand"
++	"strings"
+ 	"sync"
+ 	"testing"
+ 	"time"
+@@ -182,10 +184,30 @@ type mergeTestRepo struct {
+ 	restic.Unpacked[restic.FileType]
+ 	files  map[restic.ID][]byte
+ 	loaded map[restic.ID]int
++	raw    map[restic.ID]int
+ 	saved  restic.IDSet
+ 	m      sync.Mutex
+ }
+ 
++// LoadRaw returns a file as stored; like the repository's it fails when the
++// content does not hash to the name.
++func (r *mergeTestRepo) LoadRaw(_ context.Context, _ restic.FileType, id restic.ID) ([]byte, error) {
++	r.m.Lock()
++	defer r.m.Unlock()
++	if r.raw == nil {
++		r.raw = map[restic.ID]int{}
++	}
++	r.raw[id]++
++	buf, ok := r.files[id]
++	if !ok {
++		return nil, fmt.Errorf("file %v does not exist", id.Str())
++	}
++	if restic.Hash(buf) != id {
++		return buf, restic.ErrInvalidData
++	}
++	return buf, nil
++}
++
+ func (r *mergeTestRepo) Connections() uint { return 2 }
+ func (r *mergeTestRepo) List(_ context.Context, _ restic.FileType, fn func(restic.ID, int64) error) error {
+ 	r.m.Lock()
+@@ -283,6 +305,7 @@ func TestRewriteKeepsUnread(t *testing.T) {
+ 		return repo, shared, excluded
+ 	}
+ 
++	rawReads := 0
+ 	run := func(skip bool) (map[restic.ID]int, map[restic.ID]int, int) {
+ 		repo, _, excluded := build()
+ 		before := len(repo.files)
+@@ -306,6 +329,13 @@ func TestRewriteKeepsUnread(t *testing.T) {
+ 		for id, n := range repo.loaded {
+ 			reread[id] = n
+ 		}
++		rawReads = 0
++		for id, n := range repo.raw {
++			if reread[id] != 0 || n != 1 {
++				t.Fatalf("index file %v: read raw %d times and decoded %d times", id.Str(), n, reread[id])
++			}
++			rawReads++
++		}
+ 		survivors := 0
+ 		for id := range kept {
+ 			if _, ok := repo.files[id]; ok {
+@@ -337,10 +367,14 @@ func TestRewriteKeepsUnread(t *testing.T) {
+ 	if len(allLoaded) != 6 {
+ 		t.Fatalf("reference rewrite loaded %d files", len(allLoaded))
+ 	}
+-	// files 0 and 1 are full with packs of their own: not read again
++	// files 0 and 1 are full with packs of their own: not decoded again, but
++	// read once as they are stored and compared with their names
+ 	if len(loaded) != 4 {
+ 		t.Fatalf("rewrite read %d index files again, want 4", len(loaded))
+ 	}
++	if rawReads != 2 {
++		t.Fatalf("rewrite compared %d kept index files with their names, want 2", rawReads)
++	}
+ 	if survivors != wantSurvivors {
+ 		t.Fatalf("kept %d old index files, reference kept %d", survivors, wantSurvivors)
+ 	}
+@@ -353,3 +387,48 @@ func TestRewriteKeepsUnread(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// TestRewriteFailsOnChangedKeptFile: a kept index file whose stored content no
++// longer hashes to its name, or which is gone, fails the rewrite with the
++// error of upstream's reload, and no index file is removed.
++func TestRewriteFailsOnChangedKeptFile(t *testing.T) {
++	origFull := Full
++	defer func() { Full = origFull }()
++	Full = func(idx *Index) bool { return true }
++
++	for _, gone := range []bool{false, true} {
++		repo := &mergeTestRepo{files: map[restic.ID][]byte{}, loaded: map[restic.ID]int{}}
++		var ids restic.IDs
++		for f := 0; f < 3; f++ {
++			idx := NewIndex()
++			blob := restic.BlobHandle{ID: restic.Hash([]byte{byte(f)}), Type: restic.DataBlob}
++			idx.StorePack(restic.Hash([]byte{byte(f), 1}), pack.Blobs{{BlobHandle: blob, Length: 60}})
++			idx.Finalize()
++			id, err := idx.SaveIndex(context.TODO(), repo)
++			if err != nil {
++				t.Fatal(err)
++			}
++			ids = append(ids, id)
++		}
++		mi := NewMasterIndex()
++		if err := mi.Load(context.TODO(), repo, restic.NoopCounter, nil); err != nil {
++			t.Fatal(err)
++		}
++		if gone {
++			delete(repo.files, ids[1])
++		} else {
++			repo.files[ids[1]] = append([]byte("x"), repo.files[ids[1]]...)
++		}
++		files := len(repo.files)
++		err := mi.Rewrite(context.TODO(), repo, nil, nil, nil, MasterIndexRewriteOpts{})
++		if err == nil || !strings.Contains(err.Error(), "LoadUnpacked("+ids[1].Str()+"): ") {
++			t.Fatalf("gone=%v: rewrite returned %v, want the error of the reload of %v", gone, err, ids[1].Str())
++		}
++		if !gone && !strings.Contains(err.Error(), restic.ErrInvalidData.Error()) {
++			t.Fatalf("rewrite returned %v, want invalid data", err)
++		}
++		if len(repo.files) != files {
++			t.Fatalf("gone=%v: %d index files after the failed rewrite, %d before", gone, len(repo.files), files)
++		}
++	}
++}
+diff --git a/internal/repository/index/index_rewrite_keep.go b/internal/repository/index/index_rewrite_keep.go
+index b68c198add2961c31c7892ddc33f36ff701ec9aa..01d563be9a8268836586ba1809ffe5bf68497da8 100644
+--- a/internal/repository/index/index_rewrite_keep.go
++++ b/internal/repository/index/index_rewrite_keep.go
+@@ -1,6 +1,7 @@
+ package index
+ 
+ import (
++	"context"
+ 	"slices"
+ 	"time"
+ 
+@@ -98,3 +99,20 @@ func (mi *MasterIndex) rewriteKeepsUnread(indexes restic.IDSet, excludePacks res
+ 	}
+ 	return kept
+ }
++
++// rawIndexFileLoader reads a file as it is stored and returns an error when
++// its content does not hash to its name, as the repository's LoadRaw does.
++type rawIndexFileLoader interface {
++	LoadRaw(ctx context.Context, t restic.FileType, id restic.ID) ([]byte, error)
++}
++
++// verifyKeptIndexFile reads an index file which Rewrite keeps without decoding
++// it again and checks that it is still the file that was loaded: its content
++// must hash to its name. This is the check with which upstream's reload of
++// the file begins; content that passes it is the content this process has
++// decoded before. A file that cannot be read, or that has changed, fails the
++// rewrite with the error of upstream's reload.
++func verifyKeptIndexFile(ctx context.Context, repo rawIndexFileLoader, id restic.ID) error {
++	_, err := repo.LoadRaw(ctx, restic.IndexFile, id)
++	return err
++}
+diff --git a/internal/repository/index/master_index.go b/internal/repository/index/master_index.go
+index 3c5326f32133369e2e0f932303710b5cc3b2551a..04452eff9fb8c697484dd4b09313970d9fb227fa 100644
+--- a/internal/repository/index/master_index.go
++++ b/internal/repository/index/master_index.go
+@@ -426,6 +426,11 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
+ 	// index files that stay as they are need not be read again; this is
+ 	// decided from the notes of the loaded files, which clear releases
+ 	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
++	// ... but each of them is read raw and compared with its name first
++	rawLoader, _ := repo.(rawIndexFileLoader)
++	if rawLoader == nil {
++		keptUnread = nil
++	}
+ 
+ 	// reset state which is not necessary for Rewrite and just consumes a lot of memory
+ 	// the index state would be invalid after Rewrite completes anyways
+@@ -444,10 +449,6 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
+ 	wg.Go(func() error {
+ 		defer close(idxCh)
+ 		for id := range indexes {
+-			if keptUnread.Has(id) {
+-				p.Add(1)
+-				continue
+-			}
+ 			select {
+ 			case idxCh <- id:
+ 			case <-wgCtx.Done():
+@@ -465,6 +466,13 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
+ 	loader := func() error {
+ 		defer rewriteWg.Done()
+ 		for id := range idxCh {
++			if keptUnread.Has(id) {
++				if err := verifyKeptIndexFile(wgCtx, rawLoader, id); err != nil {
++					return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), err)
++				}
++				p.Add(1)
++				continue
++			}
+ 			idx, loadErr, err := loadIndexFile(wgCtx, repo, id)
+ 			if loadErr != nil {
+ 				return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), loadErr)
+diff --git a/internal/repository/index_rewrite_kept_damaged_test.go b/internal/repository/index_rewrite_kept_damaged_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a821f3347eea7e29c8110b55a28da6c2f08bed66
+--- /dev/null
++++ b/internal/repository/index_rewrite_kept_damaged_test.go
+@@ -0,0 +1,62 @@
++package repository
++
++import (
++	"context"
++	"encoding/binary"
++	"io"
++	"testing"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// TestRewriteRejectsDamagedKeptIndex is the red team's test (seat 2, finding
++// 3): an index file which the rewrite keeps as it is must still be the file
++// that was loaded. Upstream reads every index file again and fails on one
++// whose content no longer hashes to its name.
++func TestRewriteRejectsDamagedKeptIndex(t *testing.T) {
++	ctx := context.Background()
++	repo, be := TestRepositoryWithBackend(t, nil, 2, Options{})
++	idx := index.NewIndex()
++	blobs := make(pack.Blobs, 50000)
++	for i := range blobs {
++		var seed [8]byte
++		binary.LittleEndian.PutUint64(seed[:], uint64(i))
++		blobs[i] = pack.Blob{BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: restic.Hash(seed[:])}, Offset: uint(i * 64), Length: 64}
++	}
++	idx.StorePack(restic.Hash([]byte("kept pack")), blobs)
++	idx.Finalize()
++	id, err := idx.SaveIndex(ctx, &internalRepository{repo})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.LoadIndex(ctx, restic.NoopTerminalCounterFactory); err != nil {
++		t.Fatal(err)
++	}
++	h := backend.Handle{Type: backend.IndexFile, Name: id.String()}
++	var encrypted []byte
++	if err := be.Load(ctx, h, 0, 0, func(rd io.Reader) error {
++		var err error
++		encrypted, err = io.ReadAll(rd)
++		return err
++	}); err != nil {
++		t.Fatal(err)
++	}
++	encrypted[len(encrypted)/2] ^= 1
++	if err := be.Remove(ctx, h); err != nil {
++		t.Fatal(err)
++	}
++	if err := be.Save(ctx, h, backend.NewByteReader(encrypted, be.Hasher())); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := repo.LoadUnpacked(ctx, restic.IndexFile, id); err == nil {
++		t.Fatal("control did not reject damaged index")
++	} else {
++		t.Logf("upstream's required reload rejects index: %v", err)
++	}
++	if err := repo.idx.Rewrite(ctx, &internalRepository{repo}, nil, nil, nil, index.MasterIndexRewriteOpts{}); err == nil {
++		t.Fatal("rewrite skipped the damaged full index and returned success")
++	}
++}

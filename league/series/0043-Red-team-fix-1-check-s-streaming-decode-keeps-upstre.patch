@@ -1,0 +1,364 @@
+From 7c967e3f636ef240b155e1b6dd7bbfc020d2d35c Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:33:03 +0000
+Subject: [PATCH 43/49] Red team fix 1: check's streaming decode keeps
+ upstream's ceiling on decoded bytes
+
+check --read-data hashes the decoded bytes of a compressed blob as a stream.
+A stream limits only the window, so a crafted blob that decodes to more than
+64 GiB was accepted, while upstream's check (which decodes into memory with
+zstd's default limit) and restore refuse it.
+
+The stream's output is now counted against the same limit, 64 GiB, and
+output beyond it fails with the decoder's own error for that case, in the
+wrapping the eager path uses, so the message is upstream's. A first frame
+that declares more content than the limit is refused before any of it is
+decoded, as DecodeAll does. Blobs too short to reach the limit (less than
+limit>>21 compressed bytes, 32 KiB for 64 GiB) take the path they took
+before, without the counter.
+
+Tests (seat 2 finding 1, carried in): TestCheckStreamKeepsCumulativeDecodeLimit
+fails before this commit and passes after. The reviewer set the small
+ceiling of the quick test on the decoder, which a stream cannot read; the
+test sets the same ceiling on the iterator as well (one line), and now also
+compares the error text with the eager path and the exact boundary.
+TestCheckStreamRefusesDeclaredOversize covers the declared size.
+TestLargeCheckRejectsUnrestorableBlob is the production-size test (64 GiB
++ 1 byte, opt-in with RESTIC_LARGE_CHECK_TEST=1), unchanged.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/check_decode_limit.go     |  59 +++++
+ .../repository/check_decode_limit_test.go     | 225 ++++++++++++++++++
+ internal/repository/repository.go             |   6 +-
+ 3 files changed, 289 insertions(+), 1 deletion(-)
+ create mode 100644 internal/repository/check_decode_limit.go
+ create mode 100644 internal/repository/check_decode_limit_test.go
+
+diff --git a/internal/repository/check_decode_limit.go b/internal/repository/check_decode_limit.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9ea4d7254cd55cf528bacf1611442827dae73b6
+--- /dev/null
++++ b/internal/repository/check_decode_limit.go
+@@ -0,0 +1,59 @@
++package repository
++
++import (
++	"io"
++
++	"github.com/klauspost/compress/zstd"
++)
++
++// checkDecodedSizeLimit is the number of bytes to which check decodes one
++// blob at most. It is the limit of the decoder with which upstream's check
++// decodes a blob into memory (zstd's default limit for DecodeAll); a blob
++// that decodes to more is damaged for upstream's check and for restore.
++// Check hashes the decoded bytes as a stream here, and a stream has no such
++// limit of its own, so the bytes are counted.
++const checkDecodedSizeLimit uint64 = 64 << 30
++
++// zstdBlockSizeBits is the width of the size field of a zstd block. A block
++// takes at least one byte of input and decodes to less than 1<<21 bytes, so
++// n bytes of input decode to less than n<<21 bytes.
++const zstdBlockSizeBits = 21
++
++// limitedHashWriter passes at most left bytes on and then fails with the
++// error upstream's decoder returns for output beyond its limit.
++type limitedHashWriter struct {
++	w    io.Writer
++	left uint64
++}
++
++func (l *limitedHashWriter) Write(p []byte) (int, error) {
++	if uint64(len(p)) > l.left {
++		return 0, zstd.ErrDecoderSizeExceeded
++	}
++	l.left -= uint64(len(p))
++	return l.w.Write(p)
++}
++
++// hashDecoded writes the decoded content of compressed, on which b.dec has
++// been reset, to b.blobHash. Content beyond b.hashLimit fails with
++// zstd.ErrDecoderSizeExceeded, as it does in upstream's DecodeAll.
++func (b *packBlobIterator) hashDecoded(compressed []byte) error {
++	limit := b.hashLimit
++	if uint64(len(compressed)) < limit>>zstdBlockSizeBits {
++		// too short to decode to more than the limit
++		_, err := io.Copy(b.blobHash, b.dec)
++		return err
++	}
++
++	// DecodeAll refuses a frame which declares more content than the limit
++	// before it decodes any of it, once the frame's window has been accepted;
++	// a window no decoder accepts is left to the decoder. Later frames are
++	// refused when the output passes the limit.
++	var hdr zstd.Header
++	if err := hdr.Decode(compressed); err == nil && hdr.HasFCS && hdr.FrameContentSize > limit && hdr.WindowSize <= zstd.MaxWindowSize {
++		return zstd.ErrDecoderSizeExceeded
++	}
++	b.hashWriter = limitedHashWriter{w: b.blobHash, left: limit}
++	_, err := io.Copy(&b.hashWriter, b.dec)
++	return err
++}
+diff --git a/internal/repository/check_decode_limit_test.go b/internal/repository/check_decode_limit_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5fa35b69428f9b1093866185a7804973b0753a59
+--- /dev/null
++++ b/internal/repository/check_decode_limit_test.go
+@@ -0,0 +1,225 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/binary"
++	"errors"
++	"hash"
++	"io"
++	"os"
++	"testing"
++
++	"github.com/klauspost/compress/zstd"
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// The two tests of the red team (seat 2, finding 1): check's streaming decode
++// must keep the ceiling on decoded bytes that upstream's check and restore
++// have.
++
++// Use the same two iterator entry points, with a small decoder ceiling so the
++// lost cumulative output check can be demonstrated without a 64 GiB allocation.
++func TestCheckStreamKeepsCumulativeDecodeLimit(t *testing.T) {
++	repo, _ := TestRepositoryWithBackend(t, nil, 2, Options{})
++	const limit = 16 << 10
++	plain := bytes.Repeat([]byte{0x42}, 8<<10)
++	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(1024), zstd.WithSingleSegment(false), zstd.WithEncoderCRC(false))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer enc.Close()
++	frame := enc.EncodeAll(plain, nil)
++	compressed := bytes.Repeat(frame, 3)
++	wantPlain := bytes.Repeat(plain, 3)
++	nonce := bytes.Repeat([]byte{1}, repo.Key().NonceSize())
++	ciphertext := append(bytes.Clone(nonce), repo.Key().Seal(nil, nonce, compressed, nil)...)
++	entry := pack.Blob{BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: restic.Hash(wantPlain)}, Length: uint(len(ciphertext)), UncompressedLength: uint(len(wantPlain))}
++	makeIterator := func() *packBlobIterator {
++		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(limit))
++		if err != nil {
++			t.Fatal(err)
++		}
++		t.Cleanup(dec.Close)
++		return newPackBlobIterator(restic.ID{}, newByteReader(bytes.Clone(ciphertext)), 0, pack.Blobs{entry}, repo.Key(), dec)
++	}
++	upstream, err := makeIterator().Next()
++	if err != nil || upstream.Err == nil {
++		t.Fatalf("eager control failed to reject over-limit output: iterator %v, blob %v", err, upstream.Err)
++	}
++	t.Logf("upstream iterator rejects cumulative output: %v", upstream.Err)
++	// The stream cannot read the ceiling of the decoder it is given; in check
++	// both are upstream's 64 GiB. Here the same small ceiling is set for both.
++	it := makeIterator()
++	it.hashLimit = limit
++	candidate, err := it.NextHash()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if candidate.Err == nil {
++		t.Fatal("streaming checker accepted cumulative decoded output beyond the decoder ceiling")
++	}
++	if candidate.Err.Error() != upstream.Err.Error() || !errors.Is(candidate.Err, zstd.ErrDecoderSizeExceeded) {
++		t.Fatalf("streaming checker reports %q, the eager one %q", candidate.Err, upstream.Err)
++	}
++
++	// exactly at the ceiling both accept, one byte less of a ceiling both refuse
++	for _, test := range []struct {
++		limit uint64
++		ok    bool
++	}{{uint64(len(wantPlain)), true}, {uint64(len(wantPlain)) - 1, false}} {
++		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(test.limit))
++		if err != nil {
++			t.Fatal(err)
++		}
++		t.Cleanup(dec.Close)
++		eager, err := newPackBlobIterator(restic.ID{}, newByteReader(bytes.Clone(ciphertext)), 0, pack.Blobs{entry}, repo.Key(), dec).Next()
++		if err != nil {
++			t.Fatal(err)
++		}
++		it := newPackBlobIterator(restic.ID{}, newByteReader(bytes.Clone(ciphertext)), 0, pack.Blobs{entry}, repo.Key(), dec)
++		it.hashLimit = test.limit
++		stream, err := it.NextHash()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if (eager.Err == nil) != test.ok || (stream.Err == nil) != test.ok {
++			t.Fatalf("ceiling %d: eager %v, stream %v, want accepted=%v", test.limit, eager.Err, stream.Err, test.ok)
++		}
++		if !test.ok && stream.Err.Error() != eager.Err.Error() {
++			t.Fatalf("ceiling %d: stream reports %q, eager %q", test.limit, stream.Err, eager.Err)
++		}
++	}
++}
++
++// A frame that declares more content than the ceiling is refused before any
++// of it is decoded, with the eager decoder's error.
++func TestCheckStreamRefusesDeclaredOversize(t *testing.T) {
++	repo, _ := TestRepositoryWithBackend(t, nil, 2, Options{})
++	const limit = 16 << 10
++	plain := make([]byte, 64<<10)
++	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(1024), zstd.WithSingleSegment(false), zstd.WithEncoderCRC(false))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer enc.Close()
++	compressed := enc.EncodeAll(plain, nil)
++	var hdr zstd.Header
++	if err := hdr.Decode(compressed); err != nil || !hdr.HasFCS || hdr.FrameContentSize != uint64(len(plain)) {
++		t.Fatalf("fixture does not declare its content size: %+v, %v", hdr, err)
++	}
++	nonce := bytes.Repeat([]byte{1}, repo.Key().NonceSize())
++	ciphertext := append(bytes.Clone(nonce), repo.Key().Seal(nil, nonce, compressed, nil)...)
++	entry := pack.Blob{BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: restic.Hash(plain)}, Length: uint(len(ciphertext)), UncompressedLength: uint(len(plain))}
++	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(limit))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer dec.Close()
++	eager, err := newPackBlobIterator(restic.ID{}, newByteReader(bytes.Clone(ciphertext)), 0, pack.Blobs{entry}, repo.Key(), dec).Next()
++	if err != nil || eager.Err == nil {
++		t.Fatalf("eager control: %v, %v", err, eager.Err)
++	}
++	it := newPackBlobIterator(restic.ID{}, newByteReader(bytes.Clone(ciphertext)), 0, pack.Blobs{entry}, repo.Key(), dec)
++	it.hashLimit = limit
++	hashed := &countingHash{Hash: sha256.New()}
++	it.blobHash = hashed
++	stream, err := it.NextHash()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stream.Err == nil || stream.Err.Error() != eager.Err.Error() {
++		t.Fatalf("stream reports %v, eager %v", stream.Err, eager.Err)
++	}
++	if hashed.n != 0 {
++		t.Fatalf("%d bytes were decoded before the declared size was refused", hashed.n)
++	}
++}
++
++type countingHash struct {
++	hash.Hash
++	n int
++}
++
++func (c *countingHash) Write(p []byte) (int, error) {
++	c.n += len(p)
++	return c.Hash.Write(p)
++}
++
++// Opt in explicitly: this hashes 64 GiB + 1 twice, but retains only a small
++// compressed pack and decoder window. The eager control checks the declared
++// content size and rejects it before allocating the enormous plaintext.
++func TestLargeCheckRejectsUnrestorableBlob(t *testing.T) {
++	if os.Getenv("RESTIC_LARGE_CHECK_TEST") != "1" {
++		t.Skip("set RESTIC_LARGE_CHECK_TEST=1 for the production-limit reproduction")
++	}
++	ctx := context.Background()
++	repo, be := TestRepositoryWithBackend(t, nil, 2, Options{})
++	const logical = int64(64<<30) + 1
++	const block = 128 << 10
++	compressed := []byte{0x28, 0xb5, 0x2f, 0xfd, 0xc0, 0x38}
++	compressed = binary.LittleEndian.AppendUint64(compressed, uint64(logical))
++	for remaining := logical; remaining > 0; {
++		n := min(remaining, block)
++		header := uint32(n)<<3 | 2 // RLE block
++		remaining -= n
++		if remaining == 0 {
++			header |= 1
++		}
++		compressed = append(compressed, byte(header), byte(header>>8), byte(header>>16), 0)
++	}
++	dec, err := zstd.NewReader(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, controlErr := dec.DecodeAll(compressed, nil)
++	dec.Close()
++	if controlErr != zstd.ErrDecoderSizeExceeded {
++		t.Fatalf("eager control error %v, expected size limit", controlErr)
++	}
++	t.Logf("eager checker rejects %d-byte plaintext before allocation: %v", logical, controlErr)
++	digest := sha256.New()
++	for remaining := logical; remaining > 0; {
++		n := min(remaining, 16<<30)
++		if _, err := io.CopyN(digest, zeroReader{}, n); err != nil {
++			t.Fatal(err)
++		}
++		remaining -= n
++		t.Logf("computed expected plaintext hash: %d bytes remain", remaining)
++	}
++	blobID := restic.IDFromHash(digest.Sum(nil))
++	nonce := bytes.Repeat([]byte{1}, repo.Key().NonceSize())
++	ciphertext := append(bytes.Clone(nonce), repo.Key().Seal(nil, nonce, compressed, nil)...)
++	var contents bytes.Buffer
++	p := pack.NewPacker(repo.Key(), &contents)
++	// The stored size hint is deliberately wrong but fits the repository format;
++	// the upstream decode guard still detects this pathological blob.
++	if _, err := p.Add(restic.DataBlob, blobID, ciphertext, 1); err != nil {
++		t.Fatal(err)
++	}
++	if err := p.Finalize(); err != nil {
++		t.Fatal(err)
++	}
++	packID := restic.Hash(contents.Bytes())
++	if err := be.Save(ctx, backend.Handle{Type: backend.PackFile, Name: packID.String()}, backend.NewByteReader(contents.Bytes(), be.Hasher())); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.idx.StorePack(ctx, packID, p.Blobs(), &internalRepository{repo}); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.idx.Flush(ctx, &internalRepository{repo}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := repo.LoadBlob(ctx, restic.BlobHandle{ID: blobID, Type: restic.DataBlob}, nil); err == nil {
++		t.Fatal("restore control unexpectedly accepted the over-limit blob")
++	} else {
++		t.Logf("restore control rejects blob: %v", err)
++	}
++	t.Logf("checking real %d-byte pack; declared blob plaintext is %d bytes", contents.Len(), logical)
++	if errs := runReadPacks(repo.Checker()); len(errs) == 0 {
++		t.Fatal("full read-data check reports healthy for a blob both upstream check and restore reject")
++	}
++}
+diff --git a/internal/repository/repository.go b/internal/repository/repository.go
+index 57e467f02df5ed48e3af9504158e5f13e4a16f8d..f74e47109cc2eee5ac3d9601e9a821b55484d9d4 100644
+--- a/internal/repository/repository.go
++++ b/internal/repository/repository.go
+@@ -1790,6 +1790,9 @@ type packBlobIterator struct {
+ 	ensureOrdinary func() error
+ 	decode         []byte
+ 	blobHash       hash.Hash
++	// see check_decode_limit.go
++	hashLimit  uint64
++	hashWriter limitedHashWriter
+ }
+ 
+ type packBlobValue struct {
+@@ -1809,6 +1812,7 @@ func newPackBlobIterator(packID restic.ID, rd discardReader, currentOffset uint,
+ 		blobs:         blobs,
+ 		key:           key,
+ 		dec:           dec,
++		hashLimit:     checkDecodedSizeLimit,
+ 	}
+ }
+ 
+@@ -1882,7 +1886,7 @@ func (b *packBlobIterator) NextHash() (packBlobValue, error) {
+ 
+ 		err = b.dec.Reset(bytes.NewReader(plaintext))
+ 		if err == nil {
+-			_, err = io.Copy(b.blobHash, b.dec)
++			err = b.hashDecoded(plaintext)
+ 		}
+ 		if err != nil {
+ 			err = fmt.Errorf("decompressing blob %v from pack %v failed: %w", h, b.packID.String(), err)

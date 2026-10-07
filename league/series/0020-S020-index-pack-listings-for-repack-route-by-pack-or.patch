@@ -1,0 +1,1553 @@
+From df751160232f28598f67c64af3c30e74d8a0cfe6 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 04:46:27 +0000
+Subject: [PATCH 20/49] S020 (index): pack listings for repack route by pack
+ ordinal
+
+From the S020 incumbent (T2). ListPacksForRepack, when the bounded
+single traversal does not apply, builds per-partition lists of entry
+ordinals for the selected packs in one walk of a single final index
+(repack_routes.go); in any other index state, and for ListPacks (check,
+repair), the partition walk is kept and only selected locations are
+materialised (repack_fallback.go, repack_ordinals.go).
+
+New: internal/repository/index/repack_routes.go, repack_fallback.go,
+repack_ordinals.go and their tests.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/repository/index/master_index.go     |  11 +-
+ internal/repository/index/repack_fallback.go  |  91 ++++++
+ .../repository/index/repack_fallback_test.go  | 309 ++++++++++++++++++
+ internal/repository/index/repack_ordinals.go  |  29 ++
+ .../repository/index/repack_ordinals_test.go  | 257 +++++++++++++++
+ internal/repository/index/repack_routes.go    | 135 ++++++++
+ .../index/repack_routes_boundary_test.go      | 126 +++++++
+ .../repack_routes_settlement_b26_test.go      | 209 ++++++++++++
+ .../repository/index/repack_routes_test.go    | 283 ++++++++++++++++
+ 9 files changed, 1449 insertions(+), 1 deletion(-)
+ create mode 100644 internal/repository/index/repack_fallback.go
+ create mode 100644 internal/repository/index/repack_fallback_test.go
+ create mode 100644 internal/repository/index/repack_ordinals.go
+ create mode 100644 internal/repository/index/repack_ordinals_test.go
+ create mode 100644 internal/repository/index/repack_routes.go
+ create mode 100644 internal/repository/index/repack_routes_boundary_test.go
+ create mode 100644 internal/repository/index/repack_routes_settlement_b26_test.go
+ create mode 100644 internal/repository/index/repack_routes_test.go
+
+diff --git a/internal/repository/index/master_index.go b/internal/repository/index/master_index.go
+index 857ffec93c0dd3160b90d5558400f5a68a809dc3..ecbdb738b01ef8950b87e2ecf4634ba851af6a9e 100644
+--- a/internal/repository/index/master_index.go
++++ b/internal/repository/index/master_index.go
+@@ -700,7 +700,7 @@ func (mi *MasterIndex) saveFullIndex(ctx context.Context, r restic.SaverUnpacked
+ 
+ // ListPacks returns the blobs of the specified pack files grouped by pack file.
+ func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
+-	return mi.listPacks(ctx, packs, false)
++	return mi.listPacksFallback(ctx, packs)
+ }
+ 
+ func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collect bool) <-chan PackBlobs {
+@@ -730,6 +730,15 @@ func (mi *MasterIndex) listPacks(ctx context.Context, packs restic.IDSet, collec
+ 			}
+ 		}
+ 
++		if collect && len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
++			return
++		}
++
++		if collect {
++			mi.publishRepackFallback(ctx, packs, out)
++			return
++		}
++
+ 		// only resort a part of the index to keep the memory overhead bounded
+ 		for i := range byte(16) {
+ 			packBlob := make(map[restic.ID]pack.Blobs)
+diff --git a/internal/repository/index/repack_fallback.go b/internal/repository/index/repack_fallback.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c3d4bf6f3faf44783b1bbc1a0ee6bf3b29b6d61
+--- /dev/null
++++ b/internal/repository/index/repack_fallback.go
+@@ -0,0 +1,91 @@
++package index
++
++import (
++	"context"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// repackFallbackPartition keeps the ordinary partition traversal and lock
++// lifetime. Only selected locations are reconstructed; rejected entries never
++// become PackedBlobs. Each partition observes the current master, as Values
++// did, including non-final indexes and duplicate locations.
++func (mi *MasterIndex) repackFallbackPartition(ctx context.Context, grouped map[restic.ID]pack.Blobs) {
++	mi.idxMutex.RLock()
++	defer mi.idxMutex.RUnlock()
++	for _, idx := range mi.idx {
++		if !idx.appendRepackPartition(ctx, grouped) {
++			return
++		}
++	}
++}
++
++func (idx *Index) appendRepackPartition(ctx context.Context, grouped map[restic.ID]pack.Blobs) bool {
++	idx.m.RLock()
++	defer idx.m.RUnlock()
++	var entries uint
++	for typ := range idx.byType {
++		entries += idx.byType[typ].numentries
++	}
++	selected := repackOrdinalSelection(ctx, idx.packs, grouped, entries)
++	for typ := range idx.byType {
++		for e := range idx.byType[typ].values() {
++			if ctx.Err() != nil {
++				return false
++			}
++			if selected != nil && selected[e.packIndex>>6]&(uint64(1)<<(e.packIndex&63)) == 0 {
++				continue
++			}
++			id := idx.packs[e.packIndex]
++			blobs, selected := grouped[id]
++			if !selected {
++				continue
++			}
++			grouped[id] = append(blobs, pack.Blob{
++				BlobHandle: restic.BlobHandle{ID: e.id, Type: restic.BlobType(typ)},
++				Offset:     uint(e.offset), Length: uint(e.length),
++				UncompressedLength: uint(e.uncompressedLength),
++			})
++		}
++	}
++	return true
++}
++
++func (mi *MasterIndex) publishRepackFallback(ctx context.Context, packs restic.IDSet, out chan<- PackBlobs) {
++	for group := range byte(16) {
++		grouped := make(map[restic.ID]pack.Blobs)
++		for id := range packs {
++			if id[0]&15 == group {
++				grouped[id] = nil
++			}
++		}
++		if len(grouped) == 0 {
++			continue
++		}
++		mi.repackFallbackPartition(ctx, grouped)
++		if ctx.Err() != nil {
++			return
++		}
++		// Both locks have been released before consumers can modify/save indexes.
++		for id, blobs := range grouped {
++			delete(grouped, id)
++			select {
++			case out <- PackBlobs{PackID: id, Blobs: blobs}:
++			case <-ctx.Done():
++				return
++			}
++		}
++	}
++}
++
++// listPacksFallback is also used by ordinary checking and repair. These callers
++// keep repeated current-index scans rather than adopting routing's capture.
++func (mi *MasterIndex) listPacksFallback(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
++	out := make(chan PackBlobs)
++	go func() {
++		defer close(out)
++		mi.publishRepackFallback(ctx, packs, out)
++	}()
++	return out
++}
+diff --git a/internal/repository/index/repack_fallback_test.go b/internal/repository/index/repack_fallback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a9d443465e9bbf21290074fe859baa2253bc531
+--- /dev/null
++++ b/internal/repository/index/repack_fallback_test.go
+@@ -0,0 +1,309 @@
++package index
++
++import (
++	"context"
++	"fmt"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++	"reflect"
++	"testing"
++	"time"
++)
++
++// Complete M003 controls: include locked collector, routing construction and
++// overflow, partition conversion, channel publication and producer closure.
++func b18FallbackControl(ctx context.Context, mi *MasterIndex, packs restic.IDSet, values bool) <-chan PackBlobs {
++	out := make(chan PackBlobs)
++	go func() {
++		defer close(out)
++		if len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
++			grouped, ok := mi.collectSelectedPacks(ctx, packs, listPacksCollectPackLimit, listPacksCollectBlobLimit)
++			if ctx.Err() != nil {
++				return
++			}
++			if ok {
++				for group := range byte(16) {
++					for id, blobs := range grouped {
++						if id[0]&15 != group {
++							continue
++						}
++						delete(grouped, id)
++						select {
++						case out <- PackBlobs{PackID: id, Blobs: blobs}:
++						case <-ctx.Done():
++							return
++						}
++					}
++				}
++				return
++			}
++		}
++		if len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
++			return
++		}
++		for group := range byte(16) {
++			grouped := make(map[restic.ID]pack.Blobs)
++			for id := range packs {
++				if id[0]&15 == group {
++					grouped[id] = nil
++				}
++			}
++			if len(grouped) == 0 {
++				continue
++			}
++			if values {
++				for pb := range mi.packedBlobValues() {
++					if ctx.Err() != nil {
++						return
++					}
++					if _, ok := grouped[pb.Pack]; ok {
++						grouped[pb.Pack] = append(grouped[pb.Pack], pb.Blob)
++					}
++				}
++			} else {
++				for pb := range mi.Values() {
++					if ctx.Err() != nil {
++						return
++					}
++					id := pb.PackID()
++					if packs.Has(id) && id[0]&15 == group {
++						grouped[id] = append(grouped[id], pb.Blob)
++					}
++				}
++			}
++			for id, blobs := range grouped {
++				grouped[id] = nil
++				select {
++				case out <- PackBlobs{PackID: id, Blobs: blobs}:
++				case <-ctx.Done():
++					return
++				}
++			}
++		}
++	}()
++	return out
++}
++
++func b18Layout(mi *MasterIndex, layout string) {
++	switch layout {
++	case "mutable":
++		mi.idx[0].final = false
++	case "fragmented":
++		extra := NewIndex()
++		// Mixed type, exact duplicate, and second location; both indexes must count.
++		extra.StorePack(routeID(1), pack.Blobs{
++			{BlobHandle: restic.BlobHandle{ID: routeID(1), Type: restic.DataBlob}, Length: 100},
++			{BlobHandle: restic.BlobHandle{ID: routeID(1), Type: restic.DataBlob}, Offset: 777, Length: 101, UncompressedLength: 202},
++		})
++		extra.Finalize()
++		mi.idx = append(mi.idx, extra)
++	}
++}
++
++func TestB18FallbackDifferential(t *testing.T) {
++	for _, layout := range []string{"final", "mutable", "fragmented"} {
++		for _, selected := range []int{0, 16, 128} {
++			t.Run(fmt.Sprintf("%s/selected%d", layout, selected), func(t *testing.T) {
++				mi, packs := routeFixture(130000, selected)
++				b18Layout(mi, layout)
++				want := collectPackChannel(t, mi.listPacks(context.Background(), packs, false))
++				ordinary := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++				if !reflect.DeepEqual(want, ordinary) {
++					t.Fatal("ordinary fallback differs from original pointer traversal")
++				}
++				got := collectPackChannel(t, mi.ListPacksForRepack(context.Background(), packs))
++				if !reflect.DeepEqual(want, got) {
++					t.Fatal("production locations/order/empty packs differ")
++				}
++				for _, values := range []bool{false, true} {
++					control := collectPackChannel(t, b18FallbackControl(context.Background(), mi, packs, values))
++					if !reflect.DeepEqual(want, control) {
++						t.Fatal("control differs")
++					}
++				}
++			})
++		}
++	}
++}
++
++func TestB18FallbackPublicationSettlement(t *testing.T) {
++	for _, layout := range []string{"mutable", "fragmented"} {
++		mi, packs := routeFixture(100000, 128)
++		b18Layout(mi, layout)
++		ctx, cancel := context.WithCancel(context.Background())
++		out := mi.ListPacksForRepack(ctx, packs)
++		select {
++		case <-out:
++		case <-time.After(5 * time.Second):
++			cancel()
++			t.Fatal("no publication")
++		}
++		// Producer blocked on publication must permit master replacement, index
++		// growth, and modifications by an index-saving consumer.
++		done := make(chan struct{})
++		growth := NewIndex()
++		growth.StorePack(routeID(1), pack.Blobs{{BlobHandle: restic.BlobHandle{ID: routeID(900001), Type: restic.TreeBlob}, Length: 102}})
++		growth.Finalize()
++		var mergeErr error
++		go func() {
++			mi.idxMutex.Lock()
++			old := mi.idx[0]
++			mergeErr = old.merge(growth)
++			mi.clear()
++			mi.idxMutex.Unlock()
++			close(done)
++		}()
++		select {
++		case <-done:
++			if mergeErr != nil {
++				t.Fatal(mergeErr)
++			}
++		case <-time.After(5 * time.Second):
++			cancel()
++			t.Fatal("publication holds locks")
++		}
++		cancel()
++		joined := make(chan struct{})
++		go func() {
++			for range out {
++			}
++			close(joined)
++		}()
++		select {
++		case <-joined:
++		case <-time.After(5 * time.Second):
++			t.Fatal("interrupted consumer did not settle")
++		}
++	}
++}
++
++func TestB18FallbackSeesPartitionGrowthAndReplacement(t *testing.T) {
++	mi, packs := routeFixture(100000, 128)
++	mi.idx[0].final = false
++	grouped := map[restic.ID]pack.Blobs{routeID(1): nil}
++	mi.repackFallbackPartition(context.Background(), grouped)
++	want := len(grouped[routeID(1)])
++	mi.idx[0].StorePack(routeID(1), pack.Blobs{{BlobHandle: restic.BlobHandle{ID: routeID(900001), Type: restic.TreeBlob}, Length: 102}})
++	grouped[routeID(1)] = nil
++	mi.repackFallbackPartition(context.Background(), grouped)
++	if len(grouped[routeID(1)]) != want+1 {
++		t.Fatal("next scan lost growth")
++	}
++	mi.idxMutex.Lock()
++	mi.clear()
++	mi.idxMutex.Unlock()
++	grouped[routeID(1)] = nil
++	mi.repackFallbackPartition(context.Background(), grouped)
++	if len(grouped[routeID(1)]) != 0 {
++		t.Fatal("next scan ignored replacement")
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	for range mi.ListPacksForRepack(ctx, packs) {
++		t.Fatal("canceled producer published")
++	}
++}
++
++func BenchmarkB18CompleteFallback(b *testing.B) {
++	for _, n := range []int{10000, 100000, 1500000} {
++		for _, layout := range []string{"final", "mutable", "fragmented"} {
++			for _, selected := range []int{16, 128, n / 1000} {
++				if selected > n/1000 {
++					continue
++				}
++				mi, packs := routeFixture(n, selected)
++				b18Layout(mi, layout)
++				want := 0
++				for pbs := range mi.ListPacks(context.Background(), packs) {
++					want += len(pbs.Blobs)
++				}
++				for _, arm := range []string{"pointer", "value", "reject"} {
++					b.Run(fmt.Sprintf("entries%d/%s/selected%d/%s", n, layout, selected, arm), func(b *testing.B) {
++						b.ReportAllocs()
++						for range b.N {
++							var ch <-chan PackBlobs
++							if arm == "reject" {
++								ch = mi.ListPacksForRepack(context.Background(), packs)
++							} else {
++								ch = b18FallbackControl(context.Background(), mi, packs, arm == "value")
++							}
++							count := 0
++							for pbs := range ch {
++								count += len(pbs.Blobs)
++							}
++							if count != want {
++								b.Fatal(count, want)
++							}
++						}
++					})
++				}
++			}
++		}
++	}
++}
++
++func TestB18FallbackPartialCancellation(t *testing.T) {
++	mi, packs := routeFixture(100000, 128)
++	mi.idx[0].final = false
++	parent, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	gate := &b26RouteCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
++	out := make(chan PackBlobs)
++	done := make(chan struct{})
++	go func() { mi.publishRepackFallback(gate, packs, out); close(out); close(done) }()
++	b26Await(t, gate.entered, "partial fallback scan")
++	cancel()
++	close(gate.release)
++	for range out {
++		t.Fatal("partial canceled partition escaped")
++	}
++	b26Await(t, done, "fallback producer settlement")
++	unlocked := make(chan struct{})
++	go func() {
++		mi.idxMutex.Lock()
++		mi.idx[0].m.Lock()
++		mi.idx[0].m.Unlock()
++		mi.idxMutex.Unlock()
++		close(unlocked)
++	}()
++	b26Await(t, unlocked, "fallback post-cancellation locks")
++}
++
++func TestB18FallbackOwnsPublishedValues(t *testing.T) {
++	mi, _ := routeFixture(100000, 128)
++	grouped := map[restic.ID]pack.Blobs{routeID(1): nil}
++	mi.repackFallbackPartition(context.Background(), grouped)
++	original := grouped[routeID(1)][0]
++	grouped[routeID(1)][0].Offset++
++	another := map[restic.ID]pack.Blobs{routeID(1): nil}
++	mi.repackFallbackPartition(context.Background(), another)
++	if another[routeID(1)][0] != original {
++		t.Fatal("published values alias index locations")
++	}
++}
++
++func BenchmarkB18OrdinaryFallback(b *testing.B) {
++	for _, n := range []int{10000, 100000, 1500000} {
++		mi, packs := routeFixture(n, n/1000)
++		for _, arm := range []string{"pointer", "reject"} {
++			b.Run(fmt.Sprintf("entries%d/%s", n, arm), func(b *testing.B) {
++				b.ReportAllocs()
++				for range b.N {
++					var out <-chan PackBlobs
++					if arm == "reject" {
++						out = mi.ListPacks(context.Background(), packs)
++					} else {
++						out = mi.listPacks(context.Background(), packs, false)
++					}
++					count := 0
++					for pbs := range out {
++						count += len(pbs.Blobs)
++					}
++					if count != n {
++						b.Fatal(count, n)
++					}
++				}
++			})
++		}
++	}
++}
+diff --git a/internal/repository/index/repack_ordinals.go b/internal/repository/index/repack_ordinals.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..995f257e3e1fc8394552ff88bc28d4ae96356daa
+--- /dev/null
++++ b/internal/repository/index/repack_ordinals.go
+@@ -0,0 +1,29 @@
++package index
++
++import (
++	"context"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// Rebuild under the index read lock for each partition. The bits never survive
++// the scan, so growth and master replacement retain ordinary observation rules.
++// At most 8 KiB is live per index. Small or very wide tables use map rejection.
++const repackOrdinalPackLimit = 65536
++
++func repackOrdinalSelection(ctx context.Context, packs []restic.ID, grouped map[restic.ID]pack.Blobs, entries uint) []uint64 {
++	if len(packs) == 0 || len(packs) > repackOrdinalPackLimit || entries/4 < uint(len(packs)) {
++		return nil
++	}
++	selected := make([]uint64, (len(packs)+63)/64)
++	for ordinal, id := range packs {
++		if ctx.Err() != nil {
++			return nil
++		}
++		if _, ok := grouped[id]; ok {
++			selected[ordinal>>6] |= uint64(1) << (uint(ordinal) & 63)
++		}
++	}
++	return selected
++}
+diff --git a/internal/repository/index/repack_ordinals_test.go b/internal/repository/index/repack_ordinals_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a100fc57a0b1bd903bfcbae2907a486ef56a962c
+--- /dev/null
++++ b/internal/repository/index/repack_ordinals_test.go
+@@ -0,0 +1,257 @@
++package index
++
++import (
++	"context"
++	"fmt"
++	"reflect"
++	"testing"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++func TestB18OrdinalMembership(t *testing.T) {
++	for _, n := range []int{0, 1, 63, 64, 65, repackOrdinalPackLimit, repackOrdinalPackLimit + 1} {
++		t.Run(fmt.Sprint(n), func(t *testing.T) {
++			packs := make([]restic.ID, n)
++			grouped := make(map[restic.ID]pack.Blobs)
++			for i := range packs {
++				packs[i] = routeID(i%113 + 1) // repeated table IDs must set every ordinal
++				if i%3 == 0 {
++					grouped[packs[i]] = nil
++				}
++			}
++			bits := repackOrdinalSelection(context.Background(), packs, grouped, uint(n)*4)
++			if n == 0 || n > repackOrdinalPackLimit {
++				if bits != nil {
++					t.Fatal("unsupported table admitted")
++				}
++				return
++			}
++			if len(bits)*8 > 8192 {
++				t.Fatal("membership exceeds byte bound")
++			}
++			for i, id := range packs {
++				_, want := grouped[id]
++				if got := bits[i>>6]&(uint64(1)<<(uint(i)&63)) != 0; got != want {
++					t.Fatalf("ordinal %d: got %v want %v", i, got, want)
++				}
++			}
++			if repackOrdinalSelection(context.Background(), packs, grouped, uint(n)*4-1) != nil {
++				t.Fatal("low density admitted")
++			}
++			ctx, cancel := context.WithCancel(context.Background())
++			cancel()
++			if repackOrdinalSelection(ctx, packs, grouped, uint(n)*4) != nil {
++				t.Fatal("canceled construction retained")
++			}
++		})
++	}
++}
++
++// Baseline includes identical locks, reconstruction, context checks and output
++// ownership. Only ordinal construction/rejection differs.
++func b18AppendMapPartition(ctx context.Context, idx *Index, grouped map[restic.ID]pack.Blobs) {
++	idx.m.RLock()
++	defer idx.m.RUnlock()
++	for typ := range idx.byType {
++		for e := range idx.byType[typ].values() {
++			if ctx.Err() != nil {
++				return
++			}
++			id := idx.packs[e.packIndex]
++			if blobs, ok := grouped[id]; ok {
++				grouped[id] = append(blobs, pack.Blob{BlobHandle: restic.BlobHandle{ID: e.id, Type: restic.BlobType(typ)}, Offset: uint(e.offset), Length: uint(e.length), UncompressedLength: uint(e.uncompressedLength)})
++			}
++		}
++	}
++}
++
++func TestB18OrdinalPartitionDifferential(t *testing.T) {
++	for _, layout := range []string{"final", "mutable", "fragmented"} {
++		mi, packs := routeFixture(130000, 128)
++		b18Layout(mi, layout)
++		for group := range byte(16) {
++			want, got := make(map[restic.ID]pack.Blobs), make(map[restic.ID]pack.Blobs)
++			for id := range packs {
++				if id[0]&15 == group {
++					want[id] = nil
++					got[id] = nil
++				}
++			}
++			for _, idx := range mi.idx {
++				b18AppendMapPartition(context.Background(), idx, want)
++			}
++			mi.repackFallbackPartition(context.Background(), got)
++			if !reflect.DeepEqual(want, got) {
++				t.Fatalf("%s partition %d differs", layout, group)
++			}
++		}
++	}
++}
++
++func BenchmarkB18OrdinalPartition(b *testing.B) {
++	for _, n := range []int{10000, 1500000} {
++		for _, selected := range []int{16, 128, n / 1000} {
++			mi, packs := routeFixture(n, selected)
++			for _, ordinal := range []bool{false, true} {
++				b.Run(fmt.Sprintf("entries%d/selected%d/ordinal%v", n, selected, ordinal), func(b *testing.B) {
++					b.ReportAllocs()
++					for range b.N {
++						for group := range byte(16) {
++							grouped := make(map[restic.ID]pack.Blobs)
++							for id := range packs {
++								if id[0]&15 == group {
++									grouped[id] = nil
++								}
++							}
++							if len(grouped) == 0 {
++								continue
++							}
++							if ordinal {
++								mi.repackFallbackPartition(context.Background(), grouped)
++							} else {
++								for _, idx := range mi.idx {
++									b18AppendMapPartition(context.Background(), idx, grouped)
++								}
++							}
++						}
++					}
++				})
++			}
++		}
++	}
++}
++
++// Includes both failed fast-path attempts, partition construction, channel
++// publication and closure. The retained collector and routing are identical.
++func b18OrdinalMapControl(ctx context.Context, mi *MasterIndex, packs restic.IDSet, repack bool) <-chan PackBlobs {
++	out := make(chan PackBlobs)
++	go func() {
++		defer close(out)
++		publish := func(grouped map[restic.ID]pack.Blobs) bool {
++			for group := range byte(16) {
++				for id, blobs := range grouped {
++					if id[0]&15 != group {
++						continue
++					}
++					delete(grouped, id)
++					select {
++					case out <- PackBlobs{PackID: id, Blobs: blobs}:
++					case <-ctx.Done():
++						return false
++					}
++				}
++			}
++			return true
++		}
++		if repack && len(packs) > 0 && len(packs) <= listPacksCollectPackLimit {
++			grouped, complete := mi.collectSelectedPacks(ctx, packs, listPacksCollectPackLimit, listPacksCollectBlobLimit)
++			if ctx.Err() != nil {
++				return
++			}
++			if complete {
++				publish(grouped)
++				return
++			}
++		}
++		if repack && len(packs) > 0 && mi.publishRepackRoutes(ctx, packs, out) {
++			return
++		}
++		for group := range byte(16) {
++			grouped := make(map[restic.ID]pack.Blobs)
++			for id := range packs {
++				if id[0]&15 == group {
++					grouped[id] = nil
++				}
++			}
++			if len(grouped) == 0 {
++				continue
++			}
++			mi.idxMutex.RLock()
++			for _, idx := range mi.idx {
++				b18AppendMapPartition(ctx, idx, grouped)
++			}
++			mi.idxMutex.RUnlock()
++			if ctx.Err() != nil {
++				return
++			}
++			for id, blobs := range grouped {
++				delete(grouped, id)
++				select {
++				case out <- PackBlobs{PackID: id, Blobs: blobs}:
++				case <-ctx.Done():
++					return
++				}
++			}
++		}
++	}()
++	return out
++}
++
++func TestB18OrdinalCompleteDifferential(t *testing.T) {
++	for _, layout := range []string{"final", "mutable", "fragmented", "wide"} {
++		mi, packs := routeFixture(130000, 128)
++		if layout == "wide" {
++			for len(mi.idx[0].packs) <= repackOrdinalPackLimit {
++				mi.idx[0].packs = append(mi.idx[0].packs, routeID(900001))
++			}
++		} else {
++			b18Layout(mi, layout)
++		}
++		for _, repack := range []bool{false, true} {
++			want := collectPackChannel(t, b18OrdinalMapControl(context.Background(), mi, packs, repack))
++			out := mi.ListPacks(context.Background(), packs)
++			if repack { // settle the unused iterator before starting the repack arm
++				for range out {
++				}
++				out = mi.ListPacksForRepack(context.Background(), packs)
++			}
++			got := collectPackChannel(t, out)
++			if !reflect.DeepEqual(want, got) {
++				t.Fatalf("%s repack%v differs", layout, repack)
++			}
++		}
++	}
++}
++
++func BenchmarkB18OrdinalComplete(b *testing.B) {
++	for _, layout := range []string{"final", "mutable", "fragmented"} {
++		for _, selected := range []int{16, 128, 1500} {
++			mi, packs := routeFixture(1500000, selected)
++			b18Layout(mi, layout)
++			for _, repack := range []bool{false, true} {
++				for _, ordinal := range []bool{false, true} {
++					b.Run(fmt.Sprintf("%s/selected%d/repack%v/ordinal%v", layout, selected, repack, ordinal), func(b *testing.B) {
++						b.ReportAllocs()
++						for range b.N {
++							var out <-chan PackBlobs
++							if !ordinal {
++								out = b18OrdinalMapControl(context.Background(), mi, packs, repack)
++							} else if repack {
++								out = mi.ListPacksForRepack(context.Background(), packs)
++							} else {
++								out = mi.ListPacks(context.Background(), packs)
++							}
++							seen, locations := 0, 0
++							for pbs := range out {
++								seen++
++								locations += len(pbs.Blobs)
++							}
++							wantLocations := min(selected, 1500) * 1000
++							if layout == "fragmented" {
++								wantLocations += 2
++							}
++							if locations != wantLocations {
++								b.Fatalf("locations %d want %d", locations, wantLocations)
++							}
++							if seen != len(packs) {
++								b.Fatal("lost packs")
++							}
++						}
++					})
++				}
++			}
++		}
++	}
++}
+diff --git a/internal/repository/index/repack_routes.go b/internal/repository/index/repack_routes.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..100af1132f043bf3aca345964b0da109a8a84cc5
+--- /dev/null
++++ b/internal/repository/index/repack_routes.go
+@@ -0,0 +1,135 @@
++package index
++
++import (
++	"context"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++const repackRouteSlots = 65536
++const repackRoutePackSlots = 131072
++
++// A route holds ordinals, never entry pointers. The supported layout is one
++// finalized index. Merging only appends entries/packs to that object, so its
++// existing ordinals and locations survive later merges and master replacement.
++// No producer lock is held across publication (consumers can save indexes).
++type repackRoutes struct {
++	idx    *Index
++	groups [16][]uint32
++}
++
++func (mi *MasterIndex) buildRepackRoutes(ctx context.Context, packs restic.IDSet, slotLimit int) (*repackRoutes, bool) {
++	if ctx.Err() != nil {
++		return nil, true
++	}
++	mi.idxMutex.RLock()
++	defer mi.idxMutex.RUnlock()
++	if len(mi.idx) != 1 {
++		return nil, false
++	}
++	idx := mi.idx[0]
++	idx.m.RLock()
++	defer idx.m.RUnlock()
++	if !idx.final || len(idx.packs) > repackRoutePackSlots {
++		return nil, false
++	}
++	for typ := range idx.byType {
++		if typ >= 4 || idx.byType[typ].blockList.Size() >= 1<<30 {
++			return nil, false
++		}
++	}
++	// One byte per pack slot replaces a selected-pack hash lookup per entry.
++	// Zero is unselected; occupied partitions are encoded as nibble + 1.
++	membership := make([]byte, len(idx.packs))
++	for n, id := range idx.packs {
++		if ctx.Err() != nil {
++			return nil, true
++		}
++		if packs.Has(id) {
++			membership[n] = (id[0] & 15) + 1
++		}
++	}
++	routes := &repackRoutes{idx: idx}
++	capacity := 0
++	for typ := range idx.byType {
++		m := &idx.byType[typ]
++		for ordinal := uint(1); ordinal < m.blockList.Size(); ordinal++ {
++			if ctx.Err() != nil {
++				return nil, true
++			}
++			e := m.resolve(ordinal)
++			group := membership[e.packIndex]
++			if group == 0 {
++				continue
++			}
++			slots := routes.groups[group-1]
++			if len(slots) == cap(slots) {
++				next := max(1, 2*cap(slots))
++				if capacity+next-cap(slots) > slotLimit {
++					return nil, false // no output escaped; ordinary fallback is safe
++				}
++				capacity += next - cap(slots)
++				grown := make([]uint32, len(slots), next)
++				copy(grown, slots)
++				slots = grown
++			}
++			routes.groups[group-1] = append(slots, uint32(typ)<<30|uint32(ordinal))
++		}
++	}
++	return routes, true
++}
++
++func (r *repackRoutes) partition(ctx context.Context, packs restic.IDSet, group byte) map[restic.ID]pack.Blobs {
++	if ctx.Err() != nil {
++		return nil
++	}
++	grouped := make(map[restic.ID]pack.Blobs)
++	for id := range packs {
++		if id[0]&15 == group {
++			grouped[id] = nil
++		}
++	}
++	r.idx.m.RLock()
++	defer r.idx.m.RUnlock()
++	for _, slot := range r.groups[group] {
++		if ctx.Err() != nil {
++			return nil
++		}
++		typ := restic.BlobType(slot >> 30)
++		e := r.idx.byType[typ].resolve(uint(slot & ((1 << 30) - 1)))
++		id := r.idx.packs[e.packIndex]
++		grouped[id] = append(grouped[id], pack.Blob{
++			BlobHandle: restic.BlobHandle{ID: e.id, Type: typ},
++			Offset:     uint(e.offset), Length: uint(e.length),
++			UncompressedLength: uint(e.uncompressedLength),
++		})
++	}
++	r.groups[group] = nil
++	return grouped
++}
++
++func (mi *MasterIndex) publishRepackRoutes(ctx context.Context, packs restic.IDSet, out chan<- PackBlobs) bool {
++	routes, supported := mi.buildRepackRoutes(ctx, packs, repackRouteSlots)
++	if !supported {
++		return false
++	}
++	if routes == nil { // canceled construction
++		return true
++	}
++	for group := range byte(16) {
++		grouped := routes.partition(ctx, packs, group)
++		for id, blobs := range grouped {
++			delete(grouped, id)
++			select {
++			case <-ctx.Done():
++				return true
++			case out <- PackBlobs{PackID: id, Blobs: blobs}:
++			}
++		}
++		if ctx.Err() != nil {
++			return true
++		}
++	}
++	return true
++}
+diff --git a/internal/repository/index/repack_routes_boundary_test.go b/internal/repository/index/repack_routes_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f6b26c1d5d957b99d27cf69520f93f3faa615ee
+--- /dev/null
++++ b/internal/repository/index/repack_routes_boundary_test.go
+@@ -0,0 +1,126 @@
++package index
++
++import (
++	"context"
++	"fmt"
++	"reflect"
++	"testing"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// These layouts must reject routing before any publication. The production
++// iterator must still return the ordinary locations and partition progression.
++func TestRepackRoutesUnsupportedProductionFallback(t *testing.T) {
++	for _, layout := range []string{"unsaved", "preloaded-multiple", "membership-overflow"} {
++		t.Run(layout, func(t *testing.T) {
++			mi, packs := routeFixture(20000, 19) // overflow the locked small collector
++			switch layout {
++			case "unsaved":
++				mi.idx[0].final = false
++			case "preloaded-multiple":
++				other := NewIndex()
++				other.StorePack(routeID(1), pack.Blobs{{BlobHandle: restic.BlobHandle{ID: routeID(900001), Type: restic.TreeBlob}, Offset: 123456, Length: 101, UncompressedLength: 202}})
++				other.Finalize()
++				mi.idx = append(mi.idx, other)
++			case "membership-overflow":
++				// Extra empty pack records cost membership storage but no entries.
++				mi.idx[0].packs = append(mi.idx[0].packs, make(restic.IDs, repackRoutePackSlots+1-len(mi.idx[0].packs))...)
++			}
++			if routes, supported := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots); supported || routes != nil {
++				t.Fatal("unsupported layout accepted or partial routes escaped")
++			}
++			want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++			got := collectPackChannel(t, mi.ListPacksForRepack(context.Background(), packs))
++			if !reflect.DeepEqual(want, got) {
++				t.Fatal("fallback changed locations or within-pack order")
++			}
++		})
++	}
++}
++
++func TestRepackRoutesMembershipExactBound(t *testing.T) {
++	mi, packs := routeFixture(1000, 1)
++	mi.idx[0].packs = append(mi.idx[0].packs, make(restic.IDs, repackRoutePackSlots-len(mi.idx[0].packs))...)
++	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++	got := routeOutput(t, mi, packs, repackRouteSlots)
++	if !reflect.DeepEqual(want, got) {
++		t.Fatal("exact membership capacity changed output")
++	}
++	mi.idx[0].packs = append(mi.idx[0].packs, restic.ID{})
++	if routes, supported := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots); supported || routes != nil {
++		t.Fatal("membership capacity overflow accepted")
++	}
++}
++
++// Err calls select reproducible cancellation points in this single-threaded
++// construction/conversion witness. Cancellation itself is an ordinary context.
++type routeCancelContext struct {
++	context.Context
++	cancel    context.CancelFunc
++	remaining int
++}
++
++func (c *routeCancelContext) Err() error {
++	c.remaining--
++	if c.remaining == 0 {
++		c.cancel()
++	}
++	return c.Context.Err()
++}
++
++func TestRepackRoutesMidScanCancellation(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	controlled := &routeCancelContext{Context: ctx, cancel: cancel, remaining: 1000}
++	if routes, supported := mi.buildRepackRoutes(controlled, packs, repackRouteSlots); !supported || routes != nil || ctx.Err() == nil {
++		t.Fatal("interrupted construction retained partial routes")
++	}
++	// A fresh construction succeeds after the interrupted producer releases locks.
++	routes, supported := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++	if !supported || routes == nil {
++		t.Fatal("fresh construction failed")
++	}
++	ctx2, cancel2 := context.WithCancel(context.Background())
++	defer cancel2()
++	controlled = &routeCancelContext{Context: ctx2, cancel: cancel2, remaining: 100}
++	if got := routes.partition(controlled, packs, 1); got != nil || ctx2.Err() == nil {
++		t.Fatal("interrupted conversion published partial grouping")
++	}
++	mi.idx[0].m.Lock()
++	mi.idx[0].m.Unlock()
++}
++
++// Measure the public iterators, including the locked collector's first attempt,
++// routing construction, overflow restart, conversion, publication and closure.
++// Fixtures are loaded before timing, as they are before repack execution.
++func BenchmarkB18RepackCompleteIterator(b *testing.B) {
++	for _, size := range []struct{ entries, selected int }{
++		{5000, 5}, {100000, 16}, {1500000, 16}, {1500000, 128},
++	} {
++		mi, packs := routeFixture(size.entries, size.selected)
++		for _, routed := range []bool{false, true} {
++			b.Run(fmt.Sprintf("entries%d/selected%d/routed%v", size.entries, size.selected, routed), func(b *testing.B) {
++				b.ReportAllocs()
++				for range b.N {
++					var ch <-chan PackBlobs
++					if routed {
++						ch = mi.ListPacksForRepack(context.Background(), packs)
++					} else {
++						ch = mi.ListPacks(context.Background(), packs)
++					}
++					count, delivered := 0, 0
++					for pb := range ch {
++						count += len(pb.Blobs)
++						delivered++
++					}
++					if count != min(size.entries, size.selected*1000) || delivered != len(packs) {
++						b.Fatalf("incomplete publication: %d locations, %d packs", count, delivered)
++					}
++				}
++			})
++		}
++	}
++}
+diff --git a/internal/repository/index/repack_routes_settlement_b26_test.go b/internal/repository/index/repack_routes_settlement_b26_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..826224d458b3f9387d3a8cb5507572cba68355a0
+--- /dev/null
++++ b/internal/repository/index/repack_routes_settlement_b26_test.go
+@@ -0,0 +1,209 @@
++package index
++
++import (
++	"context"
++	"fmt"
++	"reflect"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++// Gate an actual cancellation at an Err checkpoint, without scheduling sleeps
++// or changing production code. The call count lets the test stop after some
++// selected entries have been copied, rather than only before work begins.
++type b26RouteCheckpoint struct {
++	context.Context
++	calls   atomic.Int64
++	stop    int64
++	entered chan struct{}
++	release chan struct{}
++}
++
++func (c *b26RouteCheckpoint) Err() error {
++	if c.calls.Add(1) == c.stop {
++		close(c.entered)
++		<-c.release
++	}
++	return c.Context.Err()
++}
++
++func b26Await(t *testing.T, ch <-chan struct{}, what string) {
++	t.Helper()
++	select {
++	case <-ch:
++	case <-time.After(5 * time.Second):
++		t.Fatalf("timeout: %s", what)
++	}
++}
++
++func TestB26RepackRoutesPartialCancellation(t *testing.T) {
++	for _, stage := range []string{"construction", "partition"} {
++		t.Run(stage, func(t *testing.T) {
++			mi, packs := routeFixture(20000, 19)
++			parent, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			gate := &b26RouteCheckpoint{Context: parent, stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
++			defer func() {
++				select {
++				case <-gate.release:
++				default:
++					close(gate.release)
++				}
++			}()
++			var routes *repackRoutes
++			if stage == "partition" {
++				var ok bool
++				routes, ok = mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++				if !ok || routes == nil {
++					t.Fatal("fixture rejected")
++				}
++			}
++			done := make(chan struct{})
++			var failure string
++			go func() {
++				defer close(done)
++				if stage == "construction" {
++					r, ok := mi.buildRepackRoutes(gate, packs, repackRouteSlots)
++					if !ok || r != nil {
++						failure = "partial construction escaped or requested fallback"
++					}
++				} else if r := routes.partition(gate, packs, 1); r != nil {
++					failure = "partial partition escaped"
++				}
++			}()
++			b26Await(t, gate.entered, "partial-work checkpoint")
++			cancel()
++			close(gate.release)
++			b26Await(t, done, "canceled work settlement")
++			if failure != "" {
++				t.Fatal(failure)
++			}
++			// Check both write locks after settlement; no reader may linger.
++			unlocked := make(chan struct{})
++			go func() {
++				mi.idxMutex.Lock()
++				mi.idx[0].m.Lock()
++				mi.idx[0].m.Unlock()
++				mi.idxMutex.Unlock()
++				close(unlocked)
++			}()
++			b26Await(t, unlocked, "post-cancellation write locks")
++		})
++	}
++}
++
++func TestB26RepackRoutesConcurrentGrowth(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++	if !ok || routes == nil {
++		t.Fatal("fixture rejected")
++	}
++	idx := routes.idx
++	before := idx.byType[restic.DataBlob].blockList.blockSize
++	// All fixture construction is outside the concurrent region. Merges add
++	// distinct locations and selected-pack entries; capture excludes these.
++	additions := make([]*Index, 8)
++	for batch := range additions {
++		other := NewIndex()
++		blobs := make(pack.Blobs, 10000)
++		for j := range blobs {
++			blobs[j] = pack.Blob{BlobHandle: restic.BlobHandle{ID: routeID(1000000 + batch*10000 + j), Type: restic.DataBlob}, Offset: uint(j * 101), Length: 101, UncompressedLength: 202}
++		}
++		other.StorePack(routeID(1), blobs)
++		other.Finalize()
++		additions[batch] = other
++	}
++	gate := &b26RouteCheckpoint{Context: context.Background(), stop: 100, entered: make(chan struct{}), release: make(chan struct{})}
++	defer func() {
++		select {
++		case <-gate.release:
++		default:
++			close(gate.release)
++		}
++	}()
++	first := make(chan map[restic.ID]pack.Blobs, 1)
++	go func() { first <- routes.partition(gate, packs, 1) }()
++	b26Await(t, gate.entered, "conversion holding captured-index read lock")
++	started := make(chan struct{})
++	done := make(chan struct{})
++	var mergeErr error
++	go func() {
++		defer close(done)
++		close(started)
++		for _, other := range additions {
++			if err := idx.merge(other); err != nil {
++				mergeErr = err
++				return
++			}
++		}
++	}()
++	b26Await(t, started, "merge started during conversion")
++	select {
++	case <-done:
++		t.Fatal("merge finished while partition held read lock")
++	default:
++	}
++	close(gate.release)
++	got := make(map[restic.ID]pack.Blobs)
++	select {
++	case grouped := <-first:
++		for id, blobs := range grouped {
++			got[id] = blobs
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("partition did not settle before merge")
++	}
++	for group := range byte(16) {
++		if group != 1 {
++			for id, blobs := range routes.partition(context.Background(), packs, group) {
++				got[id] = blobs
++			}
++		}
++		if routes.groups[group] != nil {
++			t.Fatalf("partition %d retains its ordinal array", group)
++		}
++	}
++	b26Await(t, done, "concurrent merges")
++	if mergeErr != nil {
++		t.Fatal(mergeErr)
++	}
++	if idx.byType[restic.DataBlob].blockList.blockSize <= before {
++		t.Fatal("fixture did not relocate HAT blocks")
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatal("captured fields/order changed during growth")
++	}
++	if reflect.DeepEqual(got, collectPackChannel(t, mi.ListPacks(context.Background(), packs))) {
++		t.Fatal("control did not expose new selected locations")
++	}
++}
++
++func TestB26RepackRoutesConsumerOwnership(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++	if !ok || routes == nil {
++		t.Fatal("fixture rejected")
++	}
++	got := routes.partition(context.Background(), packs, 1)
++	if routes.groups[1] != nil {
++		t.Fatal("converted partition retains ordinals")
++	}
++	// Discard producer-owned descriptors and remove the master reference.
++	// Published Blobs must be owned values, independent of that lifetime.
++	clear(routes.groups[:])
++	routes.idx = nil
++	mi.idxMutex.Lock()
++	mi.clear()
++	mi.idxMutex.Unlock()
++	for id, blobs := range got {
++		if !reflect.DeepEqual(blobs, want[id]) {
++			t.Fatal(fmt.Sprintf("consumer lost pack %s", id))
++		}
++	}
++}
+diff --git a/internal/repository/index/repack_routes_test.go b/internal/repository/index/repack_routes_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..25748c385c2d18a0e856c08b3639f17de3d89a09
+--- /dev/null
++++ b/internal/repository/index/repack_routes_test.go
+@@ -0,0 +1,283 @@
++package index
++
++import (
++	"context"
++	"encoding/binary"
++	"fmt"
++	"reflect"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++func routeID(n int) (id restic.ID) {
++	binary.LittleEndian.PutUint64(id[:], uint64(n))
++	return id
++}
++
++func routeFixture(n, selected int) (*MasterIndex, restic.IDSet) {
++	idx := NewIndex()
++	packs := restic.NewIDSet()
++	for i := 0; i < n; i += 1000 {
++		id := routeID(i/1000 + 1)
++		if i/1000 < selected {
++			packs.Insert(id)
++		}
++		blobs := make(pack.Blobs, 0, 1000)
++		for j := i; j < min(i+1000, n); j++ {
++			blobs = append(blobs, pack.Blob{BlobHandle: restic.BlobHandle{ID: routeID(j + 1), Type: restic.BlobType(1 + j%2)}, Offset: uint((j - i) * 100), Length: 100, UncompressedLength: uint(j%3) * 200})
++		}
++		idx.StorePack(id, blobs)
++	}
++	idx.Finalize()
++	mi := NewMasterIndex()
++	mi.idx = []*Index{idx}
++	packs.Insert(routeID(n + 42)) // absent requested packs must still be emitted
++	return mi, packs
++}
++
++func routeOutput(t *testing.T, mi *MasterIndex, packs restic.IDSet, limit int) map[restic.ID]pack.Blobs {
++	t.Helper()
++	routes, ok := mi.buildRepackRoutes(context.Background(), packs, limit)
++	if !ok || routes == nil {
++		t.Fatal("fixture rejected")
++	}
++	got := make(map[restic.ID]pack.Blobs)
++	for group := range byte(16) {
++		for id, blobs := range routes.partition(context.Background(), packs, group) {
++			got[id] = blobs
++		}
++	}
++	return got
++}
++
++func TestRepackRoutesDifferential(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	// Repeat exact locations and add another location of one blob in a mixed
++	// pack, as distinct locations must survive even when identities coincide.
++	dup := NewIndex()
++	dup.StorePack(routeID(1), pack.Blobs{{BlobHandle: restic.BlobHandle{ID: routeID(1), Type: restic.DataBlob}, Length: 100}, {BlobHandle: restic.BlobHandle{ID: routeID(1), Type: restic.DataBlob}, Offset: 1234, Length: 100}})
++	dup.Finalize()
++	if err := mi.idx[0].merge(dup); err != nil {
++		t.Fatal(err)
++	}
++	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++	got := routeOutput(t, mi, packs, repackRouteSlots)
++	if !reflect.DeepEqual(got, want) {
++		t.Fatal("locations, mixed types, missing packs or within-pack order changed")
++	}
++}
++
++func TestRepackRoutesBoundsAndUnsupported(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	if routes, ok := mi.buildRepackRoutes(context.Background(), packs, 1); ok || routes != nil {
++		t.Fatal("overflow published partial routes")
++	}
++	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++	if !ok {
++		t.Fatal("supported fixture rejected")
++	}
++	capacity := 0
++	for _, slots := range routes.groups {
++		capacity += cap(slots)
++	}
++	if _, ok := mi.buildRepackRoutes(context.Background(), packs, capacity); !ok {
++		t.Fatal("exact capacity rejected")
++	}
++	if _, ok := mi.buildRepackRoutes(context.Background(), packs, capacity-1); ok {
++		t.Fatal("capacity overflow accepted")
++	}
++	mi.idx[0].final = false
++	if _, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots); ok {
++		t.Fatal("mutable index accepted")
++	}
++	mi.idx[0].final = true
++	mi.idx = append(mi.idx, NewIndex())
++	if _, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots); ok {
++		t.Fatal("multiple indexes accepted")
++	}
++}
++
++func TestRepackRoutesProductionAndOverflow(t *testing.T) {
++	for _, n := range []int{0, 10000, 20000, 100000} {
++		mi, packs := routeFixture(n, 128)
++		want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++		got := collectPackChannel(t, mi.ListPacksForRepack(context.Background(), packs))
++		if !reflect.DeepEqual(want, got) {
++			t.Fatalf("production output differs for %d entries", n)
++		}
++	}
++}
++
++func TestRepackRoutesMergeAndReplacement(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++	if !ok {
++		t.Fatal("routes rejected")
++	}
++	// Existing ordinals survive append-only merges, including a duplicate.
++	// Cross HAT block relocation and hash/pack-table growth after capture.
++	other, _ := routeFixture(100000, 1)
++	if err := mi.idx[0].merge(other.idx[0]); err != nil {
++		t.Fatal(err)
++	}
++	mi.idxMutex.Lock()
++	mi.clear() // replacement does not invalidate the route's captured object
++	mi.idxMutex.Unlock()
++	got := make(map[restic.ID]pack.Blobs)
++	for group := range byte(16) {
++		for id, blobs := range routes.partition(context.Background(), packs, group) {
++			got[id] = blobs
++		}
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatal("captured locations changed after merge/replacement")
++	}
++}
++
++func TestRepackRoutesLaterSelectedLocations(t *testing.T) {
++	mi, packs := routeFixture(6000, 5)
++	want := collectPackChannel(t, mi.ListPacks(context.Background(), packs))
++	routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++	if !ok {
++		t.Fatal("routes rejected")
++	}
++	// Compare the installed collection snapshot against route capture before
++	// appending a new location in a selected pack and populating an absent pack.
++	collected, ok := mi.collectSelectedPacks(context.Background(), packs, listPacksCollectPackLimit, listPacksCollectBlobLimit)
++	if !ok {
++		t.Fatal("comparison collection overflowed")
++	}
++	later := NewIndex()
++	bh := restic.BlobHandle{ID: routeID(900001), Type: restic.TreeBlob}
++	later.StorePack(routeID(1), pack.Blobs{{BlobHandle: bh, Offset: 777777, Length: 101, UncompressedLength: 202}})
++	later.StorePack(routeID(6042), pack.Blobs{{BlobHandle: bh, Length: 101}})
++	later.Finalize()
++	if err := mi.idx[0].merge(later); err != nil {
++		t.Fatal(err)
++	}
++	got := make(map[restic.ID]pack.Blobs)
++	for group := range byte(16) {
++		for id, blobs := range routes.partition(context.Background(), packs, group) {
++			got[id] = blobs
++		}
++	}
++	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(got, collected) {
++		t.Fatal("capture included later selected locations or lost originals")
++	}
++	if reflect.DeepEqual(got, collectPackChannel(t, mi.ListPacks(context.Background(), packs))) {
++		t.Fatal("control did not expose later locations")
++	}
++}
++
++func TestRepackRoutesCancellationAndPublication(t *testing.T) {
++	mi, packs := routeFixture(20000, 19)
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if routes, ok := mi.buildRepackRoutes(ctx, packs, repackRouteSlots); !ok || routes != nil {
++		t.Fatal("canceled build did not settle")
++	}
++	ctx, cancel = context.WithCancel(context.Background())
++	defer cancel()
++	out := make(chan PackBlobs)
++	done := make(chan struct{})
++	go func() { mi.publishRepackRoutes(ctx, packs, out); close(out); close(done) }()
++	select {
++	case <-out:
++	case <-time.After(5 * time.Second):
++		t.Fatal("publication blocked")
++	}
++	// Acquire both write locks while the producer is blocked publishing.
++	unlocked := make(chan struct{})
++	go func() {
++		mi.idxMutex.Lock()
++		mi.idx[0].m.Lock()
++		mi.idx[0].m.Unlock()
++		mi.idxMutex.Unlock()
++		close(unlocked)
++	}()
++	select {
++	case <-unlocked:
++	case <-time.After(5 * time.Second):
++		t.Fatal("publication retains producer locks")
++	}
++	cancel()
++	for range out {
++	}
++	select {
++	case <-done:
++	case <-time.After(5 * time.Second):
++		t.Fatal("canceled producer did not join")
++	}
++}
++
++func routeGroupingControl(ctx context.Context, mi *MasterIndex, packs restic.IDSet, values bool) int {
++	count := 0
++	for group := range byte(16) {
++		grouped := make(map[restic.ID]pack.Blobs)
++		for id := range packs {
++			if id[0]&15 == group {
++				grouped[id] = nil
++			}
++		}
++		if len(grouped) == 0 {
++			continue
++		}
++		if values {
++			for pb := range mi.packedBlobValues() {
++				if _, ok := grouped[pb.Pack]; ok {
++					grouped[pb.Pack] = append(grouped[pb.Pack], pb.Blob)
++				}
++			}
++		} else {
++			for pb := range mi.Values() {
++				if _, ok := grouped[pb.Pack]; ok {
++					grouped[pb.Pack] = append(grouped[pb.Pack], pb.Blob)
++				}
++			}
++		}
++		for _, blobs := range grouped {
++			count += len(blobs)
++		}
++	}
++	return count
++}
++
++// Construction, overflow restart and partition conversion are all timed.
++// The fixture is preloaded, as it is for the repack execution stage.
++func BenchmarkB18RepackRouting(b *testing.B) {
++	for _, n := range []int{10000, 100000, 1500000} {
++		for _, selected := range []int{16, 128} {
++			mi, packs := routeFixture(n, selected)
++			want := min(n, selected*1000)
++			for _, arm := range []string{"pointer", "value", "routes"} {
++				b.Run(fmt.Sprintf("entries%d/selected%d/%s", n, selected, arm), func(b *testing.B) {
++					b.ReportAllocs()
++					for range b.N {
++						count := 0
++						if arm == "routes" {
++							routes, ok := mi.buildRepackRoutes(context.Background(), packs, repackRouteSlots)
++							if ok {
++								for group := range byte(16) {
++									for _, blobs := range routes.partition(context.Background(), packs, group) {
++										count += len(blobs)
++									}
++								}
++							} else {
++								count = routeGroupingControl(context.Background(), mi, packs, false)
++							}
++						} else {
++							count = routeGroupingControl(context.Background(), mi, packs, arm == "value")
++						}
++						if count != want {
++							b.Fatal(count, want)
++						}
++					}
++				})
++			}
++		}
++	}
++}

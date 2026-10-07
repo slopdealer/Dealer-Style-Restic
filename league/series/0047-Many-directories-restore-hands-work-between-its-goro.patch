@@ -1,0 +1,673 @@
+From 4614261075627c81c9bd146e44002dbf1d97cf11 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 16:22:37 +0000
+Subject: [PATCH 47/49] Many directories: restore hands work between its
+ goroutines per batch, not per directory
+
+Both passes of restore passed every directory through another goroutine and
+back. In the first pass the node lookahead ends a batch at every directory,
+so a run of directories came back one node per request, and an empty tree
+cost a request and a reply for nothing. In the second pass the tree
+prefetch handed over one prepared tree at a time through a queue of one.
+Each hand-over puts one goroutine to sleep and wakes another, and every
+wake-up sets idle CPUs searching for work: on a tree of 606,060 directories
+that was 1.3 million voluntary context switches against 0.09 million in
+stock, and user CPU that grew with the number of CPUs (19.8 s on 4 cores,
+24.1 s on 16; stock 17.9 s on both).
+
+First pass: nodes are decoded by the traversal itself until one is not a
+directory; from that node on the helper prepares the following nodes ahead,
+as before, until a directory ends the run. Second pass: the prepared trees
+are handed over in batches of up to 64 trees and 256 KiB of prepared nodes.
+A batch is handed over as soon as the traversal has room for it, so a
+traversal that waits is still served tree by tree; only a traversal that is
+busy lets the batch grow. Order, errors, the fallback to loading a tree
+directly and the byte budget of a prepared tree are unchanged.
+
+Measured (606,060 directories and three files, tmpfs, whole cores, wall /
+user / voluntary context switches): 4 cores 25.8 s / 16.5 s / 0.09M (before
+28.7 / 19.9 / 1.30M, stock 34.4 / 17.8 / 0.09M); 8 cores 26.7 / 18.4 /
+0.11M (before 30.5 / 22.5 / 1.32M, stock 35.0 / 18.4); 16 cores 27.4 / 19.1
+/ 0.11M (before 31.6 / 23.6 / 1.28M, stock 35.6 / 18.2).
+
+Tests: TestNodeLookaheadDecodesDirectoryRunsInline (fails before),
+TestNodeLookaheadRandomTreesKeepOrder, TestTreePrefetchHandsOverBatches,
+TestTreePrefetchBatchKeepsByteBudget,
+TestTreePrefetchDoesNotDelayAWaitingTraversal.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/restorer/directory_handover_test.go | 346 +++++++++++++++++++
+ internal/restorer/node_lookahead.go          |  47 ++-
+ internal/restorer/tree_prefetch.go           | 132 +++++--
+ 3 files changed, 472 insertions(+), 53 deletions(-)
+ create mode 100644 internal/restorer/directory_handover_test.go
+
+diff --git a/internal/restorer/directory_handover_test.go b/internal/restorer/directory_handover_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f7767fae2d665ede45d45be7434363ecf726a76
+--- /dev/null
++++ b/internal/restorer/directory_handover_test.go
+@@ -0,0 +1,346 @@
++package restorer
++
++import (
++	"context"
++	"fmt"
++	"math/rand"
++	"runtime"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/data"
++	"github.com/restic/restic/internal/restic"
++)
++
++// goroutineID returns the number of the calling goroutine.
++func goroutineID() string {
++	var buf [64]byte
++	fields := strings.Fields(string(buf[:runtime.Stack(buf[:], false)]))
++	return fields[1]
++}
++
++// lookaheadSource returns a node source for wrapSource which records how many
++// of its nodes were decoded on another goroutine than the one given.
++func lookaheadSource(nodes []*data.Node, visitor string, elsewhere *atomic.Int64) func() (func() (data.NodeOrError, bool), func()) {
++	return func() (func() (data.NodeOrError, bool), func()) {
++		i := 0
++		return func() (data.NodeOrError, bool) {
++			if i == len(nodes) {
++				return data.NodeOrError{}, false
++			}
++			if goroutineID() != visitor {
++				elsewhere.Add(1)
++			}
++			i++
++			return data.NodeOrError{Node: nodes[i-1]}, true
++		}, func() {}
++	}
++}
++
++// A run of directories, and an empty tree, must not go through the helper of
++// the first pass: every directory would be one request and one reply, with
++// nothing prepared ahead. Files after the first one still are prepared ahead.
++func TestNodeLookaheadDecodesDirectoryRunsInline(t *testing.T) {
++	dir := func(i int) *data.Node { return &data.Node{Name: fmt.Sprintf("d%03d", i), Type: data.NodeTypeDir} }
++	file := func(i int) *data.Node { return &data.Node{Name: fmt.Sprintf("f%03d", i), Type: data.NodeTypeFile} }
++	var dirs, files, mixed []*data.Node
++	for i := 0; i < 300; i++ {
++		dirs = append(dirs, dir(i))
++		files = append(files, file(i))
++	}
++	for i := 0; i < 50; i++ {
++		mixed = append(mixed, dir(i))
++	}
++	for i := 0; i < 200; i++ {
++		mixed = append(mixed, file(i))
++	}
++	for i := 50; i < 100; i++ {
++		mixed = append(mixed, dir(i))
++	}
++
++	for _, test := range []struct {
++		name  string
++		nodes []*data.Node
++		// the nodes that may be decoded by the helper at most, and at least
++		most, least int64
++	}{
++		{"empty", nil, 0, 0},
++		{"directories", dirs, 0, 0},
++		{"files", files, 299, 290},
++		// 50 directories inline, the first file inline, 199 files and the
++		// directory that ends their run by the helper, 49 directories inline
++		{"mixed", mixed, 200, 190},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			p := newRestoreNodeLookahead(nil)
++			defer p.Close()
++			var elsewhere atomic.Int64
++			var got []*data.Node
++			for item := range p.wrapSource(lookaheadSource(test.nodes, goroutineID(), &elsewhere)) {
++				if item.Error != nil {
++					t.Fatal(item.Error)
++				}
++				got = append(got, item.Node)
++			}
++			if len(got) != len(test.nodes) {
++				t.Fatalf("%d nodes, want %d", len(got), len(test.nodes))
++			}
++			for i := range got {
++				if got[i] != test.nodes[i] {
++					t.Fatalf("node %d is %q, want %q", i, got[i].Name, test.nodes[i].Name)
++				}
++			}
++			if n := elsewhere.Load(); n > test.most || n < test.least {
++				t.Fatalf("%d nodes were decoded by the helper, want %d to %d", n, test.least, test.most)
++			}
++			if len(p.credits) != 0 {
++				t.Fatalf("%d credits are held after the traversal", len(p.credits))
++			}
++		})
++	}
++}
++
++// Nested traversals of random trees through the lookahead deliver the nodes
++// of a plain traversal, in its order, whatever the mix of files and
++// directories.
++func TestNodeLookaheadRandomTreesKeepOrder(t *testing.T) {
++	rnd := rand.New(rand.NewSource(20261008))
++	type tree struct {
++		nodes    []*data.Node
++		children map[*data.Node]*tree
++	}
++	var build func(depth int) *tree
++	build = func(depth int) *tree {
++		tr := &tree{children: map[*data.Node]*tree{}}
++		for i, n := 0, rnd.Intn(12); i < n; i++ {
++			node := &data.Node{Name: fmt.Sprintf("n%d-%d", depth, i), Type: data.NodeTypeFile}
++			if rnd.Intn(3) != 0 && depth < 4 {
++				node.Type = data.NodeTypeDir
++				tr.children[node] = build(depth + 1)
++			}
++			tr.nodes = append(tr.nodes, node)
++		}
++		return tr
++	}
++	for round := 0; round < 200; round++ {
++		root := build(0)
++		var want []string
++		var plain func(tr *tree, prefix string)
++		plain = func(tr *tree, prefix string) {
++			for _, node := range tr.nodes {
++				want = append(want, prefix+node.Name)
++				if child := tr.children[node]; child != nil {
++					plain(child, prefix+node.Name+"/")
++				}
++			}
++		}
++		plain(root, "")
++
++		p := newRestoreNodeLookahead(nil)
++		var got []string
++		var walk func(tr *tree, prefix string)
++		walk = func(tr *tree, prefix string) {
++			var elsewhere atomic.Int64
++			for item := range p.wrapSource(lookaheadSource(tr.nodes, "", &elsewhere)) {
++				if item.Error != nil {
++					t.Fatal(item.Error)
++				}
++				got = append(got, prefix+item.Node.Name)
++				if child := tr.children[item.Node]; child != nil {
++					walk(child, prefix+item.Node.Name+"/")
++				}
++			}
++		}
++		walk(root, "")
++		p.Close()
++		if strings.Join(got, "\n") != strings.Join(want, "\n") {
++			t.Fatalf("round %d: the traversal through the lookahead differs from the plain one", round)
++		}
++	}
++}
++
++// countingTreeLoader serves small trees and counts how many were loaded. With
++// gates, the load of tree i waits for gates[i].
++type countingTreeLoader struct {
++	ids    []restic.ID
++	index  map[restic.ID]int
++	loaded atomic.Int64
++	gates  []chan struct{}
++	size   int
++}
++
++func newCountingTreeLoader(n, nodeNameBytes int) *countingTreeLoader {
++	l := &countingTreeLoader{index: map[restic.ID]int{}, size: nodeNameBytes}
++	for i := 0; i < n; i++ {
++		id := restic.Hash([]byte(fmt.Sprintf("tree %d", i)))
++		l.ids = append(l.ids, id)
++		l.index[id] = i
++	}
++	return l
++}
++
++func (l *countingTreeLoader) load(ctx context.Context, id restic.ID) (data.TreeNodeIterator, error) {
++	i := l.index[id]
++	if l.gates != nil {
++		select {
++		case <-l.gates[i]:
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		}
++	}
++	l.loaded.Add(1)
++	return restoreTreeSequence([]*data.Node{{Name: fmt.Sprintf("%06d-%s", i, strings.Repeat("x", l.size)), Type: data.NodeTypeDir}}, nil), nil
++}
++
++func (l *countingTreeLoader) settled(t *testing.T) int64 {
++	t.Helper()
++	last, same := int64(-1), 0
++	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
++		now := l.loaded.Load()
++		if now == last {
++			same++
++			if same == 40 {
++				return now
++			}
++		} else {
++			last, same = now, 0
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	t.Fatal("the prefetch does not settle")
++	return 0
++}
++
++// The trees of the second pass are handed over in batches: with a traversal
++// that is slower than the prefetch, one hand-over carries many small trees,
++// and what is prepared ahead stays bounded in trees and in bytes.
++func TestTreePrefetchHandsOverBatches(t *testing.T) {
++	l := newCountingTreeLoader(1000, 8)
++	p := newRestoreTreePrefetch(context.Background(), l.ids, l.load)
++	defer p.Close()
++
++	// nobody asks: the first tree goes to the queue alone, a full batch waits
++	if got, want := l.settled(t), int64(1+maxPreparedTreeBatch); got != want {
++		t.Fatalf("%d trees were prepared ahead of an idle traversal, want %d", got, want)
++	}
++	next := 0
++	loadOne := func() {
++		t.Helper()
++		tree, err := p.Load(context.Background(), l.ids[next])
++		if err != nil {
++			t.Fatal(err)
++		}
++		count := 0
++		for item := range tree {
++			if item.Error != nil || !strings.HasPrefix(item.Node.Name, fmt.Sprintf("%06d-", next)) {
++				t.Fatalf("tree %d: got %+v", next, item)
++			}
++			count++
++		}
++		if count != 1 {
++			t.Fatalf("tree %d: %d nodes", next, count)
++		}
++		next++
++	}
++	var sizes []int
++	for next < len(l.ids) {
++		handover := len(p.batch) == 0
++		if handover {
++			// the prefetch runs ahead as far as it may: one batch in the
++			// queue and one that waits for the queue
++			l.settled(t)
++			if ahead := l.loaded.Load() - int64(next); ahead > 2*maxPreparedTreeBatch {
++				t.Fatalf("tree %d: %d trees are prepared ahead, more than two batches", next, ahead)
++			}
++		}
++		loadOne()
++		if handover {
++			sizes = append(sizes, len(p.batch)+1)
++		}
++	}
++	// the first tree was handed over alone, the last hand-over carries the rest
++	if len(sizes) < 3 || sizes[0] != 1 {
++		t.Fatalf("hand-overs of %v trees", sizes)
++	}
++	for _, size := range sizes[1 : len(sizes)-1] {
++		if size != maxPreparedTreeBatch {
++			t.Fatalf("hand-overs of %v trees, want full batches of %d for a slow traversal", sizes, maxPreparedTreeBatch)
++		}
++	}
++	if p.fallback {
++		t.Fatal("the traversal fell back to loading the trees itself")
++	}
++}
++
++// A batch never holds more than the byte budget of prepared nodes.
++func TestTreePrefetchBatchKeepsByteBudget(t *testing.T) {
++	// two trees fit the budget, three do not
++	l := newCountingTreeLoader(40, maxPreparedTreeBytes/5)
++	one := estimatePreparedNodeBytes(&data.Node{Name: fmt.Sprintf("%06d-%s", 0, strings.Repeat("x", l.size)), Type: data.NodeTypeDir})
++	if 3*one <= maxPreparedTreeBytes || 2*one > maxPreparedTreeBytes {
++		t.Fatalf("fixture: one tree is estimated at %d bytes", one)
++	}
++	p := newRestoreTreePrefetch(context.Background(), l.ids, l.load)
++	defer p.Close()
++	// one tree in the queue, two in the batch, and the one that did not fit
++	if got := l.settled(t); got != 4 {
++		t.Fatalf("%d trees were prepared ahead of an idle traversal, want 4", got)
++	}
++	for i, id := range l.ids {
++		tree, err := p.Load(context.Background(), id)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var held uint64
++		for _, prepared := range p.batch {
++			held += prepared.bytes
++		}
++		if held > maxPreparedTreeBytes {
++			t.Fatalf("tree %d: the batch in use holds %d bytes of nodes", i, held)
++		}
++		for item := range tree {
++			if item.Error != nil {
++				t.Fatal(item.Error)
++			}
++		}
++	}
++}
++
++// A traversal that waits is served tree by tree: it never waits for a batch
++// to fill.
++func TestTreePrefetchDoesNotDelayAWaitingTraversal(t *testing.T) {
++	l := newCountingTreeLoader(20, 8)
++	for range l.ids {
++		l.gates = append(l.gates, make(chan struct{}))
++	}
++	p := newRestoreTreePrefetch(context.Background(), l.ids, l.load)
++	defer p.Close()
++	var wg sync.WaitGroup
++	for i, id := range l.ids {
++		done := make(chan error, 1)
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			tree, err := p.Load(context.Background(), id)
++			if err == nil {
++				for range tree {
++				}
++			}
++			done <- err
++		}()
++		// only tree i becomes available; the later ones stay closed
++		close(l.gates[i])
++		select {
++		case err := <-done:
++			if err != nil {
++				t.Fatal(err)
++			}
++		case <-time.After(10 * time.Second):
++			t.Fatalf("tree %d was not handed over although it was prepared and the traversal was waiting", i)
++		}
++		wg.Wait()
++	}
++}
+diff --git a/internal/restorer/node_lookahead.go b/internal/restorer/node_lookahead.go
+index f47336d02a5248185357592dad0d93ce5e8385d4..36b29e1ecc8feeb4573aabe5a7cef448eec11fd4 100644
+--- a/internal/restorer/node_lookahead.go
++++ b/internal/restorer/node_lookahead.go
+@@ -118,15 +118,40 @@ func (p *restoreNodeLookahead) wrapSource(open func() (func() (data.NodeOrError,
+ 				return false
+ 			}
+ 		}
+-		if !start() {
+-			for {
+-				item, ok := next()
+-				if !ok || !yield(item) || item.Error != nil {
+-					return
++		for {
++			if !pending {
++				// A directory ends a batch, so the helper returns a run of
++				// directories one node at a time, and an empty tree as an
++				// empty batch: a request and a reply each time, with nothing
++				// prepared ahead. Such nodes are decoded here instead. The
++				// helper is asked from the first node on that is no directory.
++				for {
++					item, ok := next()
++					if !ok {
++						return
++					}
++					dir := item.Error == nil && item.Node != nil && item.Node.Type == data.NodeTypeDir
++					if !dir && item.Error == nil && item.Node != nil && estimatePreparedNodeBytes(item.Node) <= restoreLookaheadBytes {
++						// the nodes after it are prepared while this one is
++						// visited, as they are within a batch
++						start()
++					}
++					if !yield(item) || item.Error != nil {
++						return
++					}
++					if !dir {
++						break
++					}
++				}
++				if !pending && !start() {
++					for {
++						item, ok := next()
++						if !ok || !yield(item) || item.Error != nil {
++							return
++						}
++					}
+ 				}
+ 			}
+-		}
+-		for {
+ 			batch := <-result
+ 			pending = false
+ 			owned := true
+@@ -161,14 +186,6 @@ func (p *restoreNodeLookahead) wrapSource(open func() (func() (data.NodeOrError,
+ 			if !keepGoing || batch.end {
+ 				return
+ 			}
+-			if !pending && !start() {
+-				for {
+-					item, ok := next()
+-					if !ok || !yield(item) || item.Error != nil {
+-						return
+-					}
+-				}
+-			}
+ 		}
+ 	}
+ }
+diff --git a/internal/restorer/tree_prefetch.go b/internal/restorer/tree_prefetch.go
+index f1f44e75ff4dc5316f665c63b1fff07774043760..0030ddde7783ecf2abd0031fb981748646c088bb 100644
+--- a/internal/restorer/tree_prefetch.go
++++ b/internal/restorer/tree_prefetch.go
+@@ -12,6 +12,15 @@ import (
+ // restored. Oversized trees are loaded normally in the second traversal.
+ const maxPreparedTreeBytes = 256 << 10
+ 
++// The prepared trees are handed to the traversal in batches. One tree per
++// hand-over wakes the other goroutine for every directory, and with many small
++// directories the hand-overs cost more than the preparation saves; they cost
++// more the more CPUs there are to wake. A batch is handed over as soon as the
++// traversal has room for it, so the traversal never waits for a batch to
++// fill; while it is busy the batch grows, to at most maxPreparedTreeBatch
++// trees and maxPreparedTreeBytes of prepared nodes.
++const maxPreparedTreeBatch = 64
++
+ type restoreTreeLoader func(context.Context, restic.ID) (data.TreeNodeIterator, error)
+ 
+ type preparedRestoreTree struct {
+@@ -20,16 +29,19 @@ type preparedRestoreTree struct {
+ 	iteratorErr error
+ 	loadErr     error
+ 	tooLarge    bool
++	// bytes is the estimate for nodes, as far as this prefetch prepared them
++	bytes uint64
+ }
+ 
+ type restoreTreePrefetch struct {
+ 	cancel context.CancelFunc
+ 	done   chan struct{}
+-	queue  chan preparedRestoreTree
++	queue  chan []preparedRestoreTree
+ 	load   restoreTreeLoader
+ 
+-	// Only the restore traversal goroutine calls Load, so this does not need
+-	// synchronization.
++	// Only the restore traversal goroutine calls Load, so these do not need
++	// synchronization. batch holds the trees received and not yet asked for.
++	batch    []preparedRestoreTree
+ 	fallback bool
+ }
+ 
+@@ -42,7 +54,7 @@ func newRestoreTreePrefetchWithCarry(ctx context.Context, ids []restic.ID, load
+ 	p := &restoreTreePrefetch{
+ 		cancel: cancel,
+ 		done:   make(chan struct{}),
+-		queue:  make(chan preparedRestoreTree, 1),
++		queue:  make(chan []preparedRestoreTree, 1),
+ 		load:   load,
+ 	}
+ 
+@@ -50,27 +62,60 @@ func newRestoreTreePrefetchWithCarry(ctx context.Context, ids []restic.ID, load
+ 		defer close(p.done)
+ 		defer close(p.queue)
+ 
++		var batch []preparedRestoreTree
++		var batchBytes uint64
++		// send hands the batch over and reports whether the prefetch goes on
++		send := func() bool {
++			if len(batch) == 0 {
++				return true
++			}
++			select {
++			case p.queue <- batch:
++				batch, batchBytes = nil, 0
++				return true
++			case <-prefetchCtx.Done():
++				clearPreparedTrees(batch)
++				return false
++			}
++		}
+ 		for occurrence, id := range ids {
+ 			prepared, carried := carry.take(occurrence, id)
+ 			terminal := false
+ 			if !carried {
+ 				prepared, terminal = p.prepare(prefetchCtx, id)
+ 			}
+-			select {
+-			case p.queue <- prepared:
+-			case <-prefetchCtx.Done():
++			if prepared.bytes > maxPreparedTreeBytes-batchBytes && !send() {
+ 				clear(prepared.nodes)
+ 				return
+ 			}
+-			if terminal {
+-				return
++			batch = append(batch, prepared)
++			batchBytes += prepared.bytes
++			if terminal || len(batch) >= maxPreparedTreeBatch {
++				if !send() || terminal {
++					return
++				}
++				continue
++			}
++			// hand over what is ready if the traversal has room for it
++			select {
++			case p.queue <- batch:
++				batch, batchBytes = nil, 0
++			default:
+ 			}
+ 		}
++		send()
+ 	}()
+ 
+ 	return p
+ }
+ 
++func clearPreparedTrees(trees []preparedRestoreTree) {
++	for i := range trees {
++		clear(trees[i].nodes)
++		trees[i] = preparedRestoreTree{}
++	}
++}
++
+ func (p *restoreTreePrefetch) prepare(ctx context.Context, id restic.ID) (preparedRestoreTree, bool) {
+ 	prepared := preparedRestoreTree{id: id}
+ 	tree, err := p.load(ctx, id)
+@@ -99,6 +144,7 @@ func (p *restoreTreePrefetch) prepare(ctx context.Context, id restic.ID) (prepar
+ 		prepared.nodes = append(prepared.nodes, item.Node)
+ 	}
+ 
++	prepared.bytes = retainedBytes
+ 	return prepared, false
+ }
+ 
+@@ -148,35 +194,43 @@ func (p *restoreTreePrefetch) Load(ctx context.Context, id restic.ID) (data.Tree
+ 		return p.load(ctx, id)
+ 	}
+ 
+-	select {
+-	case <-ctx.Done():
+-		return nil, ctx.Err()
+-	case prepared, ok := <-p.queue:
+-		if err := ctx.Err(); err != nil {
+-			clear(prepared.nodes)
+-			return nil, err
+-		}
+-		if !ok {
+-			p.fallback = true
+-			return p.load(ctx, id)
+-		}
+-		if !prepared.id.Equal(id) {
+-			clear(prepared.nodes)
+-			// A caller-supplied selection filter can change its answer between
+-			// traversals. Abandon the prefetched sequence and preserve the
+-			// ordinary loader's behavior from this point on.
+-			p.fallback = true
+-			p.cancel()
+-			return p.load(ctx, id)
+-		}
+-		if prepared.loadErr != nil {
+-			return nil, prepared.loadErr
+-		}
+-		if prepared.tooLarge {
+-			return p.load(ctx, id)
++	if len(p.batch) == 0 {
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case batch, ok := <-p.queue:
++			if err := ctx.Err(); err != nil {
++				clearPreparedTrees(batch)
++				return nil, err
++			}
++			if !ok {
++				p.fallback = true
++				return p.load(ctx, id)
++			}
++			p.batch = batch
+ 		}
+-		return preparedTreeIterator(prepared.nodes, prepared.iteratorErr), nil
+ 	}
++	prepared := p.batch[0]
++	p.batch[0] = preparedRestoreTree{}
++	p.batch = p.batch[1:]
++	if !prepared.id.Equal(id) {
++		clear(prepared.nodes)
++		clearPreparedTrees(p.batch)
++		p.batch = nil
++		// A caller-supplied selection filter can change its answer between
++		// traversals. Abandon the prefetched sequence and preserve the
++		// ordinary loader's behavior from this point on.
++		p.fallback = true
++		p.cancel()
++		return p.load(ctx, id)
++	}
++	if prepared.loadErr != nil {
++		return nil, prepared.loadErr
++	}
++	if prepared.tooLarge {
++		return p.load(ctx, id)
++	}
++	return preparedTreeIterator(prepared.nodes, prepared.iteratorErr), nil
+ }
+ 
+ func preparedTreeIterator(nodes []*data.Node, iteratorErr error) data.TreeNodeIterator {
+@@ -208,7 +262,9 @@ func (p *restoreTreePrefetch) Close() {
+ 	p.cancel()
+ 	<-p.done
+ 	// Joining the sole producer makes draining safe, including repeated Close.
+-	for prepared := range p.queue {
+-		clear(prepared.nodes)
++	for batch := range p.queue {
++		clearPreparedTrees(batch)
+ 	}
++	clearPreparedTrees(p.batch)
++	p.batch = nil
+ }

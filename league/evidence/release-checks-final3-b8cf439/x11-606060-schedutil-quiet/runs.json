@@ -1,0 +1,74 @@
+[
+ {
+  "directories": 606060,
+  "cpus": "all 16 check CPUs",
+  "round": 1,
+  "binary": "stock",
+  "position_in_round": 1,
+  "rc": 0,
+  "seconds": 68.2,
+  "user_s": 29.1,
+  "sys_s": 42.4,
+  "rss_mib": 57.0
+ },
+ {
+  "directories": 606060,
+  "cpus": "all 16 check CPUs",
+  "round": 1,
+  "binary": "tree",
+  "position_in_round": 2,
+  "rc": 0,
+  "seconds": 75.3,
+  "user_s": 40.5,
+  "sys_s": 58.2,
+  "rss_mib": 66.0
+ },
+ {
+  "directories": 606060,
+  "cpus": "all 16 check CPUs",
+  "round": 2,
+  "binary": "tree",
+  "position_in_round": 1,
+  "rc": 0,
+  "seconds": 74.7,
+  "user_s": 40.1,
+  "sys_s": 58.1,
+  "rss_mib": 57.7
+ },
+ {
+  "directories": 606060,
+  "cpus": "all 16 check CPUs",
+  "round": 2,
+  "binary": "stock",
+  "position_in_round": 2,
+  "rc": 0,
+  "seconds": 68.0,
+  "user_s": 29.5,
+  "sys_s": 41.9,
+  "rss_mib": 58.5
+ },
+ {
+  "directories": 606060,
+  "cpus": "all 16 check CPUs",
+  "round": 3,
+  "binary": "stock",
+  "position_in_round": 1,
+  "rc": 0,
+  "seconds": 67.8,
+  "user_s": 28.9,
+  "sys_s": 42.2,
+  "rss_mib": 57.8
+ },
+ {
+  "directories": 606060,
+  "cpus": "all 16 check CPUs",
+  "round": 3,
+  "binary": "tree",
+  "position_in_round": 2,
+  "rc": 0,
+  "seconds": 75.6,
+  "user_s": 40.9,
+  "sys_s": 58.6,
+  "rss_mib": 56.2
+ }
+]

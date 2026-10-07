@@ -1,0 +1,781 @@
+{
+ "what": "time saved against upstream restic in percent (positive = faster) at 4, 8 and 16 cores; restores of very many directories; incidental timings of the release-check harness. Parsed from the merge agent's record, a copy of which is league/reviews/merge/MANY-CORE.md",
+ "governor": "every measurement here ran with the performance frequency governor, except the release-check harness's, which ran with schedutil (a load-following governor)",
+ "current": {
+  "measured_on": {
+   "label": "rc-9",
+   "working_commit": "8f9372b",
+   "what": "the published commit built with the judge's flags: the same machine code as the judged binary"
+  },
+  "four_cores": "official judge job `50388f4e` on the judged commit `b8cf439`, 44 rounds, 11 per workload, every cell 11 of 11",
+  "eight_and_sixteen_cores": "the builders' bench tool, 5 fixed pairs per cell, whole physical cores without their SMT siblings, GOMAXPROCS equal to the number of cores, performance governor, no other league job running (the release-check harness was at work on its own cores); every cell 5 of 5 at both core counts",
+  "workloads": [
+   {
+    "workload": "main",
+    "phase": "backup-initial",
+    "cores_4": 7.17,
+    "cores_8": 6.03,
+    "cores_16": 11.38
+   },
+   {
+    "workload": "main",
+    "phase": "backup-unchanged",
+    "cores_4": 23.96,
+    "cores_8": 24.77,
+    "cores_16": 25.27
+   },
+   {
+    "workload": "main",
+    "phase": "backup-mutated",
+    "cores_4": 22.36,
+    "cores_8": 24.19,
+    "cores_16": 24.41
+   },
+   {
+    "workload": "main",
+    "phase": "restore",
+    "cores_4": 48.76,
+    "cores_8": 46.72,
+    "cores_16": 45.95
+   },
+   {
+    "workload": "main",
+    "phase": "check-read-data",
+    "cores_4": 32.45,
+    "cores_8": 33.85,
+    "cores_16": 34.19
+   },
+   {
+    "workload": "main",
+    "phase": "forget-prune",
+    "cores_4": 44.6,
+    "cores_8": 49.04,
+    "cores_16": 50.16
+   },
+   {
+    "workload": "main",
+    "phase": "ls-json",
+    "cores_4": 42.33,
+    "cores_8": 41.88,
+    "cores_16": 42.38
+   },
+   {
+    "workload": "main",
+    "phase": "pass",
+    "cores_4": 30.63,
+    "cores_8": 31.47,
+    "cores_16": 33.03
+   },
+   {
+    "workload": "big-index",
+    "phase": "backup-initial",
+    "cores_4": 17.33,
+    "cores_8": 15.43,
+    "cores_16": 15.86
+   },
+   {
+    "workload": "big-index",
+    "phase": "backup-unchanged",
+    "cores_4": 34.23,
+    "cores_8": 31.32,
+    "cores_16": 31.82
+   },
+   {
+    "workload": "big-index",
+    "phase": "backup-mutated",
+    "cores_4": 31.59,
+    "cores_8": 29.59,
+    "cores_16": 29.81
+   },
+   {
+    "workload": "big-index",
+    "phase": "restore",
+    "cores_4": 52.06,
+    "cores_8": 49.85,
+    "cores_16": 49.61
+   },
+   {
+    "workload": "big-index",
+    "phase": "check-read-data",
+    "cores_4": 39.78,
+    "cores_8": 40.39,
+    "cores_16": 43.74
+   },
+   {
+    "workload": "big-index",
+    "phase": "forget-prune",
+    "cores_4": 70.75,
+    "cores_8": 71.62,
+    "cores_16": 72.33
+   },
+   {
+    "workload": "big-index",
+    "phase": "ls-json",
+    "cores_4": 53.0,
+    "cores_8": 50.35,
+    "cores_16": 51.75
+   },
+   {
+    "workload": "big-index",
+    "phase": "pass",
+    "cores_4": 45.13,
+    "cores_8": 44.99,
+    "cores_16": 46.27
+   },
+   {
+    "workload": "large-files",
+    "phase": "backup-initial",
+    "cores_4": 11.15,
+    "cores_8": 17.83,
+    "cores_16": 28.28
+   },
+   {
+    "workload": "large-files",
+    "phase": "backup-unchanged",
+    "cores_4": 26.96,
+    "cores_8": 36.33,
+    "cores_16": 38.36
+   },
+   {
+    "workload": "large-files",
+    "phase": "backup-mutated",
+    "cores_4": 16.2,
+    "cores_8": 26.73,
+    "cores_16": 31.81
+   },
+   {
+    "workload": "large-files",
+    "phase": "restore",
+    "cores_4": 20.73,
+    "cores_8": 18.73,
+    "cores_16": 18.96
+   },
+   {
+    "workload": "large-files",
+    "phase": "check-read-data",
+    "cores_4": 27.61,
+    "cores_8": 28.78,
+    "cores_16": 30.08
+   },
+   {
+    "workload": "large-files",
+    "phase": "forget-prune",
+    "cores_4": 45.8,
+    "cores_8": 50.13,
+    "cores_16": 48.67
+   },
+   {
+    "workload": "large-files",
+    "phase": "ls-json",
+    "cores_4": 38.78,
+    "cores_8": 38.66,
+    "cores_16": 38.56
+   },
+   {
+    "workload": "large-files",
+    "phase": "pass",
+    "cores_4": 22.96,
+    "cores_8": 28.86,
+    "cores_16": 32.11
+   },
+   {
+    "workload": "remote",
+    "phase": "backup-initial",
+    "cores_4": 6.83,
+    "cores_8": 6.58,
+    "cores_16": 8.57
+   },
+   {
+    "workload": "remote",
+    "phase": "backup-unchanged",
+    "cores_4": 21.15,
+    "cores_8": 21.67,
+    "cores_16": 22.48
+   },
+   {
+    "workload": "remote",
+    "phase": "backup-mutated",
+    "cores_4": 18.44,
+    "cores_8": 19.75,
+    "cores_16": 22.37
+   },
+   {
+    "workload": "remote",
+    "phase": "restore",
+    "cores_4": 30.18,
+    "cores_8": 30.07,
+    "cores_16": 30.76
+   },
+   {
+    "workload": "remote",
+    "phase": "check-read-data",
+    "cores_4": 5.55,
+    "cores_8": 6.16,
+    "cores_16": 5.51
+   },
+   {
+    "workload": "remote",
+    "phase": "forget-prune",
+    "cores_4": 11.98,
+    "cores_8": 13.24,
+    "cores_16": 13.38
+   },
+   {
+    "workload": "remote",
+    "phase": "ls-json",
+    "cores_4": 36.92,
+    "cores_8": 37.08,
+    "cores_16": 37.41
+   },
+   {
+    "workload": "remote",
+    "phase": "pass",
+    "cores_4": 17.26,
+    "cores_8": 17.64,
+    "cores_16": 18.51
+   }
+  ],
+  "cpu_time": [
+   {
+    "cell": "main restore",
+    "user_8": "6.3 / 5.6",
+    "user_16": "6.9 / 5.7",
+    "system_8": "2.8 / 3.6",
+    "system_16": "3.0 / 3.7"
+   },
+   {
+    "cell": "large-files restore",
+    "user_8": "3.4 / 2.6",
+    "user_16": "3.5 / 2.7",
+    "system_8": "1.8 / 1.8",
+    "system_16": "1.8 / 1.7"
+   },
+   {
+    "cell": "remote restore",
+    "user_8": "6.1 / 5.5",
+    "user_16": "6.4 / 5.7",
+    "system_8": "3.0 / 3.8",
+    "system_16": "3.1 / 3.9"
+   },
+   {
+    "cell": "main forget-prune",
+    "user_8": "3.0 / 2.6",
+    "user_16": "3.3 / 2.8",
+    "system_8": "0.6 / 0.6",
+    "system_16": "0.6 / 0.7"
+   },
+   {
+    "cell": "main ls-json",
+    "user_8": "1.4 / 1.3",
+    "user_16": "1.5 / 1.3",
+    "system_8": "0.1 / 0.2",
+    "system_16": "0.1 / 0.2"
+   }
+  ]
+ },
+ "earlier": {
+  "measured_on": {
+   "label": "rc-7",
+   "working_commit": "d4f7e81",
+   "what": "the second final tree, before the nine red-team fixes and the change to restore's hand-overs"
+  },
+  "four_cores": "official judge job `940c4e64` on that tree, 44 rounds",
+  "eight_and_sixteen_cores": "the same CPU sets and governor, 5 fixed pairs per cell, every cell 5 of 5",
+  "workloads": [
+   {
+    "workload": "main",
+    "phase": "backup-initial",
+    "cores_4": 7.22,
+    "cores_8": 3.38,
+    "cores_16": 12.92
+   },
+   {
+    "workload": "main",
+    "phase": "backup-unchanged",
+    "cores_4": 23.98,
+    "cores_8": 24.95,
+    "cores_16": 25.03
+   },
+   {
+    "workload": "main",
+    "phase": "backup-mutated",
+    "cores_4": 22.12,
+    "cores_8": 23.96,
+    "cores_16": 24.31
+   },
+   {
+    "workload": "main",
+    "phase": "restore",
+    "cores_4": 47.51,
+    "cores_8": 45.14,
+    "cores_16": 44.41
+   },
+   {
+    "workload": "main",
+    "phase": "check-read-data",
+    "cores_4": 35.88,
+    "cores_8": 36.03,
+    "cores_16": 35.87
+   },
+   {
+    "workload": "main",
+    "phase": "forget-prune",
+    "cores_4": 45.39,
+    "cores_8": 48.13,
+    "cores_16": 50.3
+   },
+   {
+    "workload": "main",
+    "phase": "ls-json",
+    "cores_4": 42.59,
+    "cores_8": 42.42,
+    "cores_16": 42.75
+   },
+   {
+    "workload": "main",
+    "phase": "pass",
+    "cores_4": 30.73,
+    "cores_8": 30.87,
+    "cores_16": 33.1
+   },
+   {
+    "workload": "big-index",
+    "phase": "backup-initial",
+    "cores_4": 17.55,
+    "cores_8": 11.06,
+    "cores_16": 16.31
+   },
+   {
+    "workload": "big-index",
+    "phase": "backup-unchanged",
+    "cores_4": 34.16,
+    "cores_8": 31.26,
+    "cores_16": 31.41
+   },
+   {
+    "workload": "big-index",
+    "phase": "backup-mutated",
+    "cores_4": 32.21,
+    "cores_8": 30.44,
+    "cores_16": 29.65
+   },
+   {
+    "workload": "big-index",
+    "phase": "restore",
+    "cores_4": 51.49,
+    "cores_8": 48.48,
+    "cores_16": 47.45
+   },
+   {
+    "workload": "big-index",
+    "phase": "check-read-data",
+    "cores_4": 42.24,
+    "cores_8": 43.57,
+    "cores_16": 44.29
+   },
+   {
+    "workload": "big-index",
+    "phase": "forget-prune",
+    "cores_4": 71.61,
+    "cores_8": 71.95,
+    "cores_16": 72.31
+   },
+   {
+    "workload": "big-index",
+    "phase": "ls-json",
+    "cores_4": 52.84,
+    "cores_8": 51.05,
+    "cores_16": 52.14
+   },
+   {
+    "workload": "big-index",
+    "phase": "pass",
+    "cores_4": 45.53,
+    "cores_8": 44.75,
+    "cores_16": 45.92
+   },
+   {
+    "workload": "large-files",
+    "phase": "backup-initial",
+    "cores_4": 10.91,
+    "cores_8": 16.66,
+    "cores_16": 28.01
+   },
+   {
+    "workload": "large-files",
+    "phase": "backup-unchanged",
+    "cores_4": 27.28,
+    "cores_8": 36.81,
+    "cores_16": 38.62
+   },
+   {
+    "workload": "large-files",
+    "phase": "backup-mutated",
+    "cores_4": 16.07,
+    "cores_8": 27.11,
+    "cores_16": 31.91
+   },
+   {
+    "workload": "large-files",
+    "phase": "restore",
+    "cores_4": 21.1,
+    "cores_8": 18.79,
+    "cores_16": 18.89
+   },
+   {
+    "workload": "large-files",
+    "phase": "check-read-data",
+    "cores_4": 22.13,
+    "cores_8": 31.35,
+    "cores_16": 30.93
+   },
+   {
+    "workload": "large-files",
+    "phase": "forget-prune",
+    "cores_4": 46.79,
+    "cores_8": 50.3,
+    "cores_16": 48.89
+   },
+   {
+    "workload": "large-files",
+    "phase": "ls-json",
+    "cores_4": 38.79,
+    "cores_8": 38.65,
+    "cores_16": 38.51
+   },
+   {
+    "workload": "large-files",
+    "phase": "pass",
+    "cores_4": 22.55,
+    "cores_8": 29.1,
+    "cores_16": 32.19
+   },
+   {
+    "workload": "remote",
+    "phase": "backup-initial",
+    "cores_4": 6.05,
+    "cores_8": 6.26,
+    "cores_16": 7.07
+   },
+   {
+    "workload": "remote",
+    "phase": "backup-unchanged",
+    "cores_4": 22.4,
+    "cores_8": 22.85,
+    "cores_16": 23.53
+   },
+   {
+    "workload": "remote",
+    "phase": "backup-mutated",
+    "cores_4": 20.44,
+    "cores_8": 20.41,
+    "cores_16": 22.02
+   },
+   {
+    "workload": "remote",
+    "phase": "restore",
+    "cores_4": 29.5,
+    "cores_8": 29.96,
+    "cores_16": 30.11
+   },
+   {
+    "workload": "remote",
+    "phase": "check-read-data",
+    "cores_4": 6.56,
+    "cores_8": 7.47,
+    "cores_16": 6.37
+   },
+   {
+    "workload": "remote",
+    "phase": "forget-prune",
+    "cores_4": 13.75,
+    "cores_8": 14.8,
+    "cores_16": 15.03
+   },
+   {
+    "workload": "remote",
+    "phase": "ls-json",
+    "cores_4": 37.11,
+    "cores_8": 37.38,
+    "cores_16": 37.34
+   },
+   {
+    "workload": "remote",
+    "phase": "pass",
+    "cores_4": 17.5,
+    "cores_8": 18.1,
+    "cores_16": 18.4
+   }
+  ],
+  "cpu_time": [
+   {
+    "cell": "main restore",
+    "user_8": "6.3 / 5.6",
+    "user_16": "6.9 / 5.8",
+    "system_8": "2.9 / 3.6",
+    "system_16": "3.0 / 3.7"
+   },
+   {
+    "cell": "large-files restore",
+    "user_8": "3.4 / 2.6",
+    "user_16": "3.6 / 2.7",
+    "system_8": "1.9 / 1.8",
+    "system_16": "1.9 / 1.8"
+   },
+   {
+    "cell": "remote restore",
+    "user_8": "6.2 / 5.6",
+    "user_16": "6.5 / 5.7",
+    "system_8": "3.0 / 3.8",
+    "system_16": "3.1 / 3.9"
+   },
+   {
+    "cell": "main forget-prune",
+    "user_8": "3.0 / 2.6",
+    "user_16": "3.4 / 2.8",
+    "system_8": "0.6 / 0.6",
+    "system_16": "0.6 / 0.6"
+   },
+   {
+    "cell": "main ls-json",
+    "user_8": "1.4 / 1.3",
+    "user_16": "1.5 / 1.3",
+    "system_8": "0.1 / 0.2",
+    "system_16": "0.1 / 0.2"
+   }
+  ]
+ },
+ "pass_rows": "at 8 and 16 cores the pass rows are the bench tool's estimate (each phase's saving weighted by upstream's share of the time); they are not a judge score",
+ "cpu_time_unit": "CPU seconds, mean of the five pairs, this build / upstream",
+ "directory_restore": {
+  "shape": "606,060 directories and three small files; snapshot written by upstream",
+  "mechanism_tmpfs": {
+   "header": [
+    "cores (governor: performance)",
+    "rc-7",
+    "stock"
+   ],
+   "rows": [
+    [
+     "4 (26-29)",
+     "28.9 / 19.8 / 19.7 / 1.30M",
+     "34.4 / 17.9 / 18.4 / 0.09M"
+    ],
+    [
+     "8 (26-33)",
+     "30.6 / 22.3 / 20.3 / 1.33M",
+     "35.0 / 18.4 / 18.5 / 0.09M"
+    ],
+    [
+     "16 (26-33, 36-39, 42-45)",
+     "31.8 / 24.1 / 20.7 / 1.30M",
+     "35.1 / 18.0 / 18.6 / 0.08M"
+    ]
+   ]
+  },
+  "mechanism_ext4": {
+   "header": [
+    "CPUs (governor: performance)",
+    "rc-7",
+    "stock"
+   ],
+   "rows": [
+    [
+     "4 (26-29)",
+     "48.6 / 23.2 / 36.9 / 1.81M",
+     "52.0 / 19.3 / 33.2 / 0.14M"
+    ],
+    [
+     "16 logical: 8 cores with their SMT siblings (26-33, 74-81)",
+     "50.4 / 27.0 / 38.6 / 1.75M",
+     "52.6 / 19.5 / 33.2 / 0.12M"
+    ]
+   ]
+  },
+  "before_after": {
+   "header": [
+    "set-up",
+    "before",
+    "after",
+    "stock"
+   ],
+   "rows": [
+    [
+     "tmpfs, 4 cores",
+     "28.7 / 19.9 / 1.30M",
+     "25.8 / 16.5 / 0.09M",
+     "34.4 / 17.8 / 0.09M"
+    ],
+    [
+     "tmpfs, 8 cores",
+     "30.5 / 22.5 / 1.32M",
+     "26.7 / 18.4 / 0.11M",
+     "35.0 / 18.4 / 0.09M"
+    ],
+    [
+     "tmpfs, 16 cores",
+     "31.6 / 23.6 / 1.28M",
+     "27.4 / 19.1 / 0.11M",
+     "35.6 / 18.2 / 0.08M"
+    ],
+    [
+     "ext4, 4 CPUs",
+     "47.6 / 22.5 / 1.86M",
+     "41.8 / 17.5 / 0.11M",
+     "51.7 / 18.9 / 0.14M"
+    ],
+    [
+     "ext4, 16 logical CPUs (8 cores with SMT)",
+     "50.4 / 27.0 / 1.75M (rc-7)",
+     "43.0 / 20.0 / 0.14M",
+     "51.7 / 18.8 / 0.12M"
+    ]
+   ]
+  },
+  "check_harness": {
+   "header": [
+    "directories",
+    "CPUs",
+    "upstream",
+    "judged commit",
+    "rc-7",
+    "rounds"
+   ],
+   "rows": [
+    [
+     "606,060",
+     "16",
+     "67.2 s (user 28.6 + system 41.9)",
+     "74.0 s (39.4 + 57.8), 10.1% slower",
+     "85.5 s (52.5 + 65.8), 27.2% slower",
+     "three rotated rounds, median"
+    ],
+    [
+     "606,060",
+     "4 cores (10, 11, 16, 17)",
+     "86.5 s (39.0 + 53.9)",
+     "63.3 s (31.7 + 47.6), 26.8% faster",
+     "77.6 s (43.6 + 58.6), 10.3% faster",
+     "three rotated rounds, median"
+    ],
+    [
+     "2,020,200",
+     "16",
+     "221.6 s",
+     "232.3 s, 4.8% slower",
+     "261.3 s, 17.9% slower",
+     "one run per build"
+    ]
+   ]
+  },
+  "cache_layout": {
+   "header": [
+    "8 cores with their SMT siblings (governor: performance)",
+    "upstream",
+    "rc-9",
+    "rc-9 against upstream"
+   ],
+   "rows": [
+    [
+     "compact: 4 + 4 cores of two L3 domains (26-29, 30-33)",
+     "52.7, 52.8, 54.9 (19.7 / 33.6 / 0.12M)",
+     "42.8, 43.7, 44.0 (20.1 / 33.3 / 0.14M)",
+     "17% faster"
+    ],
+    [
+     "spread: 2 cores from each of four L3 domains (12, 13, 19, 20, 26, 27, 36, 37)",
+     "51.0, 52.6, 52.6 (19.6 / 33.0 / 0.12M)",
+     "42.9, 43.5, 43.6 (20.7 / 33.0 / 0.14M)",
+     "17% faster"
+    ],
+    [
+     "spread, with the repository on ext4 and `--no-cache`, as the check runs it",
+     "56.1, 56.2, 56.8 (22.7 / 34.7 / 0.13M)",
+     "47.0, 47.5, 47.7 (24.3 / 34.3 / 0.15M)",
+     "16% faster"
+    ]
+   ]
+  }
+ },
+ "check_harness_timings": {
+  "header": [
+   "check",
+   "what ran",
+   "upstream",
+   "judged commit",
+   "runs"
+  ],
+  "rows": [
+   [
+    "C10 part A",
+    "load 500 index files through 50 ms of latency, 1 CPU",
+    "11.82 s",
+    "11.56 s",
+    "three each, all within 0.01 s"
+   ],
+   [
+    "C10 part A",
+    "the same, 2 CPUs",
+    "11.80 s",
+    "11.47 s",
+    "three each"
+   ],
+   [
+    "C10 part B",
+    "restore 2,020,200 directories and 10 files, 16 CPUs",
+    "221.6 s",
+    "232.3 s (4.8% slower)",
+    "one each"
+   ],
+   [
+    "X11",
+    "restore 606,060 directories and 3 files, 16 CPUs",
+    "67.2 s",
+    "74.0 s (10.1% slower)",
+    "three rotated, median"
+   ],
+   [
+    "X11",
+    "the same, 4 cores",
+    "86.5 s",
+    "63.3 s (26.8% faster)",
+    "three rotated, median"
+   ],
+   [
+    "C10 part C",
+    "restore one 50 GiB file",
+    "41.7 s",
+    "41.3 s",
+    "one each"
+   ],
+   [
+    "C10 part C",
+    "the same with `--sparse`",
+    "1.8 s",
+    "1.6 s",
+    "one each"
+   ],
+   [
+    "C10 part D",
+    "backup against an index of 30 million blobs (600 index files)",
+    "9.6 s",
+    "6.9 s",
+    "one each"
+   ],
+   [
+    "C10 part D",
+    "the same, 10 million blobs",
+    "3.4 s",
+    "2.2 s",
+    "one each"
+   ],
+   [
+    "C10 part D",
+    "the same, 3 million blobs",
+    "1.4 s",
+    "1.0 s",
+    "one each"
+   ]
+  ]
+ }
+}

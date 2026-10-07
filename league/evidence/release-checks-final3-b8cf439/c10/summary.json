@@ -1,0 +1,217 @@
+{
+ "check": "c10",
+ "title": "scale: index load on 1-2 CPUs behind latency (R5), 2M directories (M22), 50 GiB file, big index",
+ "verdict": "PASS",
+ "summary": "A 500 index files, 50 ms: 1 CPU stock 11.82s / tree 11.56s (in flight 5 / 5), 2 CPUs stock 11.8s / tree 11.47s; B 2020200 dirs restore RSS stock 56.2 / tree 58.0 MiB, before 627.9, rc7 58.6 (wall s: stock 221.6, tree 232.3, rc7 261.3); C 50 GiB file restore RSS stock 88 / tree 67 MiB; D largest index 30000000 blobs: backup RSS stock 3288 / tree 3047 MiB",
+ "tree": "/opt/league/restic-final/trees/rc-8",
+ "label": "final3-b8cf439",
+ "seconds": 2575,
+ "numbers": {
+  "A_index_load": {
+   "index_files": 500,
+   "latency_ms": 50,
+   "rows": {
+    "1 CPU | stock": {
+     "seconds_median": 11.82,
+     "seconds": [
+      11.82,
+      11.82,
+      11.82
+     ],
+     "index_downloads_in_flight_max": 5,
+     "requests": 1017
+    },
+    "1 CPU | tree": {
+     "seconds_median": 11.56,
+     "seconds": [
+      11.56,
+      11.56,
+      11.56
+     ],
+     "index_downloads_in_flight_max": 5,
+     "requests": 1019
+    },
+    "1 CPU | before": {
+     "seconds_median": 19.13,
+     "seconds": [
+      19.13,
+      19.2,
+      19.09
+     ],
+     "index_downloads_in_flight_max": 2,
+     "requests": 1017
+    },
+    "2 CPUs | stock": {
+     "seconds_median": 11.8,
+     "seconds": [
+      11.78,
+      11.8,
+      11.82
+     ],
+     "index_downloads_in_flight_max": 5,
+     "requests": 1017
+    },
+    "2 CPUs | tree": {
+     "seconds_median": 11.47,
+     "seconds": [
+      11.47,
+      11.47,
+      11.44
+     ],
+     "index_downloads_in_flight_max": 5,
+     "requests": 1019
+    },
+    "2 CPUs | before": {
+     "seconds_median": 19.0,
+     "seconds": [
+      19.0,
+      19.04,
+      19.0
+     ],
+     "index_downloads_in_flight_max": 2,
+     "requests": 1017
+    }
+   }
+  },
+  "B_directories": {
+   "2020200": {
+    "directories": 2020200,
+    "files": 10,
+    "backup_by_stock": {
+     "rc": 0,
+     "seconds": 72,
+     "rss_mib": 89.3
+    },
+    "stock": {
+     "rc": 0,
+     "seconds": 221.6,
+     "seconds_all": [
+      221.6
+     ],
+     "rss_mib": 56.2,
+     "entries_restored": 2020211,
+     "entries_source": 2020211
+    },
+    "tree": {
+     "rc": 0,
+     "seconds": 232.3,
+     "seconds_all": [
+      232.3
+     ],
+     "rss_mib": 58.0,
+     "entries_restored": 2020211,
+     "entries_source": 2020211,
+     "differences_from_source": 0
+    },
+    "rc7": {
+     "rc": 0,
+     "seconds": 261.3,
+     "seconds_all": [
+      261.3
+     ],
+     "rss_mib": 58.6,
+     "entries_restored": 2020211,
+     "entries_source": 2020211
+    },
+    "before": {
+     "rc": 0,
+     "seconds": 225.4,
+     "seconds_all": [
+      225.4
+     ],
+     "rss_mib": 627.9,
+     "entries_restored": 2020211,
+     "entries_source": 2020211
+    },
+    "tree_minus_stock_mib": 1.8,
+    "tree_seconds_over_stock_percent": 4.8
+   }
+  },
+  "C_sparse_file": {
+   "file_gib": 50,
+   "backup_by_stock": {
+    "rc": 0,
+    "seconds": 46,
+    "rss_mib": 158
+   },
+   "--sparse | stock": {
+    "rc": 0,
+    "seconds": 1.8,
+    "rss_mib": 88,
+    "content_equal": true,
+    "allocated_mib": 12
+   },
+   "--sparse | tree": {
+    "rc": 0,
+    "seconds": 1.6,
+    "rss_mib": 70,
+    "content_equal": true,
+    "allocated_mib": 12
+   },
+   "default | stock": {
+    "rc": 0,
+    "seconds": 41.7,
+    "rss_mib": 88,
+    "content_equal": true,
+    "allocated_mib": 51200
+   },
+   "default | tree": {
+    "rc": 0,
+    "seconds": 41.3,
+    "rss_mib": 67,
+    "content_equal": true,
+    "allocated_mib": 51200
+   }
+  },
+  "D_big_index": {
+   "3000000": {
+    "index_files": 60,
+    "index_bytes": 157952049,
+    "write_seconds": 7,
+    "stock": {
+     "rc": 0,
+     "seconds": 1.4,
+     "rss_mib": 598
+    },
+    "tree": {
+     "rc": 0,
+     "seconds": 1.0,
+     "rss_mib": 377
+    }
+   },
+   "10000000": {
+    "index_files": 200,
+    "index_bytes": 526362365,
+    "write_seconds": 21,
+    "stock": {
+     "rc": 0,
+     "seconds": 3.4,
+     "rss_mib": 1308
+    },
+    "tree": {
+     "rc": 0,
+     "seconds": 2.2,
+     "rss_mib": 1017
+    }
+   },
+   "30000000": {
+    "index_files": 600,
+    "index_bytes": 1579102939,
+    "write_seconds": 61,
+    "stock": {
+     "rc": 0,
+     "seconds": 9.6,
+     "rss_mib": 3288
+    },
+    "tree": {
+     "rc": 0,
+     "seconds": 6.9,
+     "rss_mib": 3047
+    }
+   }
+  }
+ },
+ "fails": [],
+ "notes": [],
+ "finished_at": "2026-10-07T19:40:14Z"
+}

@@ -1,0 +1,11 @@
+{
+ "status": "complete",
+ "op": "bench",
+ "units_done": 37,
+ "units_total": 37,
+ "started_at": "2026-10-07T20:11:43.707672+00:00",
+ "updated_at": "2026-10-07T20:16:57.324333+00:00",
+ "stage": "complete",
+ "pid": 22005,
+ "elapsed_s": 313.6
+}

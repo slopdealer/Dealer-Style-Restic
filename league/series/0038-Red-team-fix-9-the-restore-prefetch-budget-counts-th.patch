@@ -1,0 +1,124 @@
+From e883a612215d46eae4c0293d5cae848058d26b38 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:13:18 +0000
+Subject: [PATCH 38/49] Red team fix 9: the restore prefetch budget counts the
+ hidden tail of a node's extended attributes
+
+A duplicate JSON field can shorten a reused attribute slice without clearing
+its backing tail; the values in that tail stay alive with the node. The
+prefetch's byte estimate walked only the visible entries, so a tree with an
+8 MiB hidden attribute was accepted against the 256 KiB budget. The estimate
+now walks the whole backing array, as the carry estimate already did; the
+carry estimate no longer adds the tail a second time.
+
+Test (seat 3 finding 4, carried in): TestPrefetchBudgetCountsHiddenAttributeTail
+fails before this commit and passes after.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/restorer/tree_carry.go               |  8 +--
+ internal/restorer/tree_prefetch.go            |  6 +-
+ .../tree_prefetch_hidden_attributes_test.go   | 59 +++++++++++++++++++
+ 3 files changed, 66 insertions(+), 7 deletions(-)
+ create mode 100644 internal/restorer/tree_prefetch_hidden_attributes_test.go
+
+diff --git a/internal/restorer/tree_carry.go b/internal/restorer/tree_carry.go
+index 4eb28146351bbb3a259d67a65be4282bcebc225f..724d222f9acc3ee88e3a5d0a66d91bf7ef0be5ca 100644
+--- a/internal/restorer/tree_carry.go
++++ b/internal/restorer/tree_carry.go
+@@ -127,11 +127,7 @@ func estimateCarriedNodeBytes(node *data.Node) uint64 {
+ 			size += 256
+ 		}
+ 	}
+-	// Duplicate JSON fields can shorten a reused xattr slice without clearing
+-	// its backing tail. Those invisible attributes still retain their values.
+-	attrs := node.ExtendedAttributes
+-	for _, attr := range attrs[len(attrs):cap(attrs)] {
+-		size += uint64(len(attr.Name))*2 + uint64(cap(attr.Value))*2
+-	}
++	// The hidden tail of a reused xattr slice is already counted by
++	// estimatePreparedNodeBytes.
+ 	return size
+ }
+diff --git a/internal/restorer/tree_prefetch.go b/internal/restorer/tree_prefetch.go
+index 0c2a71401a8ddf12dc3bf646a11f3aac1c5f3744..f1f44e75ff4dc5316f665c63b1fff07774043760 100644
+--- a/internal/restorer/tree_prefetch.go
++++ b/internal/restorer/tree_prefetch.go
+@@ -122,7 +122,11 @@ func estimatePreparedNodeBytes(node *data.Node) uint64 {
+ 		size += uint64(unsafe.Sizeof(*node.Subtree))
+ 	}
+ 	size += uint64(cap(node.ExtendedAttributes)) * uint64(unsafe.Sizeof(data.ExtendedAttribute{}))
+-	for _, attr := range node.ExtendedAttributes {
++	// Duplicate JSON fields can shorten a reused xattr slice without clearing
++	// its backing tail. Those invisible attributes still retain their values,
++	// so the whole backing array is counted, not only its visible part.
++	attrs := node.ExtendedAttributes
++	for _, attr := range attrs[:cap(attrs)] {
+ 		addString(attr.Name)
+ 		size += uint64(cap(attr.Value)) * 2
+ 	}
+diff --git a/internal/restorer/tree_prefetch_hidden_attributes_test.go b/internal/restorer/tree_prefetch_hidden_attributes_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbfaaf0c0bd2ad44e2fe41a02695d799d852a632
+--- /dev/null
++++ b/internal/restorer/tree_prefetch_hidden_attributes_test.go
+@@ -0,0 +1,59 @@
++package restorer
++
++import (
++	"context"
++	"encoding/base64"
++	"fmt"
++	"testing"
++
++	"github.com/restic/restic/internal/data"
++	"github.com/restic/restic/internal/restic"
++)
++
++func TestPrefetchBudgetCountsHiddenAttributeTail(t *testing.T) {
++	// encoding/json reuses a slice when a duplicate field supplies a shorter
++	// array, leaving the prior second attribute in the backing slice's tail.
++	value := base64.StdEncoding.EncodeToString(make([]byte, 8<<20))
++	payload := []byte(fmt.Sprintf(`{"nodes":[{"name":"file","type":"file","content":null,"extended_attributes":[{"name":"keep","value":"YQ=="},{"name":"old","value":"%s"}],"extended_attributes":[{"name":"keep","value":"YQ=="}]}]}`, value))
++	load := func(context.Context, restic.ID) (data.TreeNodeIterator, error) {
++		// Exercise the real metadata decoder, including duplicate-field reuse.
++		return data.LoadMetadataTree(context.Background(), hiddenAttributeTreePayload{payload}, restic.ID{})
++	}
++	tree, err := load(context.Background(), restic.ID{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	var node *data.Node
++	for item := range tree {
++		if item.Error != nil {
++			t.Fatal(item.Error)
++		}
++		node = item.Node
++	}
++	if node == nil {
++		t.Fatal("empty fixture")
++	}
++	attrs := node.ExtendedAttributes
++	if len(attrs) != 1 || cap(attrs) < 2 || len(attrs[:cap(attrs)][1].Value) != 8<<20 {
++		t.Fatal("JSON decoder did not retain the hidden attribute")
++	}
++	visibleEstimate := estimatePreparedNodeBytes(node)
++	trueEstimate := estimateCarriedNodeBytes(node)
++	if trueEstimate <= maxPreparedTreeBytes {
++		t.Fatal("fixture must exceed the prefetch budget")
++	}
++	p := &restoreTreePrefetch{load: load}
++	prepared, terminal := p.prepare(context.Background(), restic.ID{})
++	if terminal || prepared.loadErr != nil || prepared.iteratorErr != nil {
++		t.Fatalf("invalid test fixture: %+v terminal=%v", prepared, terminal)
++	}
++	if !prepared.tooLarge {
++		t.Fatalf("prefetch accepted an 8 MiB hidden attribute against its %d-byte budget; visible estimate=%d, complete estimate including slack=%d", maxPreparedTreeBytes, visibleEstimate, trueEstimate)
++	}
++}
++
++type hiddenAttributeTreePayload struct{ payload []byte }
++
++func (r hiddenAttributeTreePayload) LoadBlob(context.Context, restic.BlobHandle, []byte) ([]byte, error) {
++	return r.payload, nil
++}

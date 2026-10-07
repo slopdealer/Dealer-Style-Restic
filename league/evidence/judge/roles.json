@@ -1,0 +1,29 @@
+{
+  "headline": "final3-rc8-44r",
+  "provisional": false,
+  "provisional_note": "",
+  "pending": [],
+  "upstream_commit": "ba802d42b7294c98b62c16d1157ea3e80820c019",
+  "machine": "one machine (AMD EPYC 9454, 48 cores / 96 threads, 128 GB RAM, Linux x86-64; `league/evidence/machine.txt`), CPUs set to the `performance` frequency governor, one build of each arm with the same pinned Go toolchain",
+  "judged": {
+    "working_commit": "b8cf439",
+    "label": "rc-8",
+    "difference": "which changes one comment and adds one test and no code"
+  },
+  "before_fixes": {
+    "name": "final2-rc7-44r",
+    "what": "the second final tree (`rc-7`), the tree the last independent review was given",
+    "between": "the nine fixes that followed that review, the change to restore's hand-overs, and the version string"
+  },
+  "arms": [
+    {"name": "repaired-12r", "what": "price of the repairs, as first staged", "versus": "repaired tree vs league tree after S019"},
+    {"name": "rawrule-rc3-12r", "what": "raw-rule arm (final merge before F2)", "versus": "merge candidate `rc-3` vs S020 incumbent"},
+    {"name": "final-rc5-12r", "what": "first final tree, reference length", "versus": "`rc-5` (with F2) vs S020 incumbent"},
+    {"name": "final-rc5-44r", "what": "first final tree, promotion length", "versus": "`rc-5` vs S020 incumbent"},
+    {"name": "final2-rc6-12r", "what": "second final tree, restore tree-ID bound 65,536", "versus": "`rc-6` vs S020 incumbent"},
+    {"name": "final2-rc7-12r", "what": "second final tree (the tree the last review was given), reference length", "versus": "`rc-7` vs S020 incumbent"},
+    {"name": "final2-rc7-44r", "what": "second final tree, promotion length", "versus": "`rc-7` vs S020 incumbent"},
+    {"name": "final3-rc8-12r", "what": "the judged commit of this release, reference length", "versus": "`rc-8` vs S020 incumbent"},
+    {"name": "final3-rc8-44r", "what": "**the judged commit of this release, promotion length**", "versus": "`rc-8` vs S020 incumbent"}
+  ]
+}

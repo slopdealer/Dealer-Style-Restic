@@ -1,0 +1,45 @@
+From e6f715454eb488c0d1faa407d17a04141c4dbb61 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 16:29:30 +0000
+Subject: [PATCH 48/49] Release: the build names itself, and a release build
+ can set the version string
+
+The version was a constant with upstream's value, so this build reported
+itself as "restic 0.19.1-dev" in `restic version` and in every snapshot it
+wrote, and no linker flag could change that (the -X flag sets variables
+only; upstream's build.go still passes -X main.version, a symbol that no
+longer exists).
+
+Version is now a variable with the value "0.19.1-dev-dealer.1 (compiled
+manually)": a build from this source says which build it is, a snapshot
+made by it can be told from one made by upstream's restic, and the release
+binaries set the string with
+-ldflags '-X github.com/restic/restic/internal/global.Version=...'.
+The value keeps upstream's leading version number for tools that parse it.
+
+`restic self-update` is unchanged: it would fetch upstream's release.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/global/global.go | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/internal/global/global.go b/internal/global/global.go
+index 219192dca7464561ef97f44275c75ab876277cd5..da48d7ee52566c03e1c1ff4f041df3bfa19a6ccf 100644
+--- a/internal/global/global.go
++++ b/internal/global/global.go
+@@ -34,7 +34,13 @@ import (
+ // to a missing backend storage location or config file
+ var ErrNoRepository = errors.New("repository does not exist")
+ 
+-const Version = "0.19.1-dev (compiled manually)"
++// Version is the version this build reports, in `restic version` and in the
++// snapshots it writes. It names this build ("dealer") after upstream's
++// version number, so that its snapshots and its bug reports can be told from
++// upstream's. It is a variable so that a release build can set it:
++//
++//	-ldflags '-X github.com/restic/restic/internal/global.Version=...'
++var Version = "0.19.1-dev-dealer.1 (compiled manually)"
+ 
+ // TimeFormat is the format used for all timestamps printed by restic.
+ const TimeFormat = "2006-01-02 15:04:05"

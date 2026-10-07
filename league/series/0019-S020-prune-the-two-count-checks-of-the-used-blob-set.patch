@@ -1,0 +1,401 @@
+From 21b63decf5d6b5a4f86de346675b1d3280e25eb1 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 04:46:27 +0000
+Subject: [PATCH 19/49] S020 (prune): the two count checks of the used-blob set
+ read its arrays
+
+From the S020 incumbent (T2). PlanPrune checks twice that every used
+blob has a count in a range (found at least once; exactly once after
+duplicates are handled). With one final index and no overflow entries
+the check reads the set's own arrays; in every other state it walks
+All() as before.
+
+New: internal/repository/index/associated_count_validate.go and its
+tests, internal/repository/prune_count_validate_test.go.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../index/associated_count_validate.go        |  51 +++++
+ .../index/associated_count_validate_test.go   | 209 ++++++++++++++++++
+ internal/repository/prune.go                  |  16 +-
+ .../repository/prune_count_validate_test.go   |  63 ++++++
+ 4 files changed, 331 insertions(+), 8 deletions(-)
+ create mode 100644 internal/repository/index/associated_count_validate.go
+ create mode 100644 internal/repository/index/associated_count_validate_test.go
+ create mode 100644 internal/repository/prune_count_validate_test.go
+
+diff --git a/internal/repository/index/associated_count_validate.go b/internal/repository/index/associated_count_validate.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecdbf6df550e78c04ebcd5cfca9b6fc1c621f270
+--- /dev/null
++++ b/internal/repository/index/associated_count_validate.go
+@@ -0,0 +1,51 @@
++package index
++
++// AssociatedCountsInRange reports whether every admitted count is in [min, max].
++// Like All, it requires that the caller serialize changes to the associated set.
++// It does not enumerate handles or change All's occurrence and ordering semantics.
++func AssociatedCountsInRange(a *AssociatedSet[uint8], min, max uint8) bool {
++	if valid, supported := associatedCountsInRangeStable(a, min, max); supported {
++		return valid
++	}
++	for _, count := range a.All() {
++		if count < min || count > max {
++			return false
++		}
++	}
++	return true
++}
++
++// The compact arrays suffice when there is no overflow shadowing and the whole
++// index still fits the arrays allocated for this set. Otherwise All remains the
++// authority, including entries in unmerged indexes and handles added later.
++func associatedCountsInRangeStable(a *AssociatedSet[uint8], min, max uint8) (bool, bool) {
++	if len(a.overflow) != 0 {
++		return false, false
++	}
++	mi := a.idx
++	mi.idxMutex.RLock()
++	defer mi.idxMutex.RUnlock()
++	if len(mi.idx) != 1 {
++		return false, false
++	}
++	idx := mi.idx[0]
++	idx.m.RLock()
++	defer idx.m.RUnlock()
++	if !idx.final {
++		return false, false
++	}
++	for typ := 1; typ < len(a.byType); typ++ {
++		if int(idx.byType[typ].len())+1 != len(a.byType[typ].value) {
++			return false, false
++		}
++	}
++	for typ := 1; typ < len(a.byType); typ++ {
++		bt := &a.byType[typ]
++		for pos, present := range bt.isSet {
++			if present && (bt.value[pos] < min || bt.value[pos] > max) {
++				return false, true
++			}
++		}
++	}
++	return true, true
++}
+diff --git a/internal/repository/index/associated_count_validate_test.go b/internal/repository/index/associated_count_validate_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f88d509c401308315af8b8e8d224cdbc21d779a4
+--- /dev/null
++++ b/internal/repository/index/associated_count_validate_test.go
+@@ -0,0 +1,209 @@
++package index
++
++import (
++	"encoding/binary"
++	"fmt"
++	"math/rand"
++	"testing"
++
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++func countValidationIndex(t testing.TB, entries, unique int) (*MasterIndex, []restic.BlobHandle) {
++	t.Helper()
++	idx := NewIndex()
++	handles := make([]restic.BlobHandle, unique)
++	for i := range handles {
++		handles[i].Type = restic.DataBlob
++		if i%4 == 0 {
++			handles[i].Type = restic.TreeBlob
++		}
++		binary.LittleEndian.PutUint64(handles[i].ID[:], uint64(i+1))
++	}
++	var blobs pack.Blobs
++	for i := 0; i < entries; i++ {
++		blobs = append(blobs, pack.Blob{BlobHandle: handles[i%unique], Length: 100, Offset: uint(i%128) * 100})
++		if len(blobs) == 128 || i == entries-1 {
++			var pid restic.ID
++			binary.LittleEndian.PutUint64(pid[:], uint64(i/128+1))
++			idx.StorePack(pid, blobs)
++			blobs = blobs[:0]
++		}
++	}
++	idx.Finalize()
++	if err := idx.SetID(restic.ID{250}); err != nil {
++		t.Fatal(err)
++	}
++	mi := NewMasterIndex()
++	mi.Insert(idx)
++	if err := mi.MergeFinalIndexes(); err != nil {
++		t.Fatal(err)
++	}
++	return mi, handles
++}
++
++func TestAssociatedCountsInRange(t *testing.T) {
++	mi, handles := countValidationIndex(t, 1200, 400)
++	a := NewAssociatedSet[uint8](mi)
++	check := func(supported bool) {
++		t.Helper()
++		for _, bounds := range [][2]uint8{{0, 255}, {1, 255}, {1, 1}, {255, 255}} {
++			want := true
++			for _, count := range a.All() {
++				if count < bounds[0] || count > bounds[1] {
++					want = false
++				}
++			}
++			got := AssociatedCountsInRange(a, bounds[0], bounds[1])
++			fast, ok := associatedCountsInRangeStable(a, bounds[0], bounds[1])
++			if got != want || ok != supported || ok && fast != want {
++				t.Fatalf("bounds %v: got %v, want %v; fast %v/%v, supported %v", bounds, got, want, fast, ok, supported)
++			}
++		}
++	}
++	check(true) // empty membership ignores zero array values
++	rnd := rand.New(rand.NewSource(42))
++	for i := 0; i < 200; i++ {
++		h := handles[rnd.Intn(len(handles))]
++		switch i % 5 {
++		case 0:
++			a.Insert(h) // present zero
++		case 1:
++			a.Set(h, 1)
++		case 2:
++			a.Set(h, 255) // saturated occurrence counter
++		case 3:
++			a.Delete(h)
++		case 4:
++			IncrementAssociatedCount(a, h)
++		}
++		check(true)
++	}
++	missing := restic.BlobHandle{Type: restic.DataBlob, ID: restic.ID{255, 255}}
++	a.Insert(missing)
++	check(false)
++	a.Set(missing, 1)
++	check(false)
++	a.Delete(missing)
++	check(true)
++	// A shadowing overflow entry must replace the array value, as All does.
++	a.Set(handles[0], 0)
++	a.overflow[handles[0]] = 1
++	check(false)
++	delete(a.overflow, handles[0])
++	// A newly admitted handle outside the merged index uses overflow.
++	extra := NewIndex()
++	extra.StorePack(restic.ID{251}, pack.Blobs{{BlobHandle: missing, Length: 100}})
++	mi.Insert(extra)
++	a.Set(missing, 1)
++	check(false)
++	extra.Finalize()
++	if err := extra.SetID(restic.ID{251}); err != nil {
++		t.Fatal(err)
++	}
++	if err := mi.MergeFinalIndexes(); err != nil {
++		t.Fatal(err)
++	}
++	// Even after removing overflow, array lengths no longer match the index.
++	a.Delete(missing)
++	check(false)
++}
++
++// Exercise the full uint8 domain with duplicate physical occurrences. A
++// membership entry represents one logical handle, regardless of its copies.
++func TestAssociatedCountsInRangeDomain(t *testing.T) {
++	mi, handles := countValidationIndex(t, 1024, 256)
++	a := NewAssociatedSet[uint8](mi)
++	// Test each value independently so an early low-count failure cannot hide
++	// a broken upper bound later in the membership array.
++	for i, h := range handles {
++		a.Set(h, uint8(i))
++		for _, bounds := range [][2]uint8{{0, 255}, {0, 127}, {1, 255}, {1, 1}, {128, 255}, {100, 20}} {
++			want := true
++			for _, count := range a.All() {
++				if count < bounds[0] || count > bounds[1] {
++					want = false
++				}
++			}
++			if got := AssociatedCountsInRange(a, bounds[0], bounds[1]); got != want {
++				t.Fatalf("value %d, bounds %v: got %v, want %v", i, bounds, got, want)
++			}
++		}
++		a.Delete(h)
++	}
++	for i, h := range handles {
++		a.Set(h, uint8(i))
++	}
++	for _, bounds := range [][2]uint8{{0, 255}, {1, 255}, {1, 1}, {128, 255}, {100, 20}} {
++		want := true
++		for _, count := range a.All() {
++			if count < bounds[0] || count > bounds[1] {
++				want = false
++			}
++		}
++		if got := AssociatedCountsInRange(a, bounds[0], bounds[1]); got != want {
++			t.Fatalf("bounds %v: got %v, want %v", bounds, got, want)
++		}
++	}
++	// Deleting the only admitted zero must make the missing-count test pass.
++	a.Delete(handles[0])
++	if !AssociatedCountsInRange(a, 1, 255) {
++		t.Fatal("deleted zero still participates in validation")
++	}
++}
++
++func TestAssociatedCountsInRangeNonFinal(t *testing.T) {
++	mi := NewMasterIndex()
++	mi.idx[0] = NewIndex()
++	a := NewAssociatedSet[uint8](mi)
++	// A mutable index must use the authoritative iterator even when
++	// its current size happens to match the associated arrays.
++	if _, supported := associatedCountsInRangeStable(a, 1, 1); supported {
++		t.Fatal("accepted mutable index")
++	}
++	if !AssociatedCountsInRange(a, 1, 1) {
++		t.Fatal("empty membership is invalid")
++	}
++	h := restic.BlobHandle{Type: restic.DataBlob, ID: restic.ID{19}}
++	a.Set(h, 0)
++	if AssociatedCountsInRange(a, 1, 255) {
++		t.Fatal("overflow missing handle was ignored")
++	}
++	a.Set(h, 1)
++	if !AssociatedCountsInRange(a, 1, 1) {
++		t.Fatal("overflow count was ignored")
++	}
++}
++
++func BenchmarkAssociatedCountValidation(b *testing.B) {
++	for _, entries := range []int{100000, 1500000} {
++		for _, density := range []int{1, 10} {
++			b.Run(fmt.Sprintf("entries=%d/density=1in%d", entries, density), func(b *testing.B) {
++				mi, handles := countValidationIndex(b, entries, entries)
++				a := NewAssociatedSet[uint8](mi)
++				for i := 0; i < len(handles); i += density {
++					a.Set(handles[i], 1)
++				}
++				for _, compact := range []bool{false, true} {
++					b.Run(fmt.Sprintf("compact=%v", compact), func(b *testing.B) {
++						b.ReportAllocs()
++						for i := 0; i < b.N; i++ {
++							if compact {
++								if !AssociatedCountsInRange(a, 1, 1) {
++									b.Fatal("invalid count")
++								}
++							} else {
++								for _, count := range a.All() {
++									if count != 1 {
++										b.Fatal("invalid count")
++									}
++								}
++							}
++						}
++					})
++				}
++			})
++		}
++	}
++}
+diff --git a/internal/repository/prune.go b/internal/repository/prune.go
+index 2e2f36fc2ee854790765a79ddf25d37a0c82148b..2da6e12290722e01f7eb5956175a41d5fbecf6a6 100644
+--- a/internal/repository/prune.go
++++ b/internal/repository/prune.go
+@@ -200,10 +200,12 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
+ 
+ 	// Check if all used blobs have been found in index
+ 	missingBlobs := restic.NewBlobSet()
+-	for bh, count := range usedBlobs.All() {
+-		if count == 0 {
+-			// blob does not exist in any pack files
+-			missingBlobs.Insert(bh)
++	if !index.AssociatedCountsInRange(usedBlobs, 1, 255) {
++		for bh, count := range usedBlobs.All() {
++			if count == 0 {
++				// blob does not exist in any pack files
++				missingBlobs.Insert(bh)
++			}
+ 		}
+ 	}
+ 
+@@ -342,10 +344,8 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
+ 
+ 	// Sanity check. If no duplicates exist, all blobs have value 1. After handling
+ 	// duplicates, this also applies to duplicates.
+-	for _, count := range usedBlobs.All() {
+-		if count != 1 {
+-			panic("internal error during blob selection")
+-		}
++	if !index.AssociatedCountsInRange(usedBlobs, 1, 1) {
++		panic("internal error during blob selection")
+ 	}
+ 
+ 	return usedBlobs, indexPack, nil
+diff --git a/internal/repository/prune_count_validate_test.go b/internal/repository/prune_count_validate_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a848b792f0400392774ff4381686fd2c21bfd459
+--- /dev/null
++++ b/internal/repository/prune_count_validate_test.go
+@@ -0,0 +1,63 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
++)
++
++func TestPruneCountValidationInterruptedCopy(t *testing.T) {
++	// Two original packs have unused data; an interrupted prune wrote a pack
++	// containing only the two reachable duplicates. Prefer that rewritten copy.
++	a := restic.BlobHandle{Type: restic.DataBlob, ID: restic.ID{1}}
++	b := restic.BlobHandle{Type: restic.DataBlob, ID: restic.ID{2}}
++	u := restic.BlobHandle{Type: restic.DataBlob, ID: restic.ID{3}}
++	v := restic.BlobHandle{Type: restic.DataBlob, ID: restic.ID{4}}
++	idx := index.NewIndex()
++	for i, handles := range [][]restic.BlobHandle{{a, u}, {b, v}, {a, b}} {
++		var blobs pack.Blobs
++		for offset, h := range handles {
++			blobs = append(blobs, pack.Blob{BlobHandle: h, Length: 100, Offset: uint(offset * 100)})
++		}
++		idx.StorePack(restic.ID{byte(i + 10)}, blobs)
++	}
++	idx.Finalize()
++	if err := idx.SetID(restic.ID{99}); err != nil {
++		t.Fatal(err)
++	}
++	mi := index.NewMasterIndex()
++	mi.Insert(idx)
++	if err := mi.MergeFinalIndexes(); err != nil {
++		t.Fatal(err)
++	}
++	repo := &Repository{idx: mi}
++	used := index.NewAssociatedSet[uint8](mi)
++	used.Insert(a)
++	used.Insert(b)
++	stats := &PruneStats{}
++	_, packs, err := packInfoFromIndex(context.Background(), repo, used, stats, restic.NewNoopPrinter())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if packs[restic.ID{12}].usedBlobs != 2 || packs[restic.ID{10}].usedBlobs != 0 || packs[restic.ID{11}].usedBlobs != 0 {
++		t.Fatalf("rewritten duplicate-only pack not preferred: %v", packs)
++	}
++	if stats.Blobs.Used != 2 || stats.Blobs.Duplicate != 2 || stats.Blobs.Unused != 2 {
++		t.Fatalf("changed occurrence accounting: %+v", stats.Blobs)
++	}
++	// The missing-handle diagnostic still precedes settlement of a header error.
++	missing := restic.BlobHandle{Type: restic.TreeBlob, ID: restic.ID{77}}
++	used.Insert(missing)
++	called := false
++	_, _, err = packInfoFromIndexWithHeaders(context.Background(), repo, used, &PruneStats{}, restic.NewNoopPrinter(), func() (map[restic.ID]int64, error) {
++		called = true
++		return nil, errors.New("header failed")
++	})
++	if err != ErrIndexIncomplete || called {
++		t.Fatalf("missing-blob refusal displaced: %v, headers settled=%v", err, called)
++	}
++}

@@ -1,0 +1,1133 @@
+From 8ff79e7621944fafbde09fbebb6055f40bc4a25f Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:16:07 +0000
+Subject: [PATCH 05/49] R6: output without status lines writes every message
+ once, as stock; nothing is queued behind a failed write
+
+runWithoutStatus kept a failed or stalled record at the head of one queue
+for both streams and wrote nothing behind it: with stdout on a full disk
+no error message reached stderr, and every later message was held in memory
+without bound.
+
+The retry queue is removed. Messages for a regular file are still collected
+(64 KiB, 100 microseconds idle, one stream at a time, flushed before the
+other stream, a status update, Flush and shutdown), so the healthy path is
+unchanged. A failed write is reported on stderr and dropped. When a
+collected write fails, the rest is written line by line, each line once,
+which gives the file content and the reports of stock's one write per line.
+Writers that are not regular files get one Write per message with stock's
+code. Memory is bounded by one batch.
+
+Tests: status_test.go:207 called Flush on ui.Terminal, which has no such
+method, so the package did not build (stock's tests included).
+TestRunWithoutStatusKeepsCustomWriterCallsSeparate was right and passes
+now. The tests that asserted the retry queue are removed:
+TestRunWithoutStatusKeepsSuffixAfterZeroProgressRetry,
+TestRunWithoutStatusRetriesPartialBatchWrite, output_failure_order_test.go
+and status_output_retry_test.go. status_failing_writer_test.go compares
+with stock's behaviour instead.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../termstatus/output_failure_order_test.go   | 181 --------
+ internal/ui/termstatus/status.go              | 235 ++++-------
+ .../termstatus/status_failing_writer_test.go  | 398 ++++++++++++++++++
+ .../ui/termstatus/status_output_retry_test.go |  90 ----
+ internal/ui/termstatus/status_test.go         |  77 +---
+ 5 files changed, 490 insertions(+), 491 deletions(-)
+ delete mode 100644 internal/ui/termstatus/output_failure_order_test.go
+ create mode 100644 internal/ui/termstatus/status_failing_writer_test.go
+ delete mode 100644 internal/ui/termstatus/status_output_retry_test.go
+
+diff --git a/internal/ui/termstatus/output_failure_order_test.go b/internal/ui/termstatus/output_failure_order_test.go
+deleted file mode 100644
+index a36942e725465916a947bb5fa73ac5a904a512bd..0000000000000000000000000000000000000000
+--- a/internal/ui/termstatus/output_failure_order_test.go
++++ /dev/null
+@@ -1,181 +0,0 @@
+-package termstatus
+-
+-import (
+-	"bytes"
+-	"context"
+-	"errors"
+-	"io"
+-	"strings"
+-	"sync"
+-	"testing"
+-
+-	rtest "github.com/restic/restic/internal/test"
+-)
+-
+-type outputFailureSequenceWriter struct {
+-	mu     *sync.Mutex
+-	events *[]string
+-	data   []byte
+-	calls  int
+-}
+-
+-func (w *outputFailureSequenceWriter) Write(p []byte) (int, error) {
+-	w.calls++
+-	switch w.calls {
+-	case 1:
+-		n := len(p) / 2
+-		w.mu.Lock()
+-		w.data = append(w.data, p[:n]...)
+-		*w.events = append(*w.events, "stdout:"+string(p[:n]))
+-		w.mu.Unlock()
+-		return n, errors.New("temporary partial write error")
+-	case 2:
+-		return 0, errors.New("temporary zero-progress write error")
+-	case 3:
+-		return 0, nil
+-	default:
+-		w.mu.Lock()
+-		w.data = append(w.data, p...)
+-		*w.events = append(*w.events, "stdout:"+string(p))
+-		w.mu.Unlock()
+-		return len(p), nil
+-	}
+-}
+-
+-type outputFailureRecordingWriter struct {
+-	mu     *sync.Mutex
+-	name   string
+-	events *[]string
+-	data   []byte
+-}
+-
+-func (w *outputFailureRecordingWriter) Write(p []byte) (int, error) {
+-	w.mu.Lock()
+-	defer w.mu.Unlock()
+-	w.data = append(w.data, p...)
+-	*w.events = append(*w.events, w.name+":"+string(p))
+-	return len(p), nil
+-}
+-
+-func TestOutputRetryKeepsSuffixAheadOfLaterStdoutAndStderr(t *testing.T) {
+-	var mu sync.Mutex
+-	var events []string
+-	stdout := &outputFailureSequenceWriter{mu: &mu, events: &events}
+-	stderr := &outputFailureRecordingWriter{mu: &mu, name: "stderr", events: &events}
+-	term := new(nil, stdout, stderr, true)
+-	ctx, cancel := context.WithCancel(context.Background())
+-	go term.Run(ctx)
+-
+-	term.Print("first")
+-	term.Flush()
+-	term.Print("later stdout")
+-	term.Error("later stderr")
+-	term.Flush()
+-	cancel()
+-	<-term.closed
+-
+-	rtest.Equals(t, "first\n", string(stdout.data))
+-	rtest.Equals(t, []string{
+-		"stdout:fir",
+-		"stdout:st\n",
+-		"stderr:write failed: temporary partial write error\n",
+-		"stderr:write failed: temporary zero-progress write error\n",
+-		"stderr:write failed: short write\n",
+-		"stdout:later stdout\n",
+-		"stderr:later stderr\n",
+-	}, events)
+-}
+-
+-func TestOutputRetryDoesNotMergeLaterStdoutIntoStartedBatch(t *testing.T) {
+-	var mu sync.Mutex
+-	var events []string
+-	stdout := &outputFailureSequenceWriter{mu: &mu, events: &events}
+-	stderr := &outputFailureRecordingWriter{mu: &mu, name: "stderr", events: &events}
+-	term := new(nil, stdout, stderr, true)
+-	term.batchStdout = true
+-	ctx, cancel := context.WithCancel(context.Background())
+-	go term.Run(ctx)
+-
+-	writer := term.OutputWriter()
+-	_, err := writer.Write([]byte("first\n"))
+-	rtest.OK(t, err)
+-	term.Flush()
+-	_, err = writer.Write([]byte("later stdout\n"))
+-	rtest.OK(t, err)
+-	term.Flush()
+-	term.Error("later stderr")
+-	term.Flush()
+-	cancel()
+-	<-term.closed
+-
+-	rtest.Equals(t, "first\nlater stdout\n", string(stdout.data))
+-	rtest.Equals(t, []string{
+-		"stdout:fir",
+-		"stdout:st\n",
+-		"stderr:write failed: temporary partial write error\n",
+-		"stderr:write failed: temporary zero-progress write error\n",
+-		"stderr:write failed: short write\n",
+-		"stdout:later stdout\n",
+-		"stderr:later stderr\n",
+-	}, events)
+-}
+-
+-type outputFailureStalledWriter struct {
+-	calls int
+-}
+-
+-func (w *outputFailureStalledWriter) Write([]byte) (int, error) {
+-	w.calls++
+-	return 0, nil
+-}
+-
+-type outputFailurePartialThenStalledWriter struct {
+-	calls int
+-	data  []byte
+-}
+-
+-func (w *outputFailurePartialThenStalledWriter) Write(p []byte) (int, error) {
+-	w.calls++
+-	if w.calls == 1 {
+-		n := len(p) / 2
+-		w.data = append(w.data, p[:n]...)
+-		return n, errors.New("partial write before shutdown stall")
+-	}
+-	return 0, nil
+-}
+-
+-func TestOutputShutdownReportsPersistentZeroProgress(t *testing.T) {
+-	stdout := &outputFailureStalledWriter{}
+-	var stderr bytes.Buffer
+-	term, shutdown := Setup(nil, stdout, &stderr, true)
+-
+-	writerProvider, ok := term.(interface{ OutputWriter() io.Writer })
+-	if !ok {
+-		t.Fatal("terminal does not provide an output writer")
+-	}
+-	_, err := writerProvider.OutputWriter().Write([]byte("buffered tail"))
+-	rtest.OK(t, err)
+-	shutdown()
+-
+-	rtest.Equals(t, 3, stdout.calls)
+-	rtest.Equals(t, 3, strings.Count(stderr.String(), "write failed: short write\n"))
+-}
+-
+-func TestOutputShutdownReportsStalledSuffixAfterPartialWrite(t *testing.T) {
+-	stdout := &outputFailurePartialThenStalledWriter{}
+-	var stderr bytes.Buffer
+-	term, shutdown := Setup(nil, stdout, &stderr, true)
+-
+-	writerProvider, ok := term.(interface{ OutputWriter() io.Writer })
+-	if !ok {
+-		t.Fatal("terminal does not provide an output writer")
+-	}
+-	_, err := writerProvider.OutputWriter().Write([]byte("buffered tail\n"))
+-	rtest.OK(t, err)
+-	shutdown()
+-
+-	rtest.Equals(t, 4, stdout.calls)
+-	rtest.Equals(t, "buffere", string(stdout.data))
+-	rtest.Equals(t, 1, strings.Count(stderr.String(), "write failed: partial write before shutdown stall\n"))
+-	rtest.Equals(t, 3, strings.Count(stderr.String(), "write failed: short write\n"))
+-}
+diff --git a/internal/ui/termstatus/status.go b/internal/ui/termstatus/status.go
+index c32dd09fff5e70fe45f392d6d92a24dce7a73b17..8759fd6eb382911c22ce725dddb8716ee7b5b8dc 100644
+--- a/internal/ui/termstatus/status.go
++++ b/internal/ui/termstatus/status.go
+@@ -2,6 +2,7 @@ package termstatus
+ 
+ import (
+ 	"bufio"
++	"bytes"
+ 	"context"
+ 	"fmt"
+ 	"io"
+@@ -19,14 +20,6 @@ var _ ui.Terminal = &terminal{}
+ 
+ const maxOutputBatchSize = 64 * 1024
+ 
+-type queuedOutput struct {
+-	err     bool
+-	line    string
+-	data    []byte
+-	offset  int
+-	started bool
+-}
+-
+ // terminal is used to write messages and display status lines which can be
+ // updated. When the output is redirected to a file, the status lines are not
+ // printed.
+@@ -74,11 +67,9 @@ type fder interface {
+ }
+ 
+ // Setup creates a new termstatus. The returned function must be called to shut
+-// down its background goroutine. It closes OutputWriter and drains submitted
+-// output before shutdown. If an output writer cannot make progress, the
+-// remaining bytes cannot be delivered; a short-write error is reported. If a
+-// record was partially written, its write diagnostics wait until its suffix
+-// is written or the final shutdown attempt.
++// down its background goroutine. It closes OutputWriter and writes submitted
++// output before shutdown. Every message is written once: when a write fails,
++// the error is reported on stderr and the message is not written again.
+ //
+ // A goroutine is started to update the
+ // terminal. It is terminated when ctx is cancelled. When stdout is redirected to
+@@ -385,13 +376,24 @@ func findUnchangedLines(curr, last []string) []bool {
+ 
+ // runWithoutStatus listens on the channels and just prints out the messages,
+ // without status lines.
++//
++// Messages for a stream that is a regular file are collected and written
++// together: at most maxOutputBatchSize bytes, for one stream at a time, and
++// not longer than outputBatchWindow after the last message. A message for the
++// other stream, a status update, Flush and shutdown write what was collected
++// first, so the order of the output is the order of the calls. Every other
++// writer gets one Write per message, as before.
++//
++// Nothing is kept after a write: a message that could not be written is
++// reported and dropped, as in stock. Memory is bounded by one batch, and a
++// failing stdout never holds back what is printed to stderr.
+ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 	var lastStatus []string
+-	var pending []queuedOutput
+-	var batchBuffer []byte
++	// batch holds the messages collected for one stream, batchErr says which
++	var batch []byte
++	var batchErr bool
+ 	var batchTimer *time.Timer
+ 	var batchTimerC <-chan time.Time
+-	var pendingWriteErrors []error
+ 
+ 	stopBatchTimer := func() {
+ 		if batchTimer == nil {
+@@ -420,154 +422,70 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 		}
+ 		batchTimerC = batchTimer.C
+ 	}
+-	flushPending := func() bool {
+-		for len(pending) > 0 {
+-			item := &pending[0]
+-			dst := t.wr
+-			if item.err {
+-				dst = t.errWriter
+-			}
+-
+-			var n int
+-			var err error
+-			if item.data != nil {
+-				remaining := item.data[item.offset:]
+-				n, err = dst.Write(remaining)
+-				if n < 0 || n > len(remaining) {
+-					t.logWriteErr(fmt.Errorf("invalid write count %d", n))
+-					return false
+-				}
+-				item.offset += n
+-			} else {
+-				n, err = io.WriteString(dst, item.line)
+-				if n < 0 || n > len(item.line) {
+-					t.logWriteErr(fmt.Errorf("invalid write count %d", n))
+-					return false
+-				}
+-				item.line = item.line[n:]
+-			}
+-
+-			if n > 0 {
+-				item.started = true
+-			}
+-
+-			if err != nil {
+-				if item.started {
+-					// Keep diagnostics behind a partially written record. A later
+-					// write may recover its suffix, and stderr must not split it.
+-					pendingWriteErrors = append(pendingWriteErrors, err)
+-				} else {
+-					t.logWriteErr(err)
+-				}
+-			}
+-			if item.offset == len(item.data) && item.line == "" {
+-				pending = pending[1:]
+-				for _, writeErr := range pendingWriteErrors {
+-					t.logWriteErr(writeErr)
+-				}
+-				pendingWriteErrors = nil
+-				continue
+-			}
+-			if n == 0 {
+-				if err == nil {
+-					if item.started {
+-						pendingWriteErrors = append(pendingWriteErrors, io.ErrShortWrite)
+-					} else {
+-						t.logWriteErr(io.ErrShortWrite)
+-					}
+-				}
+-				return false
+-			}
+-			// A partial write with an error still made progress. Retry only its
+-			// unwritten suffix, before allowing later output to reach either stream.
+-		}
+-		pending = nil
+-		if batchBuffer != nil {
+-			batchBuffer = batchBuffer[:0]
+-		}
+-		return true
+-	}
+-	flushAndStop := func(reportUndeliveredErrors bool) {
++	flushBatch := func() {
+ 		stopBatchTimer()
+-		if !flushPending() && reportUndeliveredErrors {
+-			for _, writeErr := range pendingWriteErrors {
+-				t.logWriteErr(writeErr)
+-			}
+-			pendingWriteErrors = nil
+-		}
+-	}
+-	queueOutput := func(line string, isErr, batchable bool) {
+-		if batchable && len(line) <= maxOutputBatchSize {
+-			if len(pending) > 0 {
+-				last := &pending[len(pending)-1]
+-				pendingLen := len(last.data) - last.offset
+-				if last.data == nil || last.err != isErr || last.started || pendingLen+len(line) > maxOutputBatchSize || len(last.data)+len(line) > maxOutputBatchSize {
+-					stopBatchTimer()
+-					flushPending()
+-				}
+-			}
+-
+-			if len(pending) > 0 {
+-				last := &pending[len(pending)-1]
+-				pendingLen := len(last.data) - last.offset
+-				if last.data != nil && last.err == isErr && !last.started && pendingLen+len(line) <= maxOutputBatchSize && len(last.data)+len(line) <= maxOutputBatchSize {
+-					last.data = append(last.data, line...)
+-					if len(pending) == 1 {
+-						batchBuffer = last.data
+-					}
+-					startBatchTimer()
+-					return
+-				}
+-			}
+-			var data []byte
+-			if len(pending) == 0 {
+-				if batchBuffer == nil {
+-					batchBuffer = make([]byte, 0, maxOutputBatchSize)
+-				}
+-				data = append(batchBuffer[:0], line...)
+-				batchBuffer = data
+-			} else {
+-				data = append(make([]byte, 0, maxOutputBatchSize), line...)
+-			}
+-			pending = append(pending, queuedOutput{err: isErr, data: data})
+-			startBatchTimer()
++		if len(batch) == 0 {
+ 			return
+ 		}
+-
+-		stopBatchTimer()
+-		flushPending()
+-		// Route even an otherwise empty queue through the retry path so a
+-		// partial write cannot be overtaken by output for the other stream.
+-		pending = append(pending, queuedOutput{err: isErr, line: line})
+-		flushPending()
++		dst := t.wr
++		if batchErr {
++			dst = t.errWriter
++		}
++		t.writeBatch(dst, batch)
++		batch = batch[:0]
+ 	}
+ 	for {
+ 		select {
+ 		case <-ctx.Done():
+-			flushAndStop(true)
++			flushBatch()
+ 			return
+ 		case msg := <-t.msg:
+ 			if msg.barrier != nil {
+-				flushAndStop(false)
++				flushBatch()
+ 				msg.barrier <- struct{}{}
+ 				continue
+ 			}
++
+ 			batchable := t.batchStdout
+ 			if msg.err {
+ 				batchable = t.batchStderr
+ 			}
+-			queueOutput(msg.line, msg.err, batchable)
++			batchable = batchable && len(msg.line) <= maxOutputBatchSize
++			if len(batch) > 0 && (!batchable || batchErr != msg.err || len(batch)+len(msg.line) > maxOutputBatchSize) {
++				flushBatch()
++			}
++			if batchable {
++				if batch == nil {
++					batch = make([]byte, 0, maxOutputBatchSize)
++				}
++				batch = append(batch, msg.line...)
++				batchErr = msg.err
++				startBatchTimer()
++				continue
++			}
++
++			var dst io.Writer
++			if msg.err {
++				dst = t.errWriter
++			} else {
++				dst = t.wr
++			}
++
++			_, err := io.WriteString(dst, msg.line)
++			t.logWriteErr(err)
++
+ 		case <-batchTimerC:
+ 			batchTimer = nil
+ 			batchTimerC = nil
+-			flushPending()
++			flushBatch()
+ 
+ 		case stat := <-t.status:
+-			flushAndStop(false)
++			flushBatch()
+ 			if !slices.Equal(stat.lines, lastStatus) {
+ 				for _, line := range stat.lines {
+ 					// Ensure that each message ends with exactly one newline.
+-					queueOutput(strings.TrimRight(line, "\n")+"\n", false, false)
++					_, err := fmt.Fprintln(t.wr, strings.TrimRight(line, "\n"))
++					t.logWriteErr(err)
+ 				}
+ 				// Copy the status slice to avoid aliasing
+ 				lastStatus = append([]string{}, stat.lines...)
+@@ -576,11 +494,40 @@ func (t *terminal) runWithoutStatus(ctx context.Context) {
+ 	}
+ }
+ 
+-// Flush waits until messages queued before the barrier have been written or an
+-// output writer stops making progress. A short write before any bytes are
+-// written is reported immediately. If a record was partially written, its
+-// diagnostics wait until its suffix is written or the final shutdown attempt.
+-// Remaining bytes stay queued for later output or the final shutdown attempt.
++// writeBatch writes the messages collected for one stream. A writer that works
++// gets them in one call. When that call fails, the outcome is the one of
++// writing line by line, which is what stock does with these messages: the
++// error is reported, the line in which the write stopped is given up, and
++// every later line is written once on its own, each failure reported. No byte
++// is written twice and nothing is kept for another attempt. As in stock, the
++// number of bytes a writer reports is not examined when it reports no error.
++func (t *terminal) writeBatch(dst io.Writer, batch []byte) {
++	n, err := dst.Write(batch)
++	if err == nil {
++		return
++	}
++	t.logWriteErr(err)
++
++	rest := batch[min(max(n, 0), len(batch)):]
++	// the line that was being written is lost, like a message in stock
++	i := bytes.IndexByte(rest, '\n')
++	if i < 0 {
++		return
++	}
++	rest = rest[i+1:]
++	for len(rest) > 0 {
++		end := bytes.IndexByte(rest, '\n') + 1
++		if end == 0 {
++			end = len(rest)
++		}
++		_, err := dst.Write(rest[:end])
++		t.logWriteErr(err)
++		rest = rest[end:]
++	}
++}
++
++// Flush waits until the messages queued before the barrier have been written.
++// A message whose write failed has been reported and is not written again.
+ func (t *terminal) Flush() {
+ 	t.outputMu.Lock()
+ 	defer t.outputMu.Unlock()
+diff --git a/internal/ui/termstatus/status_failing_writer_test.go b/internal/ui/termstatus/status_failing_writer_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ab3e7acd5587303a8eca0516d6f6336c69e9990
+--- /dev/null
++++ b/internal/ui/termstatus/status_failing_writer_test.go
+@@ -0,0 +1,398 @@
++package termstatus
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"fmt"
++	"math/rand"
++	"slices"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	rtest "github.com/restic/restic/internal/test"
++)
++
++// What runWithoutStatus does with a writer that fails or makes no progress
++// must be what stock does: every message is written once, a failure is
++// reported on stderr, nothing is kept and nothing waits for another stream.
++
++type switchableWriter struct {
++	mu      sync.Mutex
++	failing bool
++	data    bytes.Buffer
++	calls   int
++}
++
++func (w *switchableWriter) Write(p []byte) (int, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	w.calls++
++	if w.failing {
++		return 0, errors.New("no space left on device")
++	}
++	return w.data.Write(p)
++}
++
++func (w *switchableWriter) setFailing(failing bool) {
++	w.mu.Lock()
++	w.failing = failing
++	w.mu.Unlock()
++}
++
++func (w *switchableWriter) String() string {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	return w.data.String()
++}
++
++// startTestTerminal runs a terminal without status lines. batch selects the
++// collection of messages that is used for regular files.
++func startTestTerminal(stdout, stderr *switchableWriter, batch bool) (*terminal, func()) {
++	term := new(nil, stdout, stderr, true)
++	term.batchStdout = batch
++	term.batchStderr = batch
++	// collected output is written when a batch is full, on Flush, and when the
++	// other stream is used: the tests do not depend on the idle timer
++	term.outputBatchWindow = time.Hour
++	ctx, cancel := context.WithCancel(context.Background())
++	go term.Run(ctx)
++	return term, func() {
++		term.Flush()
++		cancel()
++		<-term.closed
++	}
++}
++
++func forBothOutputModes(t *testing.T, fn func(t *testing.T, batch bool)) {
++	t.Run("one write per message", func(t *testing.T) { fn(t, false) })
++	t.Run("regular file", func(t *testing.T) { fn(t, true) })
++}
++
++// stdout cannot be written (the disk under a redirected log is full). What is
++// printed to stderr afterwards must still arrive there.
++func TestStderrIsNotHeldBackByFailingStdout(t *testing.T) {
++	forBothOutputModes(t, func(t *testing.T, batch bool) {
++		stdout := &switchableWriter{failing: true}
++		stderr := &switchableWriter{}
++		term, stop := startTestTerminal(stdout, stderr, batch)
++
++		term.Print("snapshot 1234 saved")
++		term.Error("error: open /etc/shadow: permission denied")
++		term.Print("more output")
++		term.Error("Fatal: unable to save snapshot")
++		stop()
++
++		rtest.Equals(t, "write failed: no space left on device\n"+
++			"error: open /etc/shadow: permission denied\n"+
++			"write failed: no space left on device\n"+
++			"Fatal: unable to save snapshot\n", stderr.String())
++		rtest.Equals(t, "", stdout.String())
++	})
++}
++
++// While stdout fails nothing is kept in memory: when the writer works again,
++// only what is printed from then on is written. Each lost line was reported.
++func TestFailedOutputIsNotRetained(t *testing.T) {
++	forBothOutputModes(t, func(t *testing.T, batch bool) {
++		stdout := &switchableWriter{failing: true}
++		stderr := &switchableWriter{}
++		term, stop := startTestTerminal(stdout, stderr, batch)
++
++		const lines = 20000
++		line := strings.Repeat("v", 100)
++		for i := range lines {
++			term.Print(fmt.Sprintf("%06d %s", i, line))
++		}
++		term.Flush()
++		stdout.setFailing(false)
++		term.Print("after outage")
++		stop()
++
++		rtest.Equals(t, "after outage\n", stdout.String())
++		// one report per lost line, as in stock, also when lines are collected
++		rtest.Equals(t, lines, strings.Count(stderr.String(), "write failed: no space left on device\n"))
++		rtest.Equals(t, lines*len("write failed: no space left on device\n"), len(stderr.String()))
++	})
++}
++
++// A failing stderr does not keep stdout from being written either.
++func TestStdoutIsNotHeldBackByFailingStderr(t *testing.T) {
++	forBothOutputModes(t, func(t *testing.T, batch bool) {
++		stdout := &switchableWriter{}
++		stderr := &switchableWriter{failing: true}
++		term, stop := startTestTerminal(stdout, stderr, batch)
++
++		term.Error("warning")
++		term.Print("one")
++		term.Error("warning")
++		term.Print("two")
++		stop()
++
++		rtest.Equals(t, "one\ntwo\n", stdout.String())
++		rtest.Equals(t, "", stderr.String())
++	})
++}
++
++// scriptedWriter answers every Write from a fixed pseudo-random script and
++// records the call in a log shared with the other stream.
++type scriptedWriter struct {
++	name string
++	rnd  *rand.Rand
++	log  *[]string
++	mu   *sync.Mutex
++}
++
++func (w *scriptedWriter) Write(p []byte) (int, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	*w.log = append(*w.log, w.name+":"+string(p))
++	switch w.rnd.Intn(8) {
++	case 0:
++		return 0, errors.New(w.name + " failed")
++	case 1:
++		return w.rnd.Intn(len(p) + 1), errors.New(w.name + " failed after some bytes")
++	case 2:
++		// no progress and no error: a stalled writer
++		return 0, nil
++	case 3:
++		return w.rnd.Intn(len(p) + 1), nil
++	default:
++		return len(p), nil
++	}
++}
++
++// stockOutputModel is what stock's runWithoutStatus and lineWriter do with a
++// sequence of calls: one Write per message, the result ignored apart from an
++// error, which is reported with one Write to stderr.
++type stockOutputModel struct {
++	stdout, stderr *scriptedWriter
++	lastStatus     []string
++	lineBuf        []byte
++}
++
++func (m *stockOutputModel) write(isErr bool, line string) {
++	dst := m.stdout
++	if isErr {
++		dst = m.stderr
++	}
++	if _, err := dst.Write([]byte(line)); err != nil {
++		_, _ = m.stderr.Write([]byte(fmt.Sprintf("write failed: %v\n", err)))
++	}
++}
++
++func (m *stockOutputModel) print(isErr bool, line string) {
++	if len(line) == 0 || line[len(line)-1] != '\n' {
++		line += "\n"
++	}
++	m.write(isErr, line)
++}
++
++func (m *stockOutputModel) setStatus(lines []string) {
++	lines = sanitizeLines(lines, 0)
++	if slices.Equal(lines, m.lastStatus) {
++		return
++	}
++	for _, line := range lines {
++		m.write(false, strings.TrimRight(line, "\n")+"\n")
++	}
++	m.lastStatus = lines
++}
++
++func (m *stockOutputModel) outputWrite(data string) {
++	m.lineBuf = append(m.lineBuf, data...)
++	if i := bytes.LastIndexByte(m.lineBuf, '\n'); i != -1 {
++		m.write(false, string(m.lineBuf[:i+1]))
++		m.lineBuf = m.lineBuf[i+1:]
++	}
++}
++
++func (m *stockOutputModel) close() {
++	if len(m.lineBuf) > 0 {
++		m.write(false, string(m.lineBuf)+"\n")
++	}
++}
++
++// For writers that are not regular files (pipes, terminals without status
++// updates, custom writers) the sequence of Write calls, their arguments and
++// their order across both streams equal stock's for any pattern of failures,
++// partial writes and writes without progress.
++func TestRunWithoutStatusEqualsStockOnFailingWriters(t *testing.T) {
++	words := []string{"snapshot", "saved", "error", "open", "permission denied", "", "a\nb", "tail\n", "x"}
++	for seed := int64(1); seed <= 300; seed++ {
++		ops := rand.New(rand.NewSource(seed))
++
++		var mu sync.Mutex
++		var got, want []string
++		stdout := &scriptedWriter{name: "stdout", rnd: rand.New(rand.NewSource(seed * 7)), log: &got, mu: &mu}
++		stderr := &scriptedWriter{name: "stderr", rnd: rand.New(rand.NewSource(seed * 13)), log: &got, mu: &mu}
++		model := &stockOutputModel{
++			stdout: &scriptedWriter{name: "stdout", rnd: rand.New(rand.NewSource(seed * 7)), log: &want, mu: &mu},
++			stderr: &scriptedWriter{name: "stderr", rnd: rand.New(rand.NewSource(seed * 13)), log: &want, mu: &mu},
++		}
++
++		term, shutdown := Setup(nil, stdout, stderr, true)
++		for i := 0; i < 60; i++ {
++			text := words[ops.Intn(len(words))] + " " + words[ops.Intn(len(words))]
++			switch ops.Intn(6) {
++			case 0, 1:
++				term.Print(text)
++				model.print(false, text)
++			case 2:
++				term.Error(text)
++				model.print(true, text)
++			case 3:
++				lines := []string{"status " + words[ops.Intn(3)], words[ops.Intn(3)]}[:1+ops.Intn(2)]
++				term.SetStatus(lines)
++				model.setStatus(lines)
++			case 4:
++				_, err := term.OutputWriter().Write([]byte(text))
++				rtest.OK(t, err)
++				model.outputWrite(text)
++			case 5:
++				term.(*terminal).Flush()
++			}
++		}
++		shutdown()
++		model.close()
++
++		mu.Lock()
++		if len(got) != len(want) {
++			t.Fatalf("seed %d: %d writes, stock makes %d\ngot  %q\nwant %q", seed, len(got), len(want), got, want)
++		}
++		for i := range want {
++			if got[i] != want[i] {
++				t.Fatalf("seed %d: write %d is %q, stock writes %q", seed, i, got[i], want[i])
++			}
++		}
++		mu.Unlock()
++	}
++}
++
++// quotaWriter is a file on a disk that fills up: it takes bytes until the
++// quota is used and fails from then on. What it stores does not depend on how
++// the bytes are split into Write calls.
++type quotaWriter struct {
++	mu    sync.Mutex
++	free  int
++	data  []byte
++	calls int
++}
++
++func (w *quotaWriter) Write(p []byte) (int, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	w.calls++
++	if len(p) <= w.free {
++		w.free -= len(p)
++		w.data = append(w.data, p...)
++		return len(p), nil
++	}
++	n := w.free
++	w.free = 0
++	w.data = append(w.data, p[:n]...)
++	return n, errors.New("no space left on device")
++}
++
++// For a regular file the messages are written together. When the disk fills
++// up, the file content and the reports on stderr must be those of stock, which
++// writes one line at a time: complete lines, then the part of one line that
++// still fitted, then one report for that line and one for every later line.
++func TestCollectedOutputFailsLikeLineByLineOutput(t *testing.T) {
++	rnd := rand.New(rand.NewSource(20261006))
++	for round := 0; round < 200; round++ {
++		lines := make([]string, 1+rnd.Intn(400))
++		total := 0
++		for i := range lines {
++			lines[i] = fmt.Sprintf("%04d %s\n", i, strings.Repeat("x", rnd.Intn(300)))
++			total += len(lines[i])
++		}
++		quota := rnd.Intn(total + 50)
++		flushEvery := 1 + rnd.Intn(len(lines))
++
++		// stock: one write per line
++		stock := &quotaWriter{free: quota}
++		stockReports := 0
++		for _, line := range lines {
++			if _, err := stock.Write([]byte(line)); err != nil {
++				stockReports++
++			}
++		}
++
++		stdout := &quotaWriter{free: quota}
++		stderr := &switchableWriter{}
++		term := new(nil, stdout, stderr, true)
++		term.batchStdout = true
++		term.outputBatchWindow = time.Hour
++		ctx, cancel := context.WithCancel(context.Background())
++		go term.Run(ctx)
++		for i, line := range lines {
++			if round%2 == 0 {
++				term.Print(line)
++			} else {
++				_, err := term.OutputWriter().Write([]byte(line))
++				rtest.OK(t, err)
++			}
++			if i%flushEvery == flushEvery-1 {
++				term.Flush()
++			}
++			if i == len(lines)/2 {
++				term.Error("error in the middle")
++			}
++		}
++		term.closeOutputWriter()
++		term.Flush()
++		cancel()
++		<-term.closed
++
++		if !bytes.Equal(stdout.data, stock.data) {
++			t.Fatalf("round %d: %d bytes in the file, stock leaves %d", round, len(stdout.data), len(stock.data))
++		}
++		reports := strings.Count(stderr.String(), "write failed: no space left on device\n")
++		if reports != stockReports {
++			t.Fatalf("round %d: %d failed writes reported, stock reports %d", round, reports, stockReports)
++		}
++		if strings.Count(stderr.String(), "error in the middle\n") != 1 {
++			t.Fatalf("round %d: the error message did not reach stderr", round)
++		}
++		if stockReports == 0 && stdout.calls >= len(lines) && len(lines) > 2 && flushEvery > 2 {
++			t.Fatalf("round %d: %d writes for %d lines, nothing was collected", round, stdout.calls, len(lines))
++		}
++	}
++}
++
++// A write that stops inside a line gives up that line only, and the writer
++// is not called again with bytes it already took.
++func TestCollectedOutputPartialWriteDropsOneLine(t *testing.T) {
++	var calls []string
++	stdout := writerFunc(func(p []byte) (int, error) {
++		calls = append(calls, string(p))
++		if len(calls) == 1 {
++			return len("one\nt"), errors.New("temporary write error")
++		}
++		return len(p), nil
++	})
++	stderr := &switchableWriter{}
++	term := new(nil, stdout, stderr, true)
++	term.batchStdout = true
++	term.outputBatchWindow = time.Hour
++	ctx, cancel := context.WithCancel(context.Background())
++	go term.Run(ctx)
++
++	term.Print("one")
++	term.Print("two")
++	term.Print("three")
++	term.Print("four")
++	term.Flush()
++	cancel()
++	<-term.closed
++
++	rtest.Equals(t, []string{"one\ntwo\nthree\nfour\n", "three\n", "four\n"}, calls)
++	rtest.Equals(t, "write failed: temporary write error\n", stderr.String())
++}
++
++type writerFunc func(p []byte) (int, error)
++
++func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+diff --git a/internal/ui/termstatus/status_output_retry_test.go b/internal/ui/termstatus/status_output_retry_test.go
+deleted file mode 100644
+index cd1423469e112fafc2d8be96af6d64b4f5c4aa1e..0000000000000000000000000000000000000000
+--- a/internal/ui/termstatus/status_output_retry_test.go
++++ /dev/null
+@@ -1,90 +0,0 @@
+-package termstatus
+-
+-import (
+-	"bytes"
+-	"context"
+-	"errors"
+-	"io"
+-	"strings"
+-	"sync"
+-	"testing"
+-
+-	rtest "github.com/restic/restic/internal/test"
+-)
+-
+-type retryOrderWriter struct {
+-	mu        *sync.Mutex
+-	name      string
+-	events    *[]string
+-	data      []byte
+-	failFirst bool
+-}
+-
+-func (w *retryOrderWriter) Write(p []byte) (int, error) {
+-	w.mu.Lock()
+-	defer w.mu.Unlock()
+-
+-	n := len(p)
+-	var err error
+-	if w.failFirst {
+-		n = len(p) / 2
+-		w.failFirst = false
+-		err = errors.New("temporary partial write error")
+-	}
+-	w.data = append(w.data, p[:n]...)
+-	*w.events = append(*w.events, w.name+":"+string(p[:n]))
+-	return n, err
+-}
+-
+-func TestOutputRetryKeepsStdoutAheadOfLaterStderr(t *testing.T) {
+-	var mu sync.Mutex
+-	var events []string
+-	stdout := &retryOrderWriter{mu: &mu, name: "stdout", events: &events, failFirst: true}
+-	stderr := &retryOrderWriter{mu: &mu, name: "stderr", events: &events}
+-	term := new(nil, stdout, stderr, true)
+-	ctx, cancel := context.WithCancel(context.Background())
+-	go term.Run(ctx)
+-
+-	term.Print("first")
+-	term.Error("second")
+-	term.Flush()
+-	cancel()
+-	<-term.closed
+-
+-	rtest.Equals(t, "first\n", string(stdout.data))
+-	rtest.Equals(t, "write failed: temporary partial write error\nsecond\n", string(stderr.data))
+-	rtest.Equals(t, []string{
+-		"stdout:fir",
+-		"stdout:st\n",
+-		"stderr:write failed: temporary partial write error\n",
+-		"stderr:second\n",
+-	}, events)
+-}
+-
+-type stalledOutputWriter struct {
+-	calls int
+-}
+-
+-func (w *stalledOutputWriter) Write([]byte) (int, error) {
+-	w.calls++
+-	return 0, nil
+-}
+-
+-func TestSetupShutdownReportsStalledOutput(t *testing.T) {
+-	stdout := &stalledOutputWriter{}
+-	var stderr bytes.Buffer
+-	term, shutdown := Setup(nil, stdout, &stderr, true)
+-
+-	writerProvider, ok := term.(interface{ OutputWriter() io.Writer })
+-	if !ok {
+-		t.Fatal("terminal does not provide an output writer")
+-	}
+-	_, err := writerProvider.OutputWriter().Write([]byte("buffered tail"))
+-	rtest.OK(t, err)
+-	shutdown()
+-
+-	rtest.Equals(t, 3, stdout.calls)
+-	rtest.Equals(t, 3, strings.Count(stderr.String(), "write failed: short write\n"))
+-}
+-
+-var _ io.Writer = &stalledOutputWriter{}
+diff --git a/internal/ui/termstatus/status_test.go b/internal/ui/termstatus/status_test.go
+index 37ba9220e7b5082e15de30c25286ee0e93bd15d7..b1f264d5619c166d6f986a242762a11f54ed8461 100644
+--- a/internal/ui/termstatus/status_test.go
++++ b/internal/ui/termstatus/status_test.go
+@@ -204,7 +204,7 @@ func TestFlushWaitsForPendingOutput(t *testing.T) {
+ 	_, err := term.OutputWriter().Write([]byte("record\n"))
+ 	rtest.OK(t, err)
+ 
+-	term.Flush()
++	term.(*terminal).Flush()
+ 	rtest.Equals(t, "stdout\nstderr\nrecord\n", output.String())
+ }
+ 
+@@ -378,81 +378,6 @@ func TestRunWithoutStatusRespectsBatchSizeLimit(t *testing.T) {
+ 	rtest.Equals(t, "stdout:b\n", events[1])
+ }
+ 
+-type partialErrorOutputWriter struct {
+-	data  []byte
+-	calls int
+-}
+-
+-func (w *partialErrorOutputWriter) Write(p []byte) (int, error) {
+-	w.calls++
+-	if w.calls == 1 {
+-		n := len(p) / 2
+-		w.data = append(w.data, p[:n]...)
+-		return n, errors.New("temporary write error")
+-	}
+-	w.data = append(w.data, p...)
+-	return len(p), nil
+-}
+-
+-func TestRunWithoutStatusRetriesPartialBatchWrite(t *testing.T) {
+-	w := &partialErrorOutputWriter{}
+-	term := new(nil, w, io.Discard, true)
+-	term.batchStdout = true
+-	term.outputBatchWindow = time.Hour
+-	ctx, cancel := context.WithCancel(context.Background())
+-	go term.Run(ctx)
+-
+-	term.Print("one")
+-	term.Print("two")
+-	term.Flush()
+-	cancel()
+-	<-term.closed
+-	rtest.Equals(t, "one\ntwo\n", string(w.data))
+-	rtest.Equals(t, 2, w.calls)
+-}
+-
+-type recoveringOutputWriter struct {
+-	data  []byte
+-	calls int
+-}
+-
+-func (w *recoveringOutputWriter) Write(p []byte) (int, error) {
+-	w.calls++
+-	switch w.calls {
+-	case 1:
+-		n := len(p) / 2
+-		w.data = append(w.data, p[:n]...)
+-		return n, errors.New("temporary partial write error")
+-	case 2:
+-		return 0, errors.New("temporary zero-progress write error")
+-	default:
+-		w.data = append(w.data, p...)
+-		return len(p), nil
+-	}
+-}
+-
+-func TestRunWithoutStatusKeepsSuffixAfterZeroProgressRetry(t *testing.T) {
+-	w := &recoveringOutputWriter{}
+-	term := new(nil, w, io.Discard, true)
+-	term.batchStdout = true
+-	term.outputBatchWindow = time.Hour
+-	ctx, cancel := context.WithCancel(context.Background())
+-	go term.Run(ctx)
+-
+-	term.Print("one")
+-	term.Print("two")
+-	term.Flush()
+-	rtest.Equals(t, "one\n", string(w.data))
+-	rtest.Equals(t, 2, w.calls)
+-
+-	term.Print("three")
+-	term.Flush()
+-	cancel()
+-	<-term.closed
+-	rtest.Equals(t, "one\ntwo\nthree\n", string(w.data))
+-	rtest.Equals(t, 3, w.calls)
+-}
+-
+ func TestRunWithoutStatusWritesOversizedRecordDirectly(t *testing.T) {
+ 	var mu sync.Mutex
+ 	var events []string

@@ -1,0 +1,574 @@
+From 633f068d55230388173306a0ae37035fd7826e2b Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 04:47:55 +0000
+Subject: [PATCH 21/49] S020 (restore): the second pass decodes trees without
+ keeping content IDs
+
+From the S020 incumbent (T2). The trees that restore's second pass
+(special files, hard links, metadata) reads again are decoded by
+data.LoadMetadataTree: every content ID is still parsed by the ordinary
+ID parser, but the slices are not kept. Planning and verification keep
+using LoadTree.
+
+Repair on top of S020's file: the decoder skipped strconv.Unquote for
+every name without a backslash, so a name with a raw quote or newline
+was accepted where stock rejects it (the R7 finding, copied into the
+new decoder). It now uses nodeNameIsPlain, as the direct decoder does.
+tree_metadata_name_test.go fails on S020's file (a raw quote is
+accepted) and passes here: 37,750 adversarial trees agree with stock's
+decoder, names and error text.
+
+New: internal/data/tree_metadata.go, tree_metadata_test.go,
+tree_metadata_name_test.go; internal/restorer/completion_settlement_test.go
+(S020's test of file-stage settlement, unchanged).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/data/tree_metadata.go                | 136 +++++++++++
+ internal/data/tree_metadata_name_test.go      |  73 ++++++
+ internal/data/tree_metadata_test.go           | 220 ++++++++++++++++++
+ .../restorer/completion_settlement_test.go    |  71 ++++++
+ internal/restorer/restorer.go                 |   2 +-
+ 5 files changed, 501 insertions(+), 1 deletion(-)
+ create mode 100644 internal/data/tree_metadata.go
+ create mode 100644 internal/data/tree_metadata_name_test.go
+ create mode 100644 internal/data/tree_metadata_test.go
+ create mode 100644 internal/restorer/completion_settlement_test.go
+
+diff --git a/internal/data/tree_metadata.go b/internal/data/tree_metadata.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa519fd21507dc2387cba61277970644dfe7169e
+--- /dev/null
++++ b/internal/data/tree_metadata.go
+@@ -0,0 +1,136 @@
++package data
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"strconv"
++
++	"github.com/restic/restic/internal/errors"
++	"github.com/restic/restic/internal/restic"
++)
++
++// metadataContent validates every content ID without retaining the slice.
++// The outer JSON decoder already validates framing and string escaping. The
++// fast path still calls the ordinary ID parser for every ID. Unusual values use
++// the ordinary slice decoder; semantic errors are replayed at the node boundary.
++type metadataContent struct{}
++
++func (*metadataContent) UnmarshalJSON(raw []byte) error {
++	raw = bytes.TrimSpace(raw)
++	if bytes.Equal(raw, []byte("null")) {
++		return nil
++	}
++	ordinary := func() error {
++		var ids restic.IDs
++		return json.Unmarshal(raw, &ids)
++	}
++	if len(raw) < 2 || raw[0] != '[' {
++		return ordinary()
++	}
++	i := 1
++	skipSpace := func() {
++		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n') {
++			i++
++		}
++	}
++	skipSpace()
++	if i == len(raw)-1 && raw[i] == ']' {
++		return nil
++	}
++	for {
++		if i+66 > len(raw) || raw[i] != '"' || raw[i+65] != '"' {
++			return ordinary()
++		}
++		var id restic.ID
++		if err := id.UnmarshalJSON(raw[i : i+66]); err != nil {
++			return err
++		}
++		i += 66
++		skipSpace()
++		if i == len(raw)-1 && raw[i] == ']' {
++			return nil
++		}
++		if i >= len(raw) || raw[i] != ',' {
++			return ordinary()
++		}
++		i++
++		skipSpace()
++	}
++}
++
++type metadataNodeBase Node
++type metadataNodeJSON struct {
++	metadataNodeBase
++	Content metadataContent `json:"content"`
++}
++
++// LoadMetadataTree authenticates and decodes a tree with ordinary field and
++// error interpretation, but returns no file content IDs. It is only for a
++// metadata traversal: planning and verification must keep using LoadTree.
++func LoadMetadataTree(ctx context.Context, loader restic.BlobLoader, content restic.ID) (TreeNodeIterator, error) {
++	payload, err := loader.LoadBlob(ctx, restic.BlobHandle{Type: restic.TreeBlob, ID: content}, nil)
++	if err != nil {
++		return nil, err
++	}
++	return newMetadataTreeIterator(payload)
++}
++
++func newMetadataTreeIterator(payload []byte) (TreeNodeIterator, error) {
++	t := &treeIterator{dec: *json.NewDecoder(bytes.NewReader(payload))}
++	if err := t.init(); err != nil {
++		return nil, err
++	}
++	return func(yield func(NodeOrError) bool) {
++		if t.started {
++			panic("tree iterator is single use only")
++		}
++		t.started = true
++		for {
++			n, err := nextMetadataNode(t, payload)
++			if err != nil && errors.Is(err, io.EOF) {
++				return
++			}
++			if !yield(NodeOrError{Node: n, Error: err}) || err != nil {
++				return
++			}
++		}
++	}, nil
++}
++
++func nextMetadataNode(t *treeIterator, payload []byte) (*Node, error) {
++	if !t.dec.More() {
++		return t.next()
++	}
++	start := t.dec.InputOffset()
++	wire := new(metadataNodeJSON)
++	n := (*Node)(&wire.metadataNodeBase)
++	err := t.dec.Decode(wire)
++	if err != nil {
++		if _, syntax := err.(*json.SyntaxError); syntax || err == io.EOF || err == io.ErrUnexpectedEOF {
++			return nil, err
++		}
++		end := t.dec.InputOffset()
++		raw := bytes.TrimLeft(payload[start:end], " \t\r\n,")
++		ordinary := new(Node)
++		if err := ordinary.UnmarshalJSON(raw); err != nil {
++			return nil, err
++		}
++		ordinary.Content = nil
++		return ordinary, nil
++	}
++	// As in nextParentNode: strconv.Unquote is skipped only for names it
++	// returns unchanged, so a name is rejected exactly when stock rejects it.
++	if !nodeNameIsPlain(n.Name) {
++		n.Name, err = strconv.Unquote(`"` + n.Name + `"`)
++		if err != nil {
++			return nil, errors.Wrap(err, "Unquote")
++		}
++	}
++	if n.LinkTargetRaw != nil {
++		n.LinkTarget = string(n.LinkTargetRaw)
++		n.LinkTargetRaw = nil
++	}
++	return n, nil
++}
+diff --git a/internal/data/tree_metadata_name_test.go b/internal/data/tree_metadata_name_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a5d90d5d613dc0b68f78d4cb90aa15ff93d8ac2
+--- /dev/null
++++ b/internal/data/tree_metadata_name_test.go
+@@ -0,0 +1,73 @@
++package data
++
++import (
++	"context"
++	"math/rand"
++	"strings"
++	"testing"
++
++	"github.com/restic/restic/internal/restic"
++)
++
++// LoadMetadataTree is a third decoder for tree documents (restore's second
++// pass). Like the direct decoder it may skip strconv.Unquote only for names
++// that the call returns unchanged; for every other name it has to return what
++// stock's Node.UnmarshalJSON returns, error text included. The trees are the
++// adversarial set of TestTreeDecodersAgreeWithStockOnAdversarialNames.
++
++func decodeTreeMetadata(payload []byte) decodedTree {
++	return collectTree(LoadMetadataTree(context.Background(), payloadLoader(payload), restic.Hash(payload)))
++}
++
++func compareMetadataDecoder(t *testing.T, payload []byte) (rejected bool) {
++	t.Helper()
++	stock := decodeTreeStock(payload)
++	if got := decodeTreeMetadata(payload); !equalDecodedTrees(stock, got) {
++		t.Fatalf("tree %q:\nstock            names=%q err=%q\nLoadMetadataTree names=%q err=%q", payload, stock.names, stock.err, got.names, got.err)
++	}
++	return stock.err != ""
++}
++
++func TestMetadataTreeAgreesWithStockOnAdversarialNames(t *testing.T) {
++	// a raw quote and a raw newline in a name: stock rejects both
++	for _, name := range []string{`a\"b`, `a\nb`} {
++		if !compareMetadataDecoder(t, treeWithNames(name)) {
++			t.Errorf("stock accepts the name %s: the test does not test what it should", name)
++		}
++	}
++	if compareMetadataDecoder(t, treeWithNames(`a\\\"b`)) {
++		t.Error("stock rejects a quote as restic writes it")
++	}
++
++	accepted, rejected := 0, 0
++	count := func(wasRejected bool) {
++		if wasRejected {
++			rejected++
++		} else {
++			accepted++
++		}
++	}
++	for _, a := range jsonNamePieces {
++		count(compareMetadataDecoder(t, treeWithNames(a)))
++		for _, b := range jsonNamePieces {
++			count(compareMetadataDecoder(t, treeWithNames(a+b)))
++			count(compareMetadataDecoder(t, treeWithNames(a+"x"+b)))
++		}
++	}
++	rnd := rand.New(rand.NewSource(20261007))
++	for i := 0; i < 30000; i++ {
++		names := make([]string, 1+rnd.Intn(3))
++		for j := range names {
++			var name strings.Builder
++			for n := rnd.Intn(7); n > 0; n-- {
++				name.WriteString(jsonNamePieces[rnd.Intn(len(jsonNamePieces))])
++			}
++			names[j] = name.String()
++		}
++		count(compareMetadataDecoder(t, treeWithNames(names...)))
++	}
++	if accepted < 1000 || rejected < 1000 {
++		t.Fatalf("one-sided sample: %d trees accepted, %d rejected", accepted, rejected)
++	}
++	t.Logf("%d trees accepted and %d rejected by stock, LoadMetadataTree agrees on all", accepted, rejected)
++}
+diff --git a/internal/data/tree_metadata_test.go b/internal/data/tree_metadata_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b2b8e73188aca95f227638064538939174a2877
+--- /dev/null
++++ b/internal/data/tree_metadata_test.go
+@@ -0,0 +1,220 @@
++package data
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/restic"
++)
++
++func TestMetadataTreeKeepsAllMetadata(t *testing.T) {
++	id := restic.Hash([]byte("content"))
++	stamp := time.Date(2020, 1, 2, 3, 4, 5, 6, time.FixedZone("offset", 1234))
++	for _, typ := range []NodeType{NodeTypeFile, NodeTypeDir, NodeTypeSymlink, NodeTypeDev, NodeTypeFifo} {
++		n := &Node{Name: "escaped\nname\\", Type: typ, Mode: 0640, ModTime: stamp,
++			AccessTime: stamp, ChangeTime: stamp, UID: 123, GID: 456, User: "user", Group: "group",
++			Inode: 8, DeviceID: 9, Size: 1024, Links: 2, LinkTarget: string([]byte{0xff, 0}),
++			ExtendedAttributes: []ExtendedAttribute{{Name: "user.test", Value: []byte{0, 1, 2}}},
++			GenericAttributes:  map[GenericAttributeType]json.RawMessage{"test": json.RawMessage(`{"value":1}`)},
++			Device:             10, Content: restic.IDs{id, id}, Subtree: &id, Error: "recorded error"}
++		payload, err := json.Marshal(struct {
++			Nodes []*Node `json:"nodes"`
++		}{[]*Node{n}})
++		if err != nil {
++			t.Fatal(err)
++		}
++		want, wantErr := metadataTreeResult(payload, false)
++		got, gotErr := metadataTreeResult(payload, true)
++		if wantErr != nil || gotErr != nil || !reflect.DeepEqual(got, want) {
++			t.Fatalf("%s: metadata=%v/%v ordinary=%v/%v", typ, got, gotErr, want, wantErr)
++		}
++	}
++}
++
++func TestMetadataTreeFramingAndEscapedContent(t *testing.T) {
++	id := restic.Hash([]byte("blob")).String()
++	contents := []string{`null`, `[]`, `[null]`, `[false]`, `[0]`, `[""]`,
++		`["` + id + `"]`, `["\u` + fmt.Sprintf("%04x", id[0]) + id[1:] + `"]`,
++		`["` + id + `",null]`, `["` + id + `","bad"]`}
++	for _, content := range contents {
++		for _, key := range []string{`content`, `CONTENT`, `c\u006fntent`} {
++			raw := `{"name":"a","` + key + `":` + content + `,"size":1,"mode":384,"links":2,"inode":8,"device_id":9}`
++			for _, payload := range []string{
++				`{"nodes":[` + raw + `]}`,
++				`{"unknown":null,"nodes":[` + raw + `,{"name":"b","content":[]}],"tail":{"nested":[]}}`,
++				`{"nodes":[` + raw + `],"tail":`,
++				`{"nodes":[` + raw + `,`,
++			} {
++				want, wantErr := metadataTreeResult([]byte(payload), false)
++				got, gotErr := metadataTreeResult([]byte(payload), true)
++				if !reflect.DeepEqual(got, want) || fmt.Sprint(gotErr) != fmt.Sprint(wantErr) || reflect.TypeOf(gotErr) != reflect.TypeOf(wantErr) {
++					t.Fatalf("%s: metadata=%v/%v ordinary=%v/%v", payload, got, gotErr, want, wantErr)
++				}
++			}
++		}
++	}
++}
++
++type metadataTestLoader struct {
++	t   *testing.T
++	id  restic.ID
++	err error
++}
++
++func (l metadataTestLoader) LoadBlob(ctx context.Context, h restic.BlobHandle, buf []byte) ([]byte, error) {
++	if h.Type != restic.TreeBlob || h.ID != l.id || buf != nil {
++		l.t.Fatalf("unexpected authenticated load: %v, buffer %v", h, buf)
++	}
++	if ctx.Err() != nil {
++		return nil, ctx.Err()
++	}
++	return []byte(`{"nodes":[{"name":"a","content":[]},{"name":"b","content":[]}]}`), l.err
++}
++
++func TestMetadataTreeLoadAndSingleUse(t *testing.T) {
++	id := restic.Hash([]byte("tree"))
++	loadErr := errors.New("authenticated load failed")
++	it, err := LoadMetadataTree(context.Background(), metadataTestLoader{t: t, id: id, err: loadErr}, id)
++	if it != nil || !errors.Is(err, loadErr) {
++		t.Fatalf("load failure: %v", err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	it, err = LoadMetadataTree(ctx, metadataTestLoader{t: t, id: id}, id)
++	if it != nil || !errors.Is(err, context.Canceled) {
++		t.Fatalf("canceled load: %v", err)
++	}
++	it, err = LoadMetadataTree(context.Background(), metadataTestLoader{t: t, id: id}, id)
++	if err != nil {
++		t.Fatal(err)
++	}
++	count := 0
++	for item := range it {
++		if item.Error != nil || item.Node.Name != "a" {
++			t.Fatalf("first node: %+v", item)
++		}
++		count++
++		break
++	}
++	if count != 1 {
++		t.Fatal("no node yielded")
++	}
++	defer func() {
++		if recover() == nil {
++			t.Fatal("iterator allowed reuse after early stop")
++		}
++	}()
++	for range it {
++	}
++}
++
++func metadataTreeResult(payload []byte, metadata bool) ([]*Node, error) {
++	load := newDirectTreeIterator
++	if metadata {
++		load = newMetadataTreeIterator
++	}
++	it, err := load(payload)
++	if err != nil {
++		return nil, err
++	}
++	var nodes []*Node
++	for item := range it {
++		if item.Error != nil {
++			return nodes, item.Error
++		}
++		item.Node.Content = nil
++		nodes = append(nodes, item.Node)
++	}
++	return nodes, nil
++}
++
++func TestMetadataTreeInterpretationAndErrors(t *testing.T) {
++	id := restic.Hash([]byte("blob")).String()
++	for _, raw := range []string{
++		`{"name":"file","type":"file","content":["` + id + `"]}`,
++		`{"name":"file","type":"file","CONTENT":["` + strings.ToUpper(id) + `"],"content":null}`,
++		`{"name":"file","content":[` + " \n " + `"` + id + `" , "` + id + `"` + " \t " + `]}`,
++		`{"name":"file","content":[]}`,
++		`{"name":"file","content":null}`,
++		`{"name":"a\\n","linktarget_raw":"AAE=","subtree":"` + id + `","unknown":[1,2]}`,
++		`{"name":"file","content":[null]}`,
++		`{"name":"file","content":["short"]}`,
++		`{"name":"file","content":["` + strings.Repeat("z", 64) + `"]}`,
++		`{"name":"file","content":123}`,
++		`{"name":"file","content":{"bad":true}}`,
++		`{"name":"file","size":"bad","content":["short"]}`,
++		`{"name":"file","content":["short"],"size":"bad"}`,
++		`{"name":"file","content":["` + id + `"],"content":[false]}`,
++		`{"name":"file","content":["` + id + `",]}`,
++		`{"name":"file","mtime":"bad","content":[]}`,
++		`{"name":"bad\\q","content":[]}`,
++		`{"name":"file","content":["` + id + `"]`,
++	} {
++		payload := []byte(`{"before":{},"nodes":[` + raw + `],"after":[]}`)
++		want, wantErr := metadataTreeResult(payload, false)
++		got, gotErr := metadataTreeResult(payload, true)
++		if !reflect.DeepEqual(got, want) || fmt.Sprint(gotErr) != fmt.Sprint(wantErr) || reflect.TypeOf(gotErr) != reflect.TypeOf(wantErr) {
++			t.Fatalf("%s: metadata=%v/%v ordinary=%v/%v", raw, got, gotErr, want, wantErr)
++		}
++	}
++}
++
++func TestMetadataContentNoRetainedIDs(t *testing.T) {
++	id := restic.Hash([]byte("blob"))
++	payload, err := json.Marshal(struct {
++		Nodes []*Node `json:"nodes"`
++	}{[]*Node{{Name: "file", Type: NodeTypeFile, Content: restic.IDs{id, id}}}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	it, err := newMetadataTreeIterator(payload)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for item := range it {
++		if item.Error != nil || item.Node.Content != nil {
++			t.Fatalf("retained IDs or error: %+v", item)
++		}
++	}
++}
++
++func BenchmarkMetadataTreeDecode(b *testing.B) {
++	for _, count := range []int{1, 32, 512} {
++		ids := make(restic.IDs, count)
++		for i := range ids {
++			ids[i] = restic.Hash([]byte(fmt.Sprint(i)))
++		}
++		payload, err := json.Marshal(struct {
++			Nodes []*Node `json:"nodes"`
++		}{[]*Node{{Name: "file", Type: NodeTypeFile, Mode: 0644, Content: ids}}})
++		if err != nil {
++			b.Fatal(err)
++		}
++		for _, metadata := range []bool{false, true} {
++			b.Run(fmt.Sprintf("ids=%d/metadata=%t", count, metadata), func(b *testing.B) {
++				load := newDirectTreeIterator
++				if metadata {
++					load = newMetadataTreeIterator
++				}
++				b.ReportAllocs()
++				for b.Loop() {
++					it, err := load(payload)
++					if err != nil {
++						b.Fatal(err)
++					}
++					for item := range it {
++						if item.Error != nil {
++							b.Fatal(item.Error)
++						}
++					}
++				}
++			})
++		}
++	}
++}
+diff --git a/internal/restorer/completion_settlement_test.go b/internal/restorer/completion_settlement_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d190929d3abc04d4b600e32421a0a706c2a505f
+--- /dev/null
++++ b/internal/restorer/completion_settlement_test.go
+@@ -0,0 +1,71 @@
++package restorer
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++)
++
++// A deliberately undelivered later blob leaves an earlier ordinary file fully
++// written. This distinguishes successful writes from successful file-stage
++// settlement without introducing an early metadata operation in production.
++type completionSettlementRepository struct {
++	restic.Repository
++	late    restic.ID
++	fatal   error
++	earlier atomic.Bool
++}
++
++func (r *completionSettlementRepository) LoadBlobsFromPack(ctx context.Context, packID restic.ID, blobs []restic.BlobHandle, handle func(restic.BlobHandle, []byte, error) error) error {
++	missing := false
++	err := r.Repository.LoadBlobsFromPack(ctx, packID, blobs, func(h restic.BlobHandle, buf []byte, err error) error {
++		if h.ID == r.late {
++			missing = true
++			return nil
++		}
++		err = handle(h, buf, err)
++		if err == nil {
++			r.earlier.Store(true)
++		}
++		return err
++	})
++	if err == nil && missing {
++		return r.fatal
++	}
++	return err
++}
++
++func TestRestoreCompletionFatalSettlementPreservesMetadataGate(t *testing.T) {
++	repo := repository.TestRepository(t)
++	stamp := time.Unix(1234567890, 0)
++	sn, _ := saveSnapshot(t, repo, Snapshot{Nodes: map[string]Node{
++		"earlier": File{Data: "completed content", Mode: 0400, ModTime: stamp},
++		"later":   File{Data: "missing content", Mode: 0400, ModTime: stamp},
++	}}, noopGetGenericAttributes)
++	fatal := errors.New("later pack content failed")
++	failing := &completionSettlementRepository{Repository: repo, late: restic.Hash([]byte("missing content")), fatal: fatal}
++	res := NewRestorer(failing, sn, Options{})
++	res.SetConcurrentXattrSelectFilter(func(string) bool { return true })
++	dst := t.TempDir()
++	_, err := res.RestoreTo(context.Background(), dst)
++	if !errors.Is(err, fatal) {
++		t.Fatalf("settlement error = %v", err)
++	}
++	if !failing.earlier.Load() {
++		t.Fatal("test did not write the earlier file before failing")
++	}
++	fi, err := os.Stat(filepath.Join(dst, "earlier"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if fi.Mode().Perm() == 0400 || fi.ModTime().Equal(stamp) {
++		t.Fatal("file metadata escaped the successful content-settlement gate")
++	}
++}
+diff --git a/internal/restorer/restorer.go b/internal/restorer/restorer.go
+index 4536b84e580dde33fe15d7669fdfd0cd48f49672..2f8a196c39f628a402681811a0c2cf94190d9602 100644
+--- a/internal/restorer/restorer.go
++++ b/internal/restorer/restorer.go
+@@ -825,7 +825,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error)
+ 	var treePrefetch *restoreTreePrefetch
+ 	if !res.opts.DryRun && len(filerestorer.files) != 0 && len(restoreTreeIDs) != 0 {
+ 		loadTree := restoreTreeLoader(func(ctx context.Context, id restic.ID) (data.TreeNodeIterator, error) {
+-			return data.LoadTree(ctx, res.repo, id)
++			return data.LoadMetadataTree(ctx, res.repo, id)
+ 		})
+ 		treePrefetch = newRestoreTreePrefetchWithCarry(ctx, restoreTreeIDs, loadTree, treeCarry)
+ 		defer treePrefetch.Close()

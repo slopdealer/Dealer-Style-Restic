@@ -1,0 +1,1575 @@
+From bb12f3f8b97a6f6f2be8b4318b0dcec7cb622393 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:42:36 +0000
+Subject: [PATCH 44/49] Red team fix 6: files kept from the lock wait are
+ compared by size too, and check keeps nothing
+
+What a command read during the lock's settle delay was kept when the files
+were still listed under the same names after the lock was confirmed. A name
+is the hash of what was read; it says nothing about what is stored under it
+now. An index file cut short or changed in place before confirmation kept
+its name, and check, whose index pass was prepared during the delay, reported
+a repository as healthy that stock reports as damaged.
+
+(a) Every file kept from the wait must now be listed, after confirmation,
+with the size it was listed with when it was read: the index files of
+backup, restore, ls, forget and prune (the index remembers the listed size
+of each file it loaded), and the one snapshot file ls reads ahead. Another
+size discards everything read during the wait, and the command reads again
+as stock does and reports what stock reports. Damage that leaves the length
+alone is not seen by these commands without reading the file again; stock
+reads index files through the cache and does not see it either unless the
+cache is off.
+
+(b) check starts no reads during the delay any more. It takes stock's lock
+call and reads snapshots and index after confirmation, in stock's order. The
+pack sizes implied by the index are still computed once for the pack pass
+and the read-data pass. The wait work of check, its tests and the checker's
+LoadSnapshotsFromList are removed.
+
+Tests: TestCheckReportsIndexDamagedBeforeLockConfirmation is the reviewers'
+scenario (seat 1 R1, seat 2 finding 2) at the level of the command with the
+production 200 ms delay, for an index cut short and for a same-size bit
+flip, with and without cache: all four fail before this commit (check
+returns success) and pass after, with the error of a check run after the
+damage. The reviewers' two lifecycle tests drove check's wait work
+directly, which no longer exists. TestLockWaitReadsRejectResizedIndexFile
+(fails before) and TestPreparedSnapshotKeptOnlyWithListedSize cover (a).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ cmd/restic/check_completing_repair_test.go    | 100 -------
+ cmd/restic/check_ordinary_wait_test.go        |  77 ------
+ cmd/restic/check_pack_sizes_lifetime_test.go  |  98 -------
+ cmd/restic/check_pack_sizes_wait_test.go      | 197 --------------
+ cmd/restic/check_pending_confirmation_test.go | 100 -------
+ cmd/restic/cmd_check.go                       |  40 +--
+ cmd/restic/cmd_ls.go                          |   2 +-
+ cmd/restic/lock_wait_damage_test.go           | 245 ++++++++++++++++++
+ cmd/restic/lock_wait_duration_test.go         |   2 +-
+ cmd/restic/lock_wait_schedule_test.go         |  36 +--
+ cmd/restic/snapshot_metadata_wait.go          |  25 +-
+ cmd/restic/wait_index_load.go                 | 216 ++-------------
+ cmd/restic/wait_index_load_test.go            |  36 ---
+ internal/checker/snapshot_list.go             |  18 --
+ .../repository/index/index_rewrite_keep.go    |  26 +-
+ internal/repository/index/master_index.go     |  13 +-
+ internal/repository/index_loaded_ids.go       |   9 +
+ 17 files changed, 352 insertions(+), 888 deletions(-)
+ delete mode 100644 cmd/restic/check_completing_repair_test.go
+ delete mode 100644 cmd/restic/check_ordinary_wait_test.go
+ delete mode 100644 cmd/restic/check_pack_sizes_lifetime_test.go
+ delete mode 100644 cmd/restic/check_pack_sizes_wait_test.go
+ delete mode 100644 cmd/restic/check_pending_confirmation_test.go
+ create mode 100644 cmd/restic/lock_wait_damage_test.go
+ delete mode 100644 internal/checker/snapshot_list.go
+
+diff --git a/cmd/restic/check_completing_repair_test.go b/cmd/restic/check_completing_repair_test.go
+deleted file mode 100644
+index dfe07681bd5379fd9841e417d7e55d31925e1cd0..0000000000000000000000000000000000000000
+--- a/cmd/restic/check_completing_repair_test.go
++++ /dev/null
+@@ -1,100 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"io"
+-	"testing"
+-	"time"
+-
+-	"github.com/restic/restic/internal/backend"
+-	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/repository"
+-	"github.com/restic/restic/internal/restic"
+-)
+-
+-// Model a repair that restores an indexed pack before lock confirmation. This
+-// controls backend visibility; it is not a stress test of two CLI processes.
+-func TestCheckPreparedSizesCompletingPackRepair(t *testing.T) {
+-	ctx := context.Background()
+-	original, _, be := repository.TestRepositoryWithVersion(t, 0)
+-	data.TestCreateSnapshot(t, original, time.Unix(1470492820, 207401672), 1)
+-	var h backend.Handle
+-	if err := be.List(ctx, backend.PackFile, func(fi backend.FileInfo) error {
+-		if h.Name == "" {
+-			h = backend.Handle{Type: backend.PackFile, Name: fi.Name}
+-		}
+-		return nil
+-	}); err != nil {
+-		t.Fatal(err)
+-	}
+-	if h.Name == "" {
+-		t.Fatal("fixture contains no pack")
+-	}
+-	var payload []byte
+-	if err := be.Load(ctx, h, 0, 0, func(r io.Reader) error {
+-		var err error
+-		payload, err = io.ReadAll(r)
+-		return err
+-	}); err != nil {
+-		t.Fatal(err)
+-	}
+-	if err := be.Remove(ctx, h); err != nil {
+-		t.Fatal(err)
+-	}
+-	gate := &packSizesConfirmationGate{Backend: be, confirmation: make(chan struct{}), resume: make(chan struct{})}
+-	repo := repository.TestOpenBackend(t, gate)
+-	repository.TestSetLockTimeout(t, 5*time.Millisecond)
+-	defer repository.TestSetLockTimeout(t, 0)
+-	started := make(chan *checkerIndexLoad, 1)
+-	type result struct {
+-		unlock func()
+-		ctx    context.Context
+-		err    error
+-	}
+-	finished := make(chan result, 1)
+-	go func() {
+-		unlock, lockCtx, err := repository.LockRepoWithWaitWork(ctx, repo, true, 0, func(string) {}, func(string, ...any) {}, func(ctx context.Context) func(bool) {
+-			load := startCheckerIndexLoad(ctx, repo, false, &data.SnapshotFilter{}, nil)
+-			started <- load
+-			return load.settle
+-		})
+-		finished <- result{unlock, lockCtx, err}
+-	}()
+-	load := <-started
+-	<-gate.confirmation
+-	value := <-load.result
+-	load.result <- value
+-	if value.packs == nil || len(value.errs) != 0 {
+-		t.Fatal("index-only preparation failed while pack unavailable")
+-	}
+-	gate.mu.Lock()
+-	packLists := gate.packLists
+-	gate.mu.Unlock()
+-	if packLists != 0 {
+-		t.Fatal("speculative preparation observed pack availability")
+-	}
+-	// Repair completes and then confirmation proceeds. Subsequent metadata
+-	// checking must observe the restored pack, rather than an early absence.
+-	if err := be.Save(ctx, h, backend.NewByteReader(payload, be.Hasher())); err != nil {
+-		t.Fatal(err)
+-	}
+-	close(gate.resume)
+-	got := <-finished
+-	if got.err != nil {
+-		t.Fatal(got.err)
+-	}
+-	defer got.unlock()
+-	defer load.discard()
+-	if err := load.loadSnapshots(); err != nil {
+-		t.Fatal(err)
+-	}
+-	_, errs := load.consume(restic.NoopTerminalCounterFactory)
+-	if len(errs) != 0 {
+-		t.Fatal(errs)
+-	}
+-	errsCh := make(chan error)
+-	go load.checker.PacksWithPreparedSizes(got.ctx, load.packs, errsCh)
+-	for err := range errsCh {
+-		t.Error(err)
+-	}
+-}
+diff --git a/cmd/restic/check_ordinary_wait_test.go b/cmd/restic/check_ordinary_wait_test.go
+deleted file mode 100644
+index 2543706e825bf329525221e80668142c6f0d2a5d..0000000000000000000000000000000000000000
+--- a/cmd/restic/check_ordinary_wait_test.go
++++ /dev/null
+@@ -1,77 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"sync"
+-	"testing"
+-	"time"
+-
+-	"github.com/restic/restic/internal/backend"
+-	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/repository"
+-	"github.com/restic/restic/internal/restic"
+-)
+-
+-// Observe the second lock listing without holding it open. This intentionally
+-// does not assert completion: host scheduling determines how much finishes.
+-type ordinaryWaitObserver struct {
+-	backend.Backend
+-	mu             sync.Mutex
+-	load           *checkerIndexLoad
+-	start          time.Time
+-	lockLists      int
+-	atConfirmation time.Duration
+-	completed      bool
+-}
+-
+-func (o *ordinaryWaitObserver) List(ctx context.Context, kind backend.FileType, fn func(backend.FileInfo) error) error {
+-	o.mu.Lock()
+-	if kind == backend.LockFile {
+-		o.lockLists++
+-		if o.lockLists == 2 && o.load != nil {
+-			o.atConfirmation = time.Since(o.start)
+-			select {
+-			case value := <-o.load.result:
+-				o.completed = value.packs != nil && len(value.errs) == 0
+-				o.load.result <- value
+-			default:
+-			}
+-		}
+-	}
+-	o.mu.Unlock()
+-	return o.Backend.List(ctx, kind, fn)
+-}
+-
+-func TestCheckPreparationOrdinaryWaitCoverage(t *testing.T) {
+-	original, _, be := repository.TestRepositoryWithVersion(t, 0)
+-	data.TestCreateSnapshot(t, original, time.Unix(1470492820, 207401672), 1)
+-	o := &ordinaryWaitObserver{Backend: be}
+-	repo := repository.TestOpenBackend(t, o)
+-	repository.TestSetLockTimeout(t, 200*time.Millisecond)
+-	defer repository.TestSetLockTimeout(t, 0)
+-	var load *checkerIndexLoad
+-	unlock, _, err := repository.LockRepoWithWaitWork(context.Background(), repo, true, 0, func(string) {}, func(string, ...any) {}, func(ctx context.Context) func(bool) {
+-		load = startCheckerIndexLoad(ctx, repo, false, &data.SnapshotFilter{}, nil)
+-		o.mu.Lock()
+-		o.load, o.start = load, time.Now()
+-		o.mu.Unlock()
+-		return load.settle
+-	})
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer unlock()
+-	defer load.discard()
+-	o.mu.Lock()
+-	completed, elapsed := o.completed, o.atConfirmation
+-	o.mu.Unlock()
+-	tailStart := time.Now()
+-	if err := load.loadSnapshots(); err != nil {
+-		t.Fatal(err)
+-	}
+-	_, errs := load.consume(restic.NoopTerminalCounterFactory)
+-	if len(errs) != 0 {
+-		t.Fatal(errs)
+-	}
+-	t.Logf("ordinary wait: elapsed=%v prepared-result-complete=%v post-confirmation-consume=%v (generated test repository only)", elapsed, completed, time.Since(tailStart))
+-}
+diff --git a/cmd/restic/check_pack_sizes_lifetime_test.go b/cmd/restic/check_pack_sizes_lifetime_test.go
+deleted file mode 100644
+index 3d1391ab84d833005afacf3c18bfd75a92b5e8a2..0000000000000000000000000000000000000000
+--- a/cmd/restic/check_pack_sizes_lifetime_test.go
++++ /dev/null
+@@ -1,98 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"io"
+-	"sync"
+-	"testing"
+-	"time"
+-
+-	"github.com/restic/restic/internal/backend"
+-	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/repository"
+-	rtest "github.com/restic/restic/internal/test"
+-)
+-
+-// Keep a real index-load call alive after it observes cancellation. This
+-// distinguishes cancellation delivery from joining the load pipeline.
+-type packSizesBlockedIndex struct {
+-	backend.Backend
+-	entered, canceled, release chan struct{}
+-	enterOnce, cancelOnce      sync.Once
+-}
+-
+-func (b *packSizesBlockedIndex) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(io.Reader) error) error {
+-	if h.Type != backend.IndexFile {
+-		return b.Backend.Load(ctx, h, length, offset, fn)
+-	}
+-	b.enterOnce.Do(func() { close(b.entered) })
+-	<-ctx.Done()
+-	b.cancelOnce.Do(func() { close(b.canceled) })
+-	<-b.release
+-	return ctx.Err()
+-}
+-
+-func TestCheckerWaitCancellationJoinsBlockedIndexBeforeUnlock(t *testing.T) {
+-	original, _, be := repository.TestRepositoryWithVersion(t, 0)
+-	data.TestCreateSnapshot(t, original, time.Unix(1470492820, 207401672), 1)
+-	blocked := &packSizesBlockedIndex{Backend: be, entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{})}
+-	gate := &packSizesConfirmationGate{Backend: blocked, confirmation: make(chan struct{}), resume: make(chan struct{})}
+-	repo := repository.TestOpenBackend(t, gate)
+-	repository.TestSetLockTimeout(t, 5*time.Millisecond)
+-	defer repository.TestSetLockTimeout(t, 0)
+-	ctx, cancel := context.WithCancel(context.Background())
+-	defer cancel()
+-	var release sync.Once
+-	unblock := func() { release.Do(func() { close(blocked.release) }) }
+-	defer unblock()
+-	done := make(chan error, 1)
+-	started := make(chan *checkerIndexLoad, 1)
+-	go func() {
+-		unlock, _, err := repository.LockRepoWithWaitWork(ctx, repo, true, 0, func(string) {}, func(string, ...any) {}, func(ctx context.Context) func(bool) {
+-			load := startCheckerIndexLoad(ctx, repo, false, &data.SnapshotFilter{}, nil)
+-			started <- load
+-			return load.settle
+-		})
+-		if unlock != nil {
+-			unlock()
+-		}
+-		done <- err
+-	}()
+-	wait := func(ch <-chan struct{}, stage string) {
+-		t.Helper()
+-		select {
+-		case <-ch:
+-		case <-time.After(5 * time.Second):
+-			t.Fatalf("timeout at %s", stage)
+-		}
+-	}
+-	var load *checkerIndexLoad
+-	select {
+-	case load = <-started:
+-	case <-time.After(5 * time.Second):
+-		t.Fatal("preparation did not start")
+-	}
+-	wait(blocked.entered, "index load")
+-	wait(gate.confirmation, "confirmation")
+-	cancel()
+-	wait(blocked.canceled, "index cancellation")
+-	select {
+-	case err := <-done:
+-		t.Fatalf("returned before index load joined: %v", err)
+-	default:
+-	}
+-	locks := 0
+-	rtest.OK(t, be.List(context.Background(), backend.LockFile, func(backend.FileInfo) error { locks++; return nil }))
+-	rtest.Equals(t, 1, locks)
+-	unblock()
+-	select {
+-	case err := <-done:
+-		rtest.Assert(t, err != nil, "canceled attempt succeeded")
+-	case <-time.After(5 * time.Second):
+-		t.Fatal("index pipeline did not join")
+-	}
+-	rtest.Assert(t, load.done && !load.used && load.packs == nil, "canceled result escaped")
+-	locks = 0
+-	rtest.OK(t, be.List(context.Background(), backend.LockFile, func(backend.FileInfo) error { locks++; return nil }))
+-	rtest.Equals(t, 0, locks)
+-}
+diff --git a/cmd/restic/check_pack_sizes_wait_test.go b/cmd/restic/check_pack_sizes_wait_test.go
+deleted file mode 100644
+index bfdd5f09b3cd930175faf145fe3bc909acdfd4e2..0000000000000000000000000000000000000000
+--- a/cmd/restic/check_pack_sizes_wait_test.go
++++ /dev/null
+@@ -1,197 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"os"
+-	"sync"
+-	"testing"
+-	"time"
+-
+-	"github.com/restic/restic/internal/backend"
+-	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/repository"
+-	"github.com/restic/restic/internal/restic"
+-	rtest "github.com/restic/restic/internal/test"
+-)
+-
+-// Unlike a nominal worker-start signal, result publication proves that both
+-// checker-index loading and the subsequent size calculation have returned.
+-type packSizesConfirmationGate struct {
+-	backend.Backend
+-	mu           sync.Mutex
+-	lockLists    int
+-	packLists    int
+-	order        []backend.FileType
+-	confirmation chan struct{}
+-	resume       chan struct{}
+-}
+-
+-func (g *packSizesConfirmationGate) List(ctx context.Context, t backend.FileType, fn func(backend.FileInfo) error) error {
+-	g.mu.Lock()
+-	g.order = append(g.order, t)
+-	if t == backend.PackFile {
+-		g.packLists++
+-	}
+-	if t == backend.LockFile {
+-		g.lockLists++
+-	}
+-	confirming := t == backend.LockFile && g.lockLists == 2
+-	g.mu.Unlock()
+-	if confirming {
+-		close(g.confirmation)
+-		select {
+-		case <-g.resume:
+-		case <-ctx.Done():
+-			return ctx.Err()
+-		}
+-	}
+-	return g.Backend.List(ctx, t, fn)
+-}
+-
+-func TestPackSizesCompletePrivatelyBeforeConfirmation(t *testing.T) {
+-	for _, outcome := range []string{"confirmed", "competing-lock", "canceled"} {
+-		t.Run(outcome, func(t *testing.T) {
+-			original, unpacked, be := repository.TestRepositoryWithVersion(t, 0)
+-			data.TestCreateSnapshot(t, original, time.Unix(1470492820, 207401672), 1)
+-			gate := &packSizesConfirmationGate{Backend: be, confirmation: make(chan struct{}), resume: make(chan struct{})}
+-			repo := repository.TestOpenBackend(t, gate)
+-			repository.TestSetLockTimeout(t, 5*time.Millisecond)
+-			defer repository.TestSetLockTimeout(t, 0)
+-			ctx, cancel := context.WithCancel(context.Background())
+-			defer cancel()
+-			var resume sync.Once
+-			unblock := func() { resume.Do(func() { close(gate.resume) }) }
+-			defer unblock()
+-			started := make(chan *checkerIndexLoad, 1)
+-			type lockResult struct {
+-				unlock func()
+-				ctx    context.Context
+-				err    error
+-			}
+-			finished := make(chan lockResult, 1)
+-			go func() {
+-				unlock, lockCtx, err := repository.LockRepoWithWaitWork(ctx, repo, true, 0, func(string) {}, func(string, ...any) {}, func(ctx context.Context) func(bool) {
+-					load := startCheckerIndexLoad(ctx, repo, false, &data.SnapshotFilter{}, nil)
+-					started <- load
+-					return load.settle
+-				})
+-				finished <- lockResult{unlock, lockCtx, err}
+-			}()
+-			var load *checkerIndexLoad
+-			select {
+-			case load = <-started:
+-			case <-time.After(5 * time.Second):
+-				t.Fatal("preparation did not start")
+-			}
+-			select {
+-			case <-gate.confirmation:
+-			case <-time.After(5 * time.Second):
+-				t.Fatal("confirmation was not gated")
+-			}
+-			select {
+-			case value := <-load.result:
+-				rtest.Assert(t, value.packs != nil && len(value.errs) == 0, "sizes did not complete: %+v", value)
+-				load.result <- value
+-			case <-time.After(5 * time.Second):
+-				t.Fatal("sizes did not complete while confirmation was held")
+-			}
+-			rtest.Assert(t, load.progress.target == nil && !load.used, "speculative progress/result was published")
+-			gate.mu.Lock()
+-			packLists := gate.packLists
+-			var sawSnapshots, sawIndex bool
+-			for _, kind := range gate.order {
+-				if kind == backend.SnapshotFile {
+-					sawSnapshots = true
+-				}
+-				if kind == backend.IndexFile {
+-					rtest.Assert(t, sawSnapshots, "index listed before snapshots")
+-					sawIndex = true
+-				}
+-			}
+-			gate.mu.Unlock()
+-			rtest.Assert(t, sawIndex && packLists == 0, "preparation listed backend packs")
+-			var competitor restic.ID
+-			if outcome == "competing-lock" {
+-				hostname, _ := os.Hostname()
+-				var err error
+-				competitor, err = restic.SaveJSONUnpacked(context.Background(), unpacked, restic.LockFile, &repository.Lock{Time: time.Now(), PID: os.Getpid(), Hostname: hostname, Exclusive: true})
+-				rtest.OK(t, err)
+-			} else if outcome == "canceled" {
+-				cancel()
+-			}
+-			unblock()
+-			var got lockResult
+-			select {
+-			case got = <-finished:
+-			case <-time.After(5 * time.Second):
+-				t.Fatal("lock result did not settle")
+-			}
+-			if outcome == "confirmed" {
+-				rtest.OK(t, got.err)
+-				defer got.unlock()
+-				rtest.OK(t, load.loadSnapshots())
+-				_, errs := load.consume(restic.NoopTerminalCounterFactory)
+-				rtest.Equals(t, 0, len(errs))
+-				errChan := make(chan error)
+-				go load.checker.PacksWithPreparedSizes(got.ctx, load.packs, errChan)
+-				for err := range errChan {
+-					rtest.OK(t, err)
+-				}
+-				gate.mu.Lock()
+-				packLists = gate.packLists
+-				gate.mu.Unlock()
+-				rtest.Equals(t, 1, packLists)
+-			} else {
+-				if outcome == "competing-lock" {
+-					rtest.Assert(t, repository.IsAlreadyLocked(got.err), "wrong rejection: %v", got.err)
+-				} else {
+-					rtest.Assert(t, got.err != nil, "cancellation accepted")
+-				}
+-				rtest.Assert(t, load.done && !load.used && load.packs == nil, "rejected attempt retained sizes")
+-				select {
+-				case <-load.result:
+-					t.Fatal("rejected result not drained")
+-				default:
+-				}
+-				var locks []string
+-				rtest.OK(t, be.List(context.Background(), backend.LockFile, func(fi backend.FileInfo) error { locks = append(locks, fi.Name); return nil }))
+-				if outcome == "competing-lock" {
+-					rtest.Equals(t, []string{competitor.String()}, locks)
+-				} else {
+-					rtest.Equals(t, 0, len(locks))
+-				}
+-			}
+-		})
+-	}
+-}
+-
+-func TestCheckerPackSizesDiscardJoinsPendingResult(t *testing.T) {
+-	ctx, cancel := context.WithCancel(context.Background())
+-	result := make(chan checkerIndexLoadResult, 1)
+-	canceled := make(chan struct{})
+-	release := make(chan struct{})
+-	load := &checkerIndexLoad{repo: &repository.Repository{}, cancel: cancel, result: result, progress: &delayedTerminalCounterFactory{}}
+-	go func() {
+-		// Model size computation that has observed cancellation but still owns
+-		// its state. The final result is not published until it has returned.
+-		<-ctx.Done()
+-		close(canceled)
+-		<-release
+-		result <- checkerIndexLoadResult{packs: &repository.PreparedPackSizes{}}
+-	}()
+-	settled := make(chan struct{})
+-	go func() { load.settle(false); close(settled) }()
+-	<-canceled
+-	select {
+-	case <-settled:
+-		t.Fatal("discard returned before pending size work was joined")
+-	default:
+-	}
+-	close(release)
+-	select {
+-	case <-settled:
+-	case <-time.After(5 * time.Second):
+-		t.Fatal("discard did not join released work")
+-	}
+-	rtest.Assert(t, load.done && !load.used && load.packs == nil && load.progress.target == nil, "discard published/retained speculative state")
+-}
+diff --git a/cmd/restic/check_pending_confirmation_test.go b/cmd/restic/check_pending_confirmation_test.go
+deleted file mode 100644
+index 86b478efdbde62e1812dc70c3e27cada89ac4230..0000000000000000000000000000000000000000
+--- a/cmd/restic/check_pending_confirmation_test.go
++++ /dev/null
+@@ -1,100 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"io"
+-	"sync"
+-	"testing"
+-	"time"
+-
+-	"github.com/restic/restic/internal/backend"
+-	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/repository"
+-	"github.com/restic/restic/internal/restic"
+-)
+-
+-type checkIndexReadGate struct {
+-	backend.Backend
+-	once    sync.Once
+-	entered chan struct{}
+-	resume  chan struct{}
+-}
+-
+-func (g *checkIndexReadGate) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(io.Reader) error) error {
+-	if h.Type == backend.IndexFile {
+-		g.once.Do(func() { close(g.entered) })
+-		select {
+-		case <-g.resume:
+-		case <-ctx.Done():
+-			return ctx.Err()
+-		}
+-	}
+-	return g.Backend.Load(ctx, h, length, offset, fn)
+-}
+-
+-func TestCheckConfirmationWithPendingPreparation(t *testing.T) {
+-	original, _, be := repository.TestRepositoryWithVersion(t, 0)
+-	data.TestCreateSnapshot(t, original, time.Unix(1470492820, 207401672), 1)
+-	gate := &checkIndexReadGate{Backend: be, entered: make(chan struct{}), resume: make(chan struct{})}
+-	repo := repository.TestOpenBackend(t, gate)
+-	repository.TestSetLockTimeout(t, 200*time.Millisecond)
+-	defer repository.TestSetLockTimeout(t, 0)
+-	ctx, cancel := context.WithCancel(context.Background())
+-	defer cancel()
+-	var resume sync.Once
+-	unblock := func() { resume.Do(func() { close(gate.resume) }) }
+-	defer unblock()
+-	started := make(chan *checkerIndexLoad, 1)
+-	type lockResult struct {
+-		unlock func()
+-		err    error
+-	}
+-	finished := make(chan lockResult, 1)
+-	go func() {
+-		unlock, _, err := repository.LockRepoWithWaitWork(ctx, repo, true, 0, func(string) {}, func(string, ...any) {}, func(ctx context.Context) func(bool) {
+-			load := startCheckerIndexLoad(ctx, repo, false, &data.SnapshotFilter{}, nil)
+-			started <- load
+-			return load.settle
+-		})
+-		finished <- lockResult{unlock, err}
+-	}()
+-	var load *checkerIndexLoad
+-	select {
+-	case load = <-started:
+-	case <-time.After(5 * time.Second):
+-		t.Fatal("preparation did not start")
+-	}
+-	select {
+-	case <-gate.entered:
+-	case <-time.After(5 * time.Second):
+-		t.Fatal("index read did not reach gate")
+-	}
+-	var got lockResult
+-	select {
+-	case got = <-finished:
+-	case <-time.After(5 * time.Second):
+-		t.Fatal("confirmation waited for preparation")
+-	}
+-	if got.err != nil {
+-		t.Fatal(got.err)
+-	}
+-	defer got.unlock()
+-	defer load.discard()
+-	select {
+-	case value := <-load.result:
+-		load.result <- value
+-		t.Fatal("blocked index read published a result")
+-	default:
+-	}
+-	if load.done || load.used || load.progress.target != nil {
+-		t.Fatal("pending preparation published effects")
+-	}
+-	unblock()
+-	if err := load.loadSnapshots(); err != nil {
+-		t.Fatal(err)
+-	}
+-	_, errs := load.consume(restic.NoopTerminalCounterFactory)
+-	if len(errs) != 0 || load.packs == nil {
+-		t.Fatalf("pending preparation did not settle: %v", errs)
+-	}
+-}
+diff --git a/cmd/restic/cmd_check.go b/cmd/restic/cmd_check.go
+index 2e2888402e58c332b57f106c90cb27cd34de88dd..9c547dde02292181066180b66b93e99c9fa34232 100644
+--- a/cmd/restic/cmd_check.go
++++ b/cmd/restic/cmd_check.go
+@@ -242,39 +242,22 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
+ 	if !gopts.NoLock {
+ 		printer.P("create exclusive lock for repository\n")
+ 	}
+-	var indexLoad *checkerIndexLoad
+-	ctx, repo, unlock, err := openWithExclusiveLockAndWaitWork(ctx, gopts, gopts.NoLock, printer, checkerIndexWaitWork(&indexLoad, opts.CheckUnused, &opts.SnapshotFilter, args))
++	// check starts no reads during the lock's settle delay: what it reports
++	// must be what is stored once the lock is confirmed (wait_index_load.go).
++	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, gopts.NoLock, printer)
+ 	if err != nil {
+ 		return summary, err
+ 	}
+ 	defer unlock()
+-	if indexLoad != nil {
+-		defer func() {
+-			if !indexLoad.used {
+-				indexLoad.discard()
+-			}
+-		}()
+-	}
+ 
+-	var chkr *checker.Checker
+-	if indexLoad != nil {
+-		err = indexLoad.loadSnapshots()
+-		chkr = indexLoad.checkerForSnapshots()
+-	} else {
+-		chkr = checker.New(repo, opts.CheckUnused)
+-		err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
+-	}
++	chkr := checker.New(repo, opts.CheckUnused)
++	err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
+ 	if err != nil {
+ 		return summary, err
+ 	}
+ 
+ 	printer.P("load indexes\n")
+-	var hints, errs []error
+-	if indexLoad != nil {
+-		hints, errs = indexLoad.consume(printer)
+-	} else {
+-		hints, errs = chkr.LoadIndex(ctx, printer)
+-	}
++	hints, errs := chkr.LoadIndex(ctx, printer)
+ 	if ctx.Err() != nil {
+ 		return summary, ctx.Err()
+ 	}
+@@ -332,12 +315,11 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
+ 	}
+ 
+ 	printer.P("check all packs\n")
+-	if indexLoad != nil {
+-		packs := indexLoad.packs
+-		indexLoad.packs = nil
+-		if opts.ReadData || opts.ReadDataSubset != "" {
+-			readPackSizes = packs.ForReadPacks()
+-		}
++	if opts.ReadData || opts.ReadDataSubset != "" {
++		// the pack sizes the index implies are computed once, for this pass
++		// and for the pass that reads the packs
++		packs := chkr.PreparePackSizes(ctx)
++		readPackSizes = packs.ForReadPacks()
+ 		go chkr.PacksWithPreparedSizes(ctx, packs, errChan)
+ 	} else {
+ 		go chkr.Packs(ctx, errChan)
+diff --git a/cmd/restic/cmd_ls.go b/cmd/restic/cmd_ls.go
+index 5eed8fb735e7cab94e554b19886759d9a04cca6b..0c4fb2f8d583931f5efc81649bdcb976c32bdc71 100644
+--- a/cmd/restic/cmd_ls.go
++++ b/cmd/restic/cmd_ls.go
+@@ -445,7 +445,7 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
+ 	var snapshotLoader restic.LoaderUnpacked = repo
+ 	if !indexLoad.rereadAfterConfirmation() {
+ 		// otherwise everything read during the lock wait was discarded
+-		snapshotLoader = snapshotLoad.get(repo)
++		snapshotLoader = snapshotLoad.get(ctx, repo, snapshotLister)
+ 	}
+ 	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, snapshotLoader, args[0])
+ 	if err != nil {
+diff --git a/cmd/restic/lock_wait_damage_test.go b/cmd/restic/lock_wait_damage_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4612efdbb1fb62d16efec0426bcb3754b714a671
+--- /dev/null
++++ b/cmd/restic/lock_wait_damage_test.go
+@@ -0,0 +1,245 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/global"
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++	rtest "github.com/restic/restic/internal/test"
++)
++
++// damageAtConfirmationBackend damages the repository when the lock code lists
++// the lock files for the second time, that is, at the end of the settle
++// delay. It waits a moment for an index file to have been read first, so that
++// a command which reads the index during the delay has read it undamaged.
++type damageAtConfirmationBackend struct {
++	backend.Backend
++	mu        sync.Mutex
++	lockLists int
++	indexRead chan struct{}
++	readOnce  sync.Once
++	damage    func() error
++}
++
++func (be *damageAtConfirmationBackend) Load(ctx context.Context, h backend.Handle, n int, offset int64, fn func(io.Reader) error) error {
++	err := be.Backend.Load(ctx, h, n, offset, fn)
++	if h.Type == backend.IndexFile && err == nil {
++		be.readOnce.Do(func() { close(be.indexRead) })
++	}
++	return err
++}
++
++func (be *damageAtConfirmationBackend) List(ctx context.Context, typ backend.FileType, fn func(backend.FileInfo) error) error {
++	if typ == backend.LockFile {
++		be.mu.Lock()
++		be.lockLists++
++		second := be.lockLists == 2
++		be.mu.Unlock()
++		if second {
++			select {
++			case <-be.indexRead:
++			case <-ctx.Done():
++				return ctx.Err()
++			case <-time.After(500 * time.Millisecond):
++				// nothing reads the index during the delay
++			}
++			if err := be.damage(); err != nil {
++				return err
++			}
++		}
++	}
++	return be.Backend.List(ctx, typ, fn)
++}
++
++// TestCheckReportsIndexDamagedBeforeLockConfirmation is the red team's test
++// (seat 1 R1, seat 2 finding 2) at the level of the command, with the
++// production settle delay: an index file that is cut short, or changed in
++// place, before the exclusive lock is confirmed must be reported by check, as
++// it is by stock, which reads the index after confirmation.
++func TestCheckReportsIndexDamagedBeforeLockConfirmation(t *testing.T) {
++	for _, cache := range []bool{false, true} {
++		for _, damage := range []string{"truncate", "same-size bit flip"} {
++			t.Run(fmt.Sprintf("cache-%v/%s", cache, damage), func(t *testing.T) {
++				checkReportsIndexDamagedBeforeLockConfirmation(t, cache, damage)
++			})
++		}
++	}
++}
++
++func checkReportsIndexDamagedBeforeLockConfirmation(t *testing.T, cache bool, damage string) {
++	env, cleanup := withTestEnvironment(t)
++	defer cleanup()
++	env.gopts.NoCache = true
++	env.gopts.BackendTestHook = nil
++	testRunInit(t, env.gopts)
++	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, opts global.Options) error {
++		writer, err := global.OpenRepository(ctx, opts, restic.NewNoopPrinter())
++		if err != nil {
++			return err
++		}
++		_, err = schedStoreSnapshot(ctx, writer, 44, []int{0}, time.Now())
++		return err
++	}))
++	entries, err := os.ReadDir(filepath.Join(env.repo, "index"))
++	rtest.OK(t, err)
++	var indexPath string
++	for _, entry := range entries {
++		if _, err := restic.ParseID(entry.Name()); err == nil {
++			indexPath = filepath.Join(env.repo, "index", entry.Name())
++		}
++	}
++	if indexPath == "" {
++		t.Fatal("backup wrote no index file")
++	}
++	gate := &damageAtConfirmationBackend{indexRead: make(chan struct{}), damage: func() error {
++		if err := os.Chmod(indexPath, 0o600); err != nil {
++			return err
++		}
++		if damage == "truncate" {
++			return os.Truncate(indexPath, 1)
++		}
++		raw, err := os.ReadFile(indexPath)
++		if err != nil {
++			return err
++		}
++		raw[len(raw)/2] ^= 1
++		return os.WriteFile(indexPath, raw, 0o600)
++	}}
++	env.gopts.BackendTestHook = func(be backend.Backend) (backend.Backend, error) {
++		gate.Backend = be
++		return gate, nil
++	}
++	env.gopts.Quiet = false
++	env.gopts.Verbosity = 1
++	env.gopts.NoCache = !cache
++	repository.TestSetLockTimeout(t, 200*time.Millisecond)
++	defer repository.TestSetLockTimeout(t, 0)
++	stdout, stderr, checkError := testRunCheckOutput(t, env.gopts, false)
++
++	// the same command once more, on the repository as it is now
++	env.gopts.BackendTestHook = nil
++	repository.TestSetLockTimeout(t, 0)
++	_, _, freshError := testRunCheckOutput(t, env.gopts, false)
++	if freshError == nil {
++		t.Fatal("control accepted the damaged index")
++	}
++	if checkError == nil {
++		t.Fatalf("check --read-data returned success for an index damaged before lock confirmation; stdout=%q, stderr=%q", stdout, stderr)
++	}
++	if checkError.Error() != freshError.Error() {
++		t.Fatalf("check returned %q, a check after the damage returns %q", checkError, freshError)
++	}
++}
++
++// For the commands that keep the index read during the settle delay, an index
++// file that is listed with another size once the lock is confirmed is not the
++// file that was read: everything is read again, and the command fails as a
++// load after confirmation fails.
++func TestLockWaitReadsRejectResizedIndexFile(t *testing.T) {
++	for _, version := range []uint{1, 2} {
++		t.Run(fmt.Sprintf("version-%d", version), func(t *testing.T) {
++			ctx := context.Background()
++			writer, shared := repository.TestRepositoryWithBackend(t, nil, version, repository.Options{})
++			_, err := schedStoreSnapshot(ctx, writer, 42, []int{0}, time.Now())
++			rtest.OK(t, err)
++			repo, err := schedOpenRepository(ctx, shared)
++			rtest.OK(t, err)
++
++			load := startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
++			defer load.discard()
++			deadline := time.After(5 * time.Second)
++			for len(load.result) == 0 {
++				select {
++				case <-deadline:
++					t.Fatal("the index load of the wait did not finish")
++				default:
++					time.Sleep(time.Millisecond)
++				}
++			}
++
++			var target backend.Handle
++			rtest.OK(t, shared.List(ctx, backend.IndexFile, func(fi backend.FileInfo) error {
++				target = backend.Handle{Type: backend.IndexFile, Name: fi.Name}
++				return nil
++			}))
++			var raw []byte
++			rtest.OK(t, shared.Load(ctx, target, 0, 0, func(rd io.Reader) (err error) {
++				raw, err = io.ReadAll(rd)
++				return err
++			}))
++			rtest.OK(t, shared.Remove(ctx, target))
++			rtest.OK(t, shared.Save(ctx, target, backend.NewByteReader(raw[:len(raw)/2], shared.Hasher())))
++
++			load.settle(true)
++			_ = load.snapshotLister(repo)
++			got := load.consume(restic.NoopTerminalCounterFactory)
++
++			fresh, err := schedOpenRepository(ctx, shared)
++			rtest.OK(t, err)
++			want := fresh.LoadIndex(ctx, restic.NoopTerminalCounterFactory)
++			if want == nil {
++				t.Fatal("control loaded the index file that was cut short")
++			}
++			if got == nil || got.Error() != want.Error() {
++				t.Fatalf("the command gets %v, a load after confirmation gets %v", got, want)
++			}
++			if !load.rereadAfterConfirmation() {
++				t.Fatal("the index read during the wait was not discarded")
++			}
++		})
++	}
++}
++
++type fixedSnapshotList map[restic.ID]int64
++
++func (l fixedSnapshotList) List(_ context.Context, t restic.FileType, fn func(restic.ID, int64) error) error {
++	if t != restic.SnapshotFile {
++		return nil
++	}
++	for id, size := range l {
++		if err := fn(id, size); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++type namedLoader struct {
++	restic.LoaderUnpacked
++	name string
++}
++
++// The snapshot file ls reads during the settle delay is served only when the
++// listing taken after confirmation lists it with the size it was read with.
++func TestPreparedSnapshotKeptOnlyWithListedSize(t *testing.T) {
++	id := restic.Hash([]byte("snapshot"))
++	other := restic.Hash([]byte("other"))
++	prepared := &namedLoader{name: "prepared"}
++	fallback := &namedLoader{name: "fallback"}
++	for _, test := range []struct {
++		name   string
++		listed fixedSnapshotList
++		want   *namedLoader
++	}{
++		{"same size", fixedSnapshotList{id: 100, other: 7}, prepared},
++		{"shorter", fixedSnapshotList{id: 99}, fallback},
++		{"longer", fixedSnapshotList{id: 101}, fallback},
++		{"gone", fixedSnapshotList{other: 100}, fallback},
++	} {
++		done := make(chan struct{})
++		close(done)
++		p := &snapshotMetadataLoad{cancel: func() {}, done: done, loader: prepared, id: id, size: 100, prepared: true}
++		if got := p.get(context.Background(), fallback, test.listed); got != restic.LoaderUnpacked(test.want) {
++			t.Errorf("%s: got the %s loader, want the %s loader", test.name, got.(*namedLoader).name, test.want.name)
++		}
++	}
++}
+diff --git a/cmd/restic/lock_wait_duration_test.go b/cmd/restic/lock_wait_duration_test.go
+index fc8b060e7e14061d958cf8ffa4f7201cba7901f2..4bfb6ce86a7a7f8ea2578d15539c2a03dc5eaa73 100644
+--- a/cmd/restic/lock_wait_duration_test.go
++++ b/cmd/restic/lock_wait_duration_test.go
+@@ -281,7 +281,7 @@ func TestLockWaitIsNeverShortened(t *testing.T) {
+ 						if sc.competitorAt != 0 && !repository.IsAlreadyLocked(lockErr) {
+ 							t.Errorf("lock refused with %v, want an already-locked error", lockErr)
+ 						}
+-						if c.backupLoad != nil || c.indexLoad != nil || c.checkLoad != nil {
++						if c.backupLoad != nil || c.indexLoad != nil {
+ 							t.Errorf("a refused lock attempt left prepared state behind in the command")
+ 						}
+ 					}
+diff --git a/cmd/restic/lock_wait_schedule_test.go b/cmd/restic/lock_wait_schedule_test.go
+index 6d23428e7389550b18e85087051319979e77ee7f..651143d4918935578cf4262296a8416905e40f2e 100644
+--- a/cmd/restic/lock_wait_schedule_test.go
++++ b/cmd/restic/lock_wait_schedule_test.go
+@@ -13,8 +13,8 @@ package main
+ // What is real and what is a model:
+ //   - real: the lock code (repository.LockRepo / LockRepoWithWaitWork), the
+ //     wait work of each command and what the command does with it after the
+-//     lock call (backupIndexWaitWork, repositoryIndexWaitWork,
+-//     checkerIndexWaitWork and their methods), the repository (index, packs,
++//     lock call (backupIndexWaitWork, repositoryIndexWaitWork and their
++//     methods; check has no wait work), the repository (index, packs,
+ //     deduplication), prune (runPruneWithRepoAndIndexLoad) and the checker;
+ //   - model: the rest of each command. backup stores a fixed list of blobs, a
+ //     tree and a snapshot; restore reads every blob of the newest snapshot;
+@@ -753,7 +753,6 @@ type schedCommand struct {
+ 
+ 	backupLoad *backupIndexLoad
+ 	indexLoad  *repositoryIndexLoad
+-	checkLoad  *checkerIndexLoad
+ 
+ 	snapshots map[restic.ID]*data.Snapshot
+ 	chkr      *checker.Checker
+@@ -769,10 +768,8 @@ func (c *schedCommand) waitWork() func(context.Context, *repository.Repository)
+ 		return repositoryIndexWaitWork(&c.indexLoad, true) // cmd_restore.go, cmd_forget.go
+ 	case schedPrune:
+ 		return repositoryIndexWaitWork(&c.indexLoad, false) // cmd_prune.go
+-	case schedCheck:
+-		return checkerIndexWaitWork(&c.checkLoad, false, &data.SnapshotFilter{}, nil) // cmd_check.go
+ 	}
+-	return nil // forget without --prune
++	return nil // forget without --prune; check reads nothing during the wait
+ }
+ 
+ // read is what the command reads between the lock call and its changes, in
+@@ -820,22 +817,12 @@ func (c *schedCommand) read(ctx context.Context) error {
+ 			err = repo.LoadIndex(ctx, noProgress)
+ 		}
+ 	case schedCheck:
+-		if c.checkLoad != nil {
+-			err = c.checkLoad.loadSnapshots()
+-			c.chkr = c.checkLoad.checkerForSnapshots()
+-		} else {
+-			c.chkr = checker.New(repo, false)
+-			err = c.chkr.LoadSnapshots(ctx, &data.SnapshotFilter{}, nil)
+-		}
++		c.chkr = checker.New(repo, false)
++		err = c.chkr.LoadSnapshots(ctx, &data.SnapshotFilter{}, nil)
+ 		if err != nil {
+ 			return fmt.Errorf("loading snapshots: %w", err)
+ 		}
+-		var errs []error
+-		if c.checkLoad != nil {
+-			_, errs = c.checkLoad.consume(noProgress)
+-		} else {
+-			_, errs = c.chkr.LoadIndex(ctx, noProgress)
+-		}
++		_, errs := c.chkr.LoadIndex(ctx, noProgress)
+ 		if len(errs) > 0 {
+ 			err = fmt.Errorf("loading the index: %v", errs)
+ 		}
+@@ -887,13 +874,7 @@ func (c *schedCommand) change(ctx context.Context) error {
+ 		return nil
+ 	case schedCheck:
+ 		errChan := make(chan error)
+-		if c.checkLoad != nil {
+-			packs := c.checkLoad.packs
+-			c.checkLoad.packs = nil
+-			go c.chkr.PacksWithPreparedSizes(ctx, packs, errChan)
+-		} else {
+-			go c.chkr.Packs(ctx, errChan)
+-		}
++		go c.chkr.Packs(ctx, errChan)
+ 		for err := range errChan {
+ 			c.checkErrs = append(c.checkErrs, err)
+ 		}
+@@ -917,9 +898,6 @@ func (c *schedCommand) discard() {
+ 	if c.indexLoad != nil && !c.indexLoad.used {
+ 		c.indexLoad.discard()
+ 	}
+-	if c.checkLoad != nil && !c.checkLoad.used {
+-		c.checkLoad.discard()
+-	}
+ }
+ 
+ func (r *schedRun) runProc(ctx context.Context, p *schedProc) {
+diff --git a/cmd/restic/snapshot_metadata_wait.go b/cmd/restic/snapshot_metadata_wait.go
+index d22bca32152a8c2d56cc02ffabe4a8a1420ef745..fb22f0648a839ca882437b38445b85f383153bf8 100644
+--- a/cmd/restic/snapshot_metadata_wait.go
++++ b/cmd/restic/snapshot_metadata_wait.go
+@@ -14,6 +14,10 @@ type snapshotMetadataLoad struct {
+ 	cancel context.CancelFunc
+ 	done   chan struct{}
+ 	loader restic.LoaderUnpacked
++	// the snapshot file that was read, and its size
++	id       restic.ID
++	size     int64
++	prepared bool
+ }
+ 
+ func startSnapshotMetadataLoad(ctx context.Context, repo *repository.Repository, load *repositoryIndexLoad, request string) *snapshotMetadataLoad {
+@@ -35,6 +39,7 @@ func startSnapshotMetadataLoad(ctx context.Context, repo *repository.Repository,
+ 		id, size, ok := snapshotMetadataTarget(ctx, load.snapshots.lister, request)
+ 		if ok {
+ 			p.loader = repo.PrepareSnapshot(ctx, id, size)
++			p.id, p.size, p.prepared = id, size, p.loader != restic.LoaderUnpacked(repo)
+ 		}
+ 	}()
+ 	return p
+@@ -57,11 +62,29 @@ func snapshotMetadataTarget(ctx context.Context, list restic.Lister, request str
+ 	return target, size, err == nil && matches == 1 && size > 0 && size <= repository.PreparedSnapshotLimit
+ }
+ 
+-func (p *snapshotMetadataLoad) get(fallback restic.LoaderUnpacked) restic.LoaderUnpacked {
++// get returns the loader that serves the snapshot read during the wait, or
++// fallback. The snapshot is served only if confirmed, the listing taken after
++// the lock was confirmed, lists it with the size it was read with: its name is
++// the hash of what was read, the size is what is known about the file as it
++// is stored now.
++func (p *snapshotMetadataLoad) get(ctx context.Context, fallback restic.LoaderUnpacked, confirmed restic.Lister) restic.LoaderUnpacked {
+ 	if p == nil {
+ 		return fallback
+ 	}
+ 	<-p.done
++	if !p.prepared {
++		return p.loader
++	}
++	same := false
++	err := confirmed.List(ctx, restic.SnapshotFile, func(id restic.ID, size int64) error {
++		if id == p.id && size == p.size {
++			same = true
++		}
++		return nil
++	})
++	if err != nil || !same {
++		return fallback
++	}
+ 	return p.loader
+ }
+ 
+diff --git a/cmd/restic/wait_index_load.go b/cmd/restic/wait_index_load.go
+index 16b044c71659401c58efba04e110065455722dce..8f0f8015180a29af0c78d78a6dd058917125547a 100644
+--- a/cmd/restic/wait_index_load.go
++++ b/cmd/restic/wait_index_load.go
+@@ -3,8 +3,6 @@ package main
+ import (
+ 	"context"
+ 
+-	"github.com/restic/restic/internal/checker"
+-	"github.com/restic/restic/internal/data"
+ 	"github.com/restic/restic/internal/errors"
+ 	"github.com/restic/restic/internal/repository"
+ 	"github.com/restic/restic/internal/restic"
+@@ -23,13 +21,23 @@ import (
+ //   - The command always works with the snapshot listing taken after
+ //     confirmation.
+ //   - The index loaded during the wait is kept only if every index file it was
+-//     built from is still listed. Index files are named by the hash of their
+-//     content, so the same names mean the same content, and the index in memory
+-//     is then exactly what a load after confirmation would produce. Index files
+-//     added in the meantime are loaded in addition.
+-//   - If a snapshot file or an index file read during the wait is gone, or if
+-//     any read during the wait failed, everything read during the wait is
+-//     discarded and read again as stock does: snapshots, then the index.
++//     built from is still listed, with the size it was listed with when it was
++//     loaded. Index files added in the meantime are loaded in addition.
++//   - If a snapshot file or an index file read during the wait is gone or has
++//     another size, or if any read during the wait failed, everything read
++//     during the wait is discarded and read again as stock does: snapshots,
++//     then the index.
++//
++// A name is the hash of the content that was read during the wait. It does
++// not say what is stored under that name now: a file that was damaged in
++// between keeps its name. The size catches a file that was cut short or
++// replaced by one of another length; it does not catch damage that leaves the
++// length alone, which only reading the file again does. Commands that work
++// with the index accept that for the index files: stock reads them through
++// the cache as well and does not see such damage either unless the cache is
++// off. check does not: its purpose is to read what is stored, so check starts
++// no reads during the wait and reads the snapshots and the index after the
++// lock is confirmed, as stock does.
+ type lockWaitVerdict int
+ 
+ const (
+@@ -94,9 +102,9 @@ func validateLockWaitReads(ctx context.Context, repo *repository.Repository, wai
+ 	if err != nil {
+ 		return rereadLockWaitReads, nil
+ 	}
+-	loaded := repo.LoadedIndexIDs()
+-	for id := range loaded {
+-		if _, ok := listed[id]; !ok {
++	for id, size := range repo.LoadedIndexFiles() {
++		// kept only when it is listed now as it was listed when it was loaded
++		if now, ok := listed[id]; !ok || size < 0 || now != size {
+ 			return rereadLockWaitReads, nil
+ 		}
+ 		delete(listed, id)
+@@ -337,187 +345,3 @@ func (load *repositoryIndexLoad) discard() {
+ 	load.join()
+ 	load.repo.DiscardIndex()
+ }
+-
+-type checkerIndexLoadResult struct {
+-	hints []error
+-	errs  []error
+-	packs *repository.PreparedPackSizes
+-	// failed is set when the snapshot listing taken during the wait failed
+-	failed bool
+-}
+-
+-// checkerIndexLoad prepares check's checker-specific index pass during the
+-// settle delay. The snapshot files are listed first, keeping the stock
+-// listing order. After the lock is confirmed the prepared pass is kept only
+-// if the snapshot and index files are still the ones read during the wait;
+-// otherwise check loads everything again exactly as stock does. Progress
+-// remains buffered until the command consumes the prepared result.
+-type checkerIndexLoad struct {
+-	ctx         context.Context // the lock's context
+-	loadCtx     context.Context
+-	repo        *repository.Repository
+-	checker     *checker.Checker
+-	trackUnused bool
+-	filter      *data.SnapshotFilter
+-	args        []string
+-	cancel      context.CancelFunc
+-	result      chan checkerIndexLoadResult
+-	progress    *delayedTerminalCounterFactory
+-	snapshots   *preparedSnapshots  // listed during the wait; only compared
+-	validation  *lockWaitValidation // exists once the lock is confirmed
+-	value       checkerIndexLoadResult
+-	packs       *repository.PreparedPackSizes
+-	done        bool
+-	used        bool
+-	reread      bool
+-}
+-
+-func startCheckerIndexLoad(ctx context.Context, repo *repository.Repository, trackUnused bool, snapshotFilter *data.SnapshotFilter, args []string) *checkerIndexLoad {
+-	loadCtx, cancel := context.WithCancel(ctx)
+-	chkr := checker.New(repo, trackUnused)
+-	load := &checkerIndexLoad{
+-		ctx:         ctx,
+-		loadCtx:     loadCtx,
+-		repo:        repo,
+-		checker:     chkr,
+-		trackUnused: trackUnused,
+-		filter:      snapshotFilter,
+-		args:        args,
+-		cancel:      cancel,
+-		result:      make(chan checkerIndexLoadResult, 1),
+-		progress:    &delayedTerminalCounterFactory{},
+-		snapshots:   newPreparedSnapshots(),
+-	}
+-	go func() {
+-		load.snapshots.list(loadCtx, repo)
+-		if load.snapshots.err != nil {
+-			load.result <- checkerIndexLoadResult{failed: true}
+-			return
+-		}
+-		hints, errs := chkr.LoadIndex(loadCtx, load.progress)
+-		var packs *repository.PreparedPackSizes
+-		if len(errs) == 0 && loadCtx.Err() == nil {
+-			packs = chkr.PreparePackSizes(loadCtx)
+-		}
+-		load.result <- checkerIndexLoadResult{hints: hints, errs: errs, packs: packs}
+-	}()
+-	return load
+-}
+-
+-// checkerIndexWaitWork returns the wait work of check. See
+-// repositoryIndexWaitWork for target.
+-func checkerIndexWaitWork(target **checkerIndexLoad, trackUnused bool, snapshotFilter *data.SnapshotFilter, args []string) func(context.Context, *repository.Repository) func(bool) {
+-	return func(ctx context.Context, repo *repository.Repository) func(bool) {
+-		load := startCheckerIndexLoad(ctx, repo, trackUnused, snapshotFilter, args)
+-		*target = load
+-		return func(confirmed bool) {
+-			load.settle(confirmed)
+-			if !confirmed && *target == load {
+-				*target = nil
+-			}
+-		}
+-	}
+-}
+-
+-func (load *checkerIndexLoad) settle(confirmed bool) {
+-	if load == nil || load.done {
+-		return
+-	}
+-	if !confirmed {
+-		load.discard()
+-		return
+-	}
+-	load.confirm()
+-}
+-
+-// confirm starts the comparison with the repository as it is now. It must not
+-// be called before the lock is confirmed.
+-func (load *checkerIndexLoad) confirm() {
+-	if load.validation != nil {
+-		return
+-	}
+-	load.validation = startLockWaitValidation(load.loadCtx, load.repo, load.snapshots, func() error {
+-		load.value = <-load.result
+-		if load.value.failed || len(load.value.errs) > 0 || load.value.packs == nil {
+-			// Errors met during the wait are not reported: the index is
+-			// read again after confirmation and reported from there.
+-			return errLockWaitSnapshotListing
+-		}
+-		return nil
+-	})
+-}
+-
+-func (load *checkerIndexLoad) join() {
+-	if load.done {
+-		return
+-	}
+-	if load.validation != nil {
+-		<-load.validation.done
+-	} else {
+-		<-load.result
+-	}
+-	load.done = true
+-}
+-
+-// decide waits for the comparison made after the lock was confirmed and
+-// discards the prepared index pass unless it is still exact.
+-func (load *checkerIndexLoad) decide() {
+-	if load.done {
+-		return
+-	}
+-	load.confirm()
+-	load.join()
+-	// An added index file would need the checker's per-file bookkeeping to
+-	// be extended; check simply runs its index pass again in that case.
+-	if load.validation.verdict != keepLockWaitReads {
+-		load.reread = true
+-		load.value = checkerIndexLoadResult{}
+-		load.repo.DiscardIndex()
+-		// the blob set of a checker is bound to the index it was created on
+-		load.checker = checker.New(load.repo, load.trackUnused)
+-	}
+-}
+-
+-// loadSnapshots hands the snapshot listing taken after the lock was confirmed
+-// to the checker and returns the error of that listing at the position of
+-// stock's LoadSnapshots call.
+-func (load *checkerIndexLoad) loadSnapshots() error {
+-	load.decide()
+-	listed := load.validation.snapshots
+-	if listed.err != nil {
+-		// list again and report the error as stock does
+-		return load.checker.LoadSnapshots(load.ctx, load.filter, load.args)
+-	}
+-	return load.checker.LoadSnapshotsFromList(load.ctx, listed.lister, load.filter, load.args)
+-}
+-
+-// checkerForSnapshots returns the checker to continue with. It is valid after
+-// loadSnapshots.
+-func (load *checkerIndexLoad) checkerForSnapshots() *checker.Checker {
+-	return load.checker
+-}
+-
+-func (load *checkerIndexLoad) consume(printer restic.TerminalCounterFactory) ([]error, []error) {
+-	load.decide()
+-	load.used = true
+-	defer load.cancel()
+-	if load.reread {
+-		return load.checker.LoadIndex(load.ctx, printer)
+-	}
+-	load.progress.activate(printer)
+-	value := load.value
+-	load.value = checkerIndexLoadResult{}
+-	load.packs = value.packs
+-	return value.hints, value.errs
+-}
+-
+-func (load *checkerIndexLoad) discard() {
+-	if load == nil {
+-		return
+-	}
+-	load.cancel()
+-	load.join()
+-	load.packs = nil
+-	load.value = checkerIndexLoadResult{}
+-	load.repo.DiscardIndex()
+-}
+diff --git a/cmd/restic/wait_index_load_test.go b/cmd/restic/wait_index_load_test.go
+index 259facf8fb90fbb3b13c38af32dcbccff0306a1c..31811894a3bcb742b4bea73f1981ecec66e67bf3 100644
+--- a/cmd/restic/wait_index_load_test.go
++++ b/cmd/restic/wait_index_load_test.go
+@@ -145,39 +145,3 @@ func TestRepositoryIndexLoadCancelsAndDrainsOnFailedLockConfirmation(t *testing.
+ 	default:
+ 	}
+ }
+-
+-func TestCheckerIndexLoadCancelsAndDrainsOnFailedLockConfirmation(t *testing.T) {
+-	ctx, cancel := context.WithCancel(context.Background())
+-	result := make(chan checkerIndexLoadResult, 1)
+-	workDone := make(chan struct{})
+-	go func() {
+-		<-ctx.Done()
+-		close(workDone)
+-		result <- checkerIndexLoadResult{}
+-	}()
+-
+-	load := &checkerIndexLoad{
+-		repo:     &repository.Repository{},
+-		cancel:   cancel,
+-		result:   result,
+-		progress: &delayedTerminalCounterFactory{},
+-	}
+-	load.settle(false)
+-
+-	if !load.done || load.used {
+-		t.Fatalf("failed lock settlement state = done:%v used:%v, want done and unused", load.done, load.used)
+-	}
+-	if ctx.Err() != context.Canceled {
+-		t.Fatalf("wait-work context error = %v, want context.Canceled", ctx.Err())
+-	}
+-	select {
+-	case <-workDone:
+-	default:
+-		t.Fatal("failed lock settlement returned before checker index work drained")
+-	}
+-	select {
+-	case <-result:
+-		t.Fatal("checker index result was not discarded")
+-	default:
+-	}
+-}
+diff --git a/internal/checker/snapshot_list.go b/internal/checker/snapshot_list.go
+deleted file mode 100644
+index 944b29ce28fac404accba660c0f17c4c2a0b4576..0000000000000000000000000000000000000000
+--- a/internal/checker/snapshot_list.go
++++ /dev/null
+@@ -1,18 +0,0 @@
+-package checker
+-
+-import (
+-	"context"
+-
+-	"github.com/restic/restic/internal/data"
+-	"github.com/restic/restic/internal/restic"
+-)
+-
+-// LoadSnapshotsFromList is LoadSnapshots for a caller that has already listed
+-// the snapshot files: it takes the listing instead of listing them again.
+-func (c *Checker) LoadSnapshotsFromList(ctx context.Context, list restic.Lister, snapshotFilter *data.SnapshotFilter, args []string) error {
+-	var err error
+-	c.snapshots, err = restic.MemorizeList(ctx, list, restic.SnapshotFile)
+-	c.args = args
+-	c.snapshotFilter = snapshotFilter
+-	return err
+-}
+diff --git a/internal/repository/index/index_rewrite_keep.go b/internal/repository/index/index_rewrite_keep.go
+index 01d563be9a8268836586ba1809ffe5bf68497da8..51bc431127bd26eb1ddeeea6b9f179cbd1722ee0 100644
+--- a/internal/repository/index/index_rewrite_keep.go
++++ b/internal/repository/index/index_rewrite_keep.go
+@@ -19,13 +19,16 @@ import (
+ type indexFileNote struct {
+ 	packs  restic.IDs
+ 	counts [restic.NumBlobTypes]uint
++	// size is the size with which the file was listed when it was loaded, or
++	// -1 for a file this process has written
++	size int64
+ }
+ 
+ // noteIndexFile remembers the packs and blob counts of the index file id.
+ // idx must hold exactly the content of that file.
+-func (mi *MasterIndex) noteIndexFile(id restic.ID, idx *Index) {
++func (mi *MasterIndex) noteIndexFile(id restic.ID, idx *Index, size int64) {
+ 	idx.m.RLock()
+-	note := indexFileNote{packs: slices.Clone(idx.packs)}
++	note := indexFileNote{packs: slices.Clone(idx.packs), size: size}
+ 	for typ := range idx.byType {
+ 		note.counts[typ] = idx.byType[typ].len()
+ 	}
+@@ -116,3 +119,22 @@ func verifyKeptIndexFile(ctx context.Context, repo rawIndexFileLoader, id restic
+ 	_, err := repo.LoadRaw(ctx, restic.IndexFile, id)
+ 	return err
+ }
++
++// LoadedFileSizes returns the index files whose content makes up the index
++// held in memory, each with the size with which it was listed when it was
++// loaded. The size is -1 for a file that was not loaded from a listing.
++func (mi *MasterIndex) LoadedFileSizes() map[restic.ID]int64 {
++	ids := mi.IDs()
++
++	mi.idxMutex.RLock()
++	defer mi.idxMutex.RUnlock()
++	sizes := make(map[restic.ID]int64, len(ids))
++	for id := range ids {
++		if note, ok := mi.fileNotes[id]; ok {
++			sizes[id] = note.size
++		} else {
++			sizes[id] = -1
++		}
++	}
++	return sizes
++}
+diff --git a/internal/repository/index/master_index.go b/internal/repository/index/master_index.go
+index 04452eff9fb8c697484dd4b09313970d9fb227fa..43e0d039c9d4ede2abca37fb0b6502386aee9dbf 100644
+--- a/internal/repository/index/master_index.go
++++ b/internal/repository/index/master_index.go
+@@ -309,12 +309,15 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked,
+ 		return err
+ 	}
+ 	var numIndexFiles uint64
+-	err = indexList.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
++	// the sizes with which the files to load are listed, for their notes
++	listedSizes := make(map[restic.ID]int64)
++	err = indexList.List(ctx, restic.IndexFile, func(id restic.ID, size int64) error {
+ 		if loadedIDs.Has(id) {
+ 			// skip already loaded indexes
+ 			return nil
+ 		}
+ 		numIndexFiles++
++		listedSizes[id] = size
+ 		return nil
+ 	})
+ 	if err != nil {
+@@ -341,7 +344,11 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked,
+ 		if idx == nil {
+ 			return nil
+ 		}
+-		mi.noteIndexFile(id, idx)
++		size, listed := listedSizes[id]
++		if !listed {
++			size = -1
++		}
++		mi.noteIndexFile(id, idx, size)
+ 		if cb == nil && len(loadedIDs) == 0 && firstOwned == nil {
+ 			firstOwned = idx
+ 		}
+@@ -692,7 +699,7 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r restic.SaverUnpacked[res
+ 		if err != nil {
+ 			return err
+ 		}
+-		mi.noteIndexFile(sid, idx)
++		mi.noteIndexFile(sid, idx, -1)
+ 
+ 		debug.Log("Saved index %d as %v", i, sid)
+ 	}
+diff --git a/internal/repository/index_loaded_ids.go b/internal/repository/index_loaded_ids.go
+index 1840f267800434f0599189ec1ab5a7939fb9463d..c5944b0d2607788cd2e77159a1be4536a7d68808 100644
+--- a/internal/repository/index_loaded_ids.go
++++ b/internal/repository/index_loaded_ids.go
+@@ -16,6 +16,15 @@ func (r *Repository) LoadedIndexIDs() restic.IDSet {
+ 	return r.idx.IDs()
+ }
+ 
++// LoadedIndexFiles returns the index files of LoadedIndexIDs, each with the
++// size with which it was listed when it was loaded (-1 when it was not loaded
++// from a listing). A name is the hash of the content that was read, but it
++// says nothing about what is stored under that name now; a caller that
++// compares names compares these sizes with a new listing as well.
++func (r *Repository) LoadedIndexFiles() map[restic.ID]int64 {
++	return r.idx.LoadedFileSizes()
++}
++
+ // LoadAddedIndexFiles loads the index files in added (ID to size, as listed)
+ // into the index held in memory. The result is what LoadIndex produces for
+ // the loaded and the added files together, but the files that are already

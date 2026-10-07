@@ -1,0 +1,1604 @@
+From a7db625564c4925ce29cd8bd5bb3459505cdc3cc Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:38:32 +0000
+Subject: [PATCH 10/49] R10 (1/2): gofmt for the league's files under internal
+
+gofmt -w on the 24 files under internal/ that the league added or changed
+and that gofmt -l listed (6 non-test, 18 test files). Whitespace, line
+breaks between statements and the order of two imports in one test file;
+no token changes otherwise.
+
+Not touched: internal/backend/s3/s3_test.go (identical to stock, where
+gofmt -l lists it too) and two files under cmd/restic, which another repair
+owns: check_structure_overlap.go and backup_progress_publication_test.go.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/archiver/file_saver.go               |  16 +-
+ internal/archiver/parent_finder_test.go       |   2 +-
+ .../index/associated_position_merge_test.go   |  10 +-
+ .../index/index_decode_canonical_stream.go    | 134 ++++++-----
+ .../index_decode_canonical_stream_test.go     |  99 +++++---
+ .../index/index_load_concurrency_test.go      |   4 +-
+ internal/repository/index/index_merge_test.go |   2 +-
+ .../index/index_reservation_test.go           |   2 +-
+ .../index/index_reserve_slots_test.go         |  26 ++-
+ .../repository/index/index_rewrite_saved.go   |  10 +-
+ .../index/index_rewrite_saved_test.go         |   4 +-
+ .../index/index_stream_adoption_test.go       | 109 +++++----
+ .../index/merge_growth_boundary_test.go       |   4 +-
+ .../index/representation_stages_test.go       |  56 +++--
+ .../index/rewrite_identity_probe_test.go      |  34 ++-
+ .../index/rewrite_interruption_test.go        |  72 ++++--
+ .../repository/index_load_ordinary_stream.go  |  78 ++++---
+ .../index_load_ordinary_stream_test.go        | 216 +++++++++++-------
+ internal/repository/packer_manager.go         |   6 +-
+ internal/repository/repack_test.go            |  24 +-
+ .../repository/save_verify_compressed_test.go |  66 ++++--
+ internal/ui/backup/progress.go                |   8 +-
+ internal/ui/backup/progress_scan_test.go      |   5 +-
+ internal/ui/termstatus/status.go              |  16 +-
+ 24 files changed, 634 insertions(+), 369 deletions(-)
+
+diff --git a/internal/archiver/file_saver.go b/internal/archiver/file_saver.go
+index 789caf7a31e3249323df80c5b9e82c5bc35b100d..2c727063266a7f40c66569186ef4d322b083d38e 100644
+--- a/internal/archiver/file_saver.go
++++ b/internal/archiver/file_saver.go
+@@ -127,14 +127,14 @@ type saveFileJob struct {
+ }
+ 
+ type fileChunkState struct {
+-	readBuf []byte
+-	bpos    uint
+-	bmax    uint
+-	closed  bool
+-	guided  *parentCutReader
+-	ctx     context.Context
+-	chunkID restic.ID
+-	hashed  bool
++	readBuf        []byte
++	bpos           uint
++	bmax           uint
++	closed         bool
++	guided         *parentCutReader
++	ctx            context.Context
++	chunkID        restic.ID
++	hashed         bool
+ 	ordinaryHashes *parentPairHashLane
+ }
+ 
+diff --git a/internal/archiver/parent_finder_test.go b/internal/archiver/parent_finder_test.go
+index 223f40d68f88e5c6ea4af79a84402dee01bee7bd..8ab2cbc8f0eb08c5a878f7a21d9ade0d4db40e7b 100644
+--- a/internal/archiver/parent_finder_test.go
++++ b/internal/archiver/parent_finder_test.go
+@@ -9,7 +9,7 @@ import (
+ 	"github.com/restic/restic/internal/restic"
+ )
+ 
+-type finderPayloadLoader struct { payload []byte }
++type finderPayloadLoader struct{ payload []byte }
+ 
+ func (l *finderPayloadLoader) LoadBlob(_ context.Context, _ restic.BlobHandle, _ []byte) ([]byte, error) {
+ 	return l.payload, nil
+diff --git a/internal/repository/index/associated_position_merge_test.go b/internal/repository/index/associated_position_merge_test.go
+index dceb0d9004bdfd930471b44f986b466fb76bfd0d..ab7687e7db6300091490decc72cf07a2003f7f75 100644
+--- a/internal/repository/index/associated_position_merge_test.go
++++ b/internal/repository/index/associated_position_merge_test.go
+@@ -182,7 +182,7 @@ type mergeTestRepo struct {
+ 	restic.Unpacked[restic.FileType]
+ 	files  map[restic.ID][]byte
+ 	loaded map[restic.ID]int
+-	saved restic.IDSet
++	saved  restic.IDSet
+ 	m      sync.Mutex
+ }
+ 
+@@ -212,7 +212,9 @@ func (r *mergeTestRepo) SaveUnpacked(_ context.Context, _ restic.FileType, buf [
+ 	defer r.m.Unlock()
+ 	id := restic.Hash(buf)
+ 	r.files[id] = append([]byte(nil), buf...)
+-	if r.saved != nil { r.saved.Insert(id) }
++	if r.saved != nil {
++		r.saved.Insert(id)
++	}
+ 	return id, nil
+ }
+ func (r *mergeTestRepo) RemoveUnpacked(_ context.Context, _ restic.FileType, id restic.ID) error {
+@@ -309,7 +311,9 @@ func TestRewriteKeepsUnread(t *testing.T) {
+ 			if _, ok := repo.files[id]; ok {
+ 				// A newly written output may hash to an old ID. Output grouping
+ 				// is unordered, so compare only inputs kept without rewriting.
+-				if !repo.saved.Has(id) { survivors++ }
++				if !repo.saved.Has(id) {
++					survivors++
++				}
+ 			}
+ 		}
+ 		// packs and blob counts after the rewrite
+diff --git a/internal/repository/index/index_decode_canonical_stream.go b/internal/repository/index/index_decode_canonical_stream.go
+index 194d97285413b5826b8bdf5159f92c4a06dc1649..25d2b886d82645864def46139a08c1909e233159 100644
+--- a/internal/repository/index/index_decode_canonical_stream.go
++++ b/internal/repository/index/index_decode_canonical_stream.go
+@@ -1,83 +1,105 @@
+ package index
+ 
+ import (
+- "bufio"
+- "bytes"
+- "io"
+- "math"
++	"bufio"
++	"bytes"
++	"io"
++	"math"
+ 
+- "github.com/restic/restic/internal/repository/pack"
+- "github.com/restic/restic/internal/restic"
++	"github.com/restic/restic/internal/repository/pack"
++	"github.com/restic/restic/internal/restic"
+ )
+ 
+ // DecodeCanonicalIndexStream validates canonical tokens while filling a
+ // private index. It removes the second scan/decompression at the price of table
+ // growth. Publication still waits for terminal stream validation.
+ func DecodeCanonicalIndexStream(open func() (io.ReadCloser, error), id restic.ID) (*Index, bool) {
+- return decodeCanonicalIndexStreamLimited(open,id,16*1024*1024*1024)
++	return decodeCanonicalIndexStreamLimited(open, id, 16*1024*1024*1024)
+ }
+ 
+-func decodeCanonicalIndexStreamLimited(open func() (io.ReadCloser,error), id restic.ID, maxBytes int64) (*Index,bool) {
+- rd, err := open()
+- if err != nil { return nil, false }
+- defer rd.Close()
+- limited := &io.LimitedReader{R: rd, N: maxBytes+1}
+- p := canonicalStreamParser{rd: bufio.NewReaderSize(limited, 64*1024)}
+- idx := NewIndex()
+- if !p.document(idx) || limited.N == 0 { return nil, false }
+- idx.ids = append(idx.ids, id)
+- idx.final = true
+- return idx, true
++func decodeCanonicalIndexStreamLimited(open func() (io.ReadCloser, error), id restic.ID, maxBytes int64) (*Index, bool) {
++	rd, err := open()
++	if err != nil {
++		return nil, false
++	}
++	defer rd.Close()
++	limited := &io.LimitedReader{R: rd, N: maxBytes + 1}
++	p := canonicalStreamParser{rd: bufio.NewReaderSize(limited, 64*1024)}
++	idx := NewIndex()
++	if !p.document(idx) || limited.N == 0 {
++		return nil, false
++	}
++	idx.ids = append(idx.ids, id)
++	idx.final = true
++	return idx, true
+ }
+ 
+ type canonicalStreamParser struct {
+- rd *bufio.Reader
+- buf []byte
+- pos int
+- packs int
+- counts [restic.NumBlobTypes]int
++	rd     *bufio.Reader
++	buf    []byte
++	pos    int
++	packs  int
++	counts [restic.NumBlobTypes]int
+ }
+ 
+ // Tokens are at most 66 bytes. Retain one borrowed window and refill only at a
+ // token boundary; this avoids a reader method for every digit and punctuation.
+ func (p *canonicalStreamParser) available(n int) bool {
+- if len(p.buf)-p.pos >= n { return true }
+- _, _ = p.rd.Discard(p.pos)
+- p.pos = 0
+- p.buf, _ = p.rd.Peek(64*1024)
+- return len(p.buf) >= n
++	if len(p.buf)-p.pos >= n {
++		return true
++	}
++	_, _ = p.rd.Discard(p.pos)
++	p.pos = 0
++	p.buf, _ = p.rd.Peek(64 * 1024)
++	return len(p.buf) >= n
+ }
+ 
+ func (p *canonicalStreamParser) take(s string) bool {
+- if !p.available(len(s)) || !bytes.HasPrefix(p.buf[p.pos:], []byte(s)) { return false }
+- p.pos += len(s)
+- return true
++	if !p.available(len(s)) || !bytes.HasPrefix(p.buf[p.pos:], []byte(s)) {
++		return false
++	}
++	p.pos += len(s)
++	return true
+ }
+ 
+ func (p *canonicalStreamParser) id(dst *restic.ID) bool {
+- if !p.take(`"`) || !p.available(65) { return false }
+- b := p.buf[p.pos:p.pos+65]
+- if b[64] != '"' || !canonicalHexID(b[:64], dst) { return false }
+- p.pos += 65
+- return true
++	if !p.take(`"`) || !p.available(65) {
++		return false
++	}
++	b := p.buf[p.pos : p.pos+65]
++	if b[64] != '"' || !canonicalHexID(b[:64], dst) {
++		return false
++	}
++	p.pos += 65
++	return true
+ }
+ 
+ func (p *canonicalStreamParser) number() (uint, bool) {
+- var n uint64
+- count := 0
+- first := byte(0)
+- for {
+-  if !p.available(1) { return 0, false }
+-  ch := p.buf[p.pos]
+-  if ch < '0' || ch > '9' { break }
+-  if count == 0 { first = ch }
+-  count++
+-  if count > 10 || count > 1 && first == '0' { return 0, false }
+-  n = n*10 + uint64(ch-'0')
+-  if n > math.MaxUint32 { return 0, false }
+-  p.pos++
+- }
+- return uint(n), count > 0
++	var n uint64
++	count := 0
++	first := byte(0)
++	for {
++		if !p.available(1) {
++			return 0, false
++		}
++		ch := p.buf[p.pos]
++		if ch < '0' || ch > '9' {
++			break
++		}
++		if count == 0 {
++			first = ch
++		}
++		count++
++		if count > 10 || count > 1 && first == '0' {
++			return 0, false
++		}
++		n = n*10 + uint64(ch-'0')
++		if n > math.MaxUint32 {
++			return 0, false
++		}
++		p.pos++
++	}
++	return uint(n), count > 0
+ }
+ 
+ func (p *canonicalStreamParser) blob(idx *Index, packIndex uint32) bool {
+@@ -181,9 +203,9 @@ func (p *canonicalStreamParser) document(idx *Index) bool {
+ 		return false
+ 	}
+ 	_, _ = p.rd.Discard(p.pos)
+- p.pos = 0
+- p.buf = nil
+- var tail [8192]byte
+- _, err := io.CopyBuffer(indexJSONWhitespaceWriter{}, p.rd, tail[:])
+- return err == nil
++	p.pos = 0
++	p.buf = nil
++	var tail [8192]byte
++	_, err := io.CopyBuffer(indexJSONWhitespaceWriter{}, p.rd, tail[:])
++	return err == nil
+ }
+diff --git a/internal/repository/index/index_decode_canonical_stream_test.go b/internal/repository/index/index_decode_canonical_stream_test.go
+index 98cf8f6718e2f3d7deef9646f5043de2611b9b8d..c809b283a7f90bcfc9775875f5b3c87e06861afc 100644
+--- a/internal/repository/index/index_decode_canonical_stream_test.go
++++ b/internal/repository/index/index_decode_canonical_stream_test.go
+@@ -1,54 +1,77 @@
+ package index
+ 
+ import (
+- "bytes"
+- "io"
+- "reflect"
+- "strings"
+- "testing"
++	"bytes"
++	"io"
++	"reflect"
++	"strings"
++	"testing"
+ 
+- "github.com/restic/restic/internal/restic"
++	"github.com/restic/restic/internal/restic"
+ )
+ 
+ func TestCanonicalStreamCompatibility(t *testing.T) {
+- for _, input := range diagnosticDecodeCases() {
+-  for _, size := range []int{1, 7, 65536} {
+-   decode := func(buf []byte, id restic.ID) (*Index, error) {
+-    idx, ok := DecodeCanonicalIndexStream(func() (io.ReadCloser, error) {
+-     return io.NopCloser(diagnosticShortReader{bytes.NewReader(buf), size}), nil
+-    }, id)
+-    if !ok { if idx != nil { t.Fatal("partial index escaped") }; return DecodeIndex(buf, id) }
+-    return idx, nil
+-   }
+-   got := diagnosticDecodeOutcome(decode, []byte(input))
+-   want := diagnosticDecodeOutcome(DecodeIndex, []byte(input))
+-   if !reflect.DeepEqual(got, want) { t.Fatalf("input=%q got=%+v want=%+v", input, got, want) }
+-  }
+- }
++	for _, input := range diagnosticDecodeCases() {
++		for _, size := range []int{1, 7, 65536} {
++			decode := func(buf []byte, id restic.ID) (*Index, error) {
++				idx, ok := DecodeCanonicalIndexStream(func() (io.ReadCloser, error) {
++					return io.NopCloser(diagnosticShortReader{bytes.NewReader(buf), size}), nil
++				}, id)
++				if !ok {
++					if idx != nil {
++						t.Fatal("partial index escaped")
++					}
++					return DecodeIndex(buf, id)
++				}
++				return idx, nil
++			}
++			got := diagnosticDecodeOutcome(decode, []byte(input))
++			want := diagnosticDecodeOutcome(DecodeIndex, []byte(input))
++			if !reflect.DeepEqual(got, want) {
++				t.Fatalf("input=%q got=%+v want=%+v", input, got, want)
++			}
++		}
++	}
++}
++
++type canonicalTestCloser struct {
++	io.Reader
++	close func()
+ }
+ 
+-type canonicalTestCloser struct { io.Reader; close func() }
+ func (c *canonicalTestCloser) Close() error { c.close(); return nil }
+ 
+ func TestCanonicalStreamOnePassSettlement(t *testing.T) {
+- input := `{"packs":[]}` + strings.Repeat(" ",100000)
+- id := restic.Hash([]byte("one pass"))
+- for _, terminal := range []bool{false,true} {
+-  var rd io.Reader = strings.NewReader(input)
+-  if terminal { rd = &diagnosticErrorReader{data: []byte(input)} }
+-  closes := 0
+-  idx,ok := DecodeCanonicalIndexStream(func()(io.ReadCloser,error){return &canonicalTestCloser{Reader: rd,close: func(){closes++}},nil},id)
+-  if ok == terminal || (idx != nil) == terminal || closes != 1 { t.Fatalf("terminal=%v idx=%v ok=%v closes=%d",terminal,idx,ok,closes) }
+- }
++	input := `{"packs":[]}` + strings.Repeat(" ", 100000)
++	id := restic.Hash([]byte("one pass"))
++	for _, terminal := range []bool{false, true} {
++		var rd io.Reader = strings.NewReader(input)
++		if terminal {
++			rd = &diagnosticErrorReader{data: []byte(input)}
++		}
++		closes := 0
++		idx, ok := DecodeCanonicalIndexStream(func() (io.ReadCloser, error) {
++			return &canonicalTestCloser{Reader: rd, close: func() { closes++ }}, nil
++		}, id)
++		if ok == terminal || (idx != nil) == terminal || closes != 1 {
++			t.Fatalf("terminal=%v idx=%v ok=%v closes=%d", terminal, idx, ok, closes)
++		}
++	}
+ }
+ 
+ func TestCanonicalStreamBoundAndTruncation(t *testing.T) {
+- input := `{"packs":[]}`
+- id := restic.Hash([]byte("limit"))
+- for end := range len(input) {
+-  idx,ok := DecodeCanonicalIndexStream(func()(io.ReadCloser,error){return io.NopCloser(strings.NewReader(input[:end])),nil},id)
+-  if ok || idx != nil { t.Fatalf("accepted truncation %d",end) }
+- }
+- idx,ok := decodeCanonicalIndexStreamLimited(func()(io.ReadCloser,error){return io.NopCloser(strings.NewReader(input+strings.Repeat(" ",100))),nil},id,64)
+- if ok || idx != nil { t.Fatal("accepted cumulative output excess") }
++	input := `{"packs":[]}`
++	id := restic.Hash([]byte("limit"))
++	for end := range len(input) {
++		idx, ok := DecodeCanonicalIndexStream(func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(input[:end])), nil }, id)
++		if ok || idx != nil {
++			t.Fatalf("accepted truncation %d", end)
++		}
++	}
++	idx, ok := decodeCanonicalIndexStreamLimited(func() (io.ReadCloser, error) {
++		return io.NopCloser(strings.NewReader(input + strings.Repeat(" ", 100))), nil
++	}, id, 64)
++	if ok || idx != nil {
++		t.Fatal("accepted cumulative output excess")
++	}
+ }
+diff --git a/internal/repository/index/index_load_concurrency_test.go b/internal/repository/index/index_load_concurrency_test.go
+index 221c81f0983bb35a58d544191eb648b20290f4d7..4de71925568fa693cc8668d41b860b12f35d5585 100644
+--- a/internal/repository/index/index_load_concurrency_test.go
++++ b/internal/repository/index/index_load_concurrency_test.go
+@@ -15,8 +15,8 @@ type admissionTestLoader struct {
+ 	restic.LoaderUnpacked
+ 	entered chan struct{}
+ 	release chan struct{}
+-	active atomic.Int64
+-	peak atomic.Int64
++	active  atomic.Int64
++	peak    atomic.Int64
+ }
+ 
+ func (*admissionTestLoader) Connections() uint { return 32 }
+diff --git a/internal/repository/index/index_merge_test.go b/internal/repository/index/index_merge_test.go
+index f29ee3f93e990d0742ed140cb78ef3b0a523a559..ee49ef443581bc52a4b4c9a9bc48762f3c40adaf 100644
+--- a/internal/repository/index/index_merge_test.go
++++ b/internal/repository/index/index_merge_test.go
+@@ -47,7 +47,7 @@ func mergeTestInput(count, generation int) *Index {
+ 		// each input and across merges, with multiple locations for one ID.
+ 		blob := pack.Blob{
+ 			BlobHandle: restic.BlobHandle{Type: restic.DataBlob + restic.BlobType(i%2), ID: mergeTestID(uint64(i % 113))},
+-			Offset: uint(i % 19), Length: 33,
++			Offset:     uint(i % 19), Length: 33,
+ 		}
+ 		packID := mergeTestID(uint64(1000 + i%7))
+ 		if i%5 == 0 {
+diff --git a/internal/repository/index/index_reservation_test.go b/internal/repository/index/index_reservation_test.go
+index 00e48a9f784963c95547265fdbfff4b7e5ea1cb6..4534e43b9df620b34c17b3706349f4f2abd910cc 100644
+--- a/internal/repository/index/index_reservation_test.go
++++ b/internal/repository/index/index_reservation_test.go
+@@ -24,7 +24,7 @@ func decodeIndexWithoutReservation(buf []byte, id restic.ID) (*Index, error) {
+ 		for _, blob := range p.Blobs {
+ 			idx.store(packID, pack.Blob{
+ 				BlobHandle: restic.BlobHandle{Type: blob.Type, ID: blob.ID},
+-				Offset: blob.Offset, Length: blob.Length,
++				Offset:     blob.Offset, Length: blob.Length,
+ 				UncompressedLength: blob.UncompressedLength,
+ 			})
+ 		}
+diff --git a/internal/repository/index/index_reserve_slots_test.go b/internal/repository/index/index_reserve_slots_test.go
+index f06f59e6cd5657d6ac3c312062442058756877f4..8c7d3eb7106a87bd4b44aaaf127fcaeb713562c2 100644
+--- a/internal/repository/index/index_reserve_slots_test.go
++++ b/internal/repository/index/index_reserve_slots_test.go
+@@ -16,14 +16,20 @@ func TestCountedIndexReservationKeepsGeometry(t *testing.T) {
+ 			geometry := m.blockList.blockSize
+ 			for i := 0; i < count; i++ {
+ 				var id restic.ID
+-				for b := range 8 { id[b] = byte(uint64(i+1) >> (8*b)) }
++				for b := range 8 {
++					id[b] = byte(uint64(i+1) >> (8 * b))
++				}
+ 				m.add(id, 0, uint32(i), 10, 0)
+ 				if m.blockList.blockSize != geometry {
+ 					t.Fatalf("entry %d resized counted geometry", i)
+ 				}
+-				if got := m.firstIndex(id); got != i+1 { t.Fatalf("entry %d moved: %d", i, got) }
++				if got := m.firstIndex(id); got != i+1 {
++					t.Fatalf("entry %d moved: %d", i, got)
++				}
++			}
++			if m.len() != uint(count) || m.blockList.Size() != uint(count+1) {
++				t.Fatal("count or null entry changed")
+ 			}
+-			if m.len() != uint(count) || m.blockList.Size() != uint(count+1) { t.Fatal("count or null entry changed") }
+ 		})
+ 	}
+ }
+@@ -33,17 +39,23 @@ func TestCountedIndexReservationWithoutBucketGrowth(t *testing.T) {
+ 	idx.Preallocate(restic.DataBlob, 16)
+ 	m := &idx.byType[restic.DataBlob]
+ 	for i := range 16 {
+-		m.add(restic.ID{byte(i+1)}, 0, uint32(i), 10, 0)
++		m.add(restic.ID{byte(i + 1)}, 0, uint32(i), 10, 0)
+ 	}
+ 	buckets := len(m.buckets)
+ 	idx.Preallocate(restic.DataBlob, 256)
+-	if len(m.buckets) != buckets { t.Fatal("fixture should not grow buckets") }
++	if len(m.buckets) != buckets {
++		t.Fatal("fixture should not grow buckets")
++	}
+ 	geometry := m.blockList.blockSize
+ 	for i := 16; i < 256; i++ {
+ 		m.add(restic.ID{byte(i), 1}, 0, uint32(i), 10, 0)
+-		if m.blockList.blockSize != geometry { t.Fatalf("entry %d resized geometry", i) }
++		if m.blockList.blockSize != geometry {
++			t.Fatalf("entry %d resized geometry", i)
++		}
+ 	}
+ 	for i := range 16 {
+-		if got := m.firstIndex(restic.ID{byte(i+1)}); got != i+1 { t.Fatal("reservation lost an existing entry") }
++		if got := m.firstIndex(restic.ID{byte(i + 1)}); got != i+1 {
++			t.Fatal("reservation lost an existing entry")
++		}
+ 	}
+ }
+diff --git a/internal/repository/index/index_rewrite_saved.go b/internal/repository/index/index_rewrite_saved.go
+index 141178fcf8f938e539bd6847dd41c3a59b144081..5a8bb2d468ded06429a43ca9a2166e84627b9485 100644
+--- a/internal/repository/index/index_rewrite_saved.go
++++ b/internal/repository/index/index_rewrite_saved.go
+@@ -10,18 +10,22 @@ import (
+ // stage. A content-addressed output can have the same ID as an obsolete input.
+ // Once all savers have joined, deletion must preserve every successful output.
+ type rewriteSavedIndexes struct {
+-	m sync.Mutex
++	m   sync.Mutex
+ 	ids restic.IDSet
+ }
+ 
+ func (s *rewriteSavedIndexes) record(id restic.ID) {
+ 	s.m.Lock()
+ 	defer s.m.Unlock()
+-	if s.ids == nil { s.ids = restic.NewIDSet() }
++	if s.ids == nil {
++		s.ids = restic.NewIDSet()
++	}
+ 	s.ids.Insert(id)
+ }
+ 
+ // Called only after the save workers have joined successfully.
+ func (s *rewriteSavedIndexes) preserveOutputs(obsolete restic.IDSet) {
+-	for id := range s.ids { obsolete.Delete(id) }
++	for id := range s.ids {
++		obsolete.Delete(id)
++	}
+ }
+diff --git a/internal/repository/index/index_rewrite_saved_test.go b/internal/repository/index/index_rewrite_saved_test.go
+index 569ed4ae056fed67e6693a47ea17936d59a26944..09b210d6598ff6edcf5c7a405c5c011988ef1d31 100644
+--- a/internal/repository/index/index_rewrite_saved_test.go
++++ b/internal/repository/index/index_rewrite_saved_test.go
+@@ -25,5 +25,7 @@ func TestRewriteSavedConcurrentSettlement(t *testing.T) {
+ 	remove := restic.ID{1, 2}
+ 	obsolete.Insert(remove)
+ 	saved.preserveOutputs(obsolete)
+-	if len(obsolete) != 1 || !obsolete.Has(remove) { t.Fatal("successful outputs removed, or obsolete input retained") }
++	if len(obsolete) != 1 || !obsolete.Has(remove) {
++		t.Fatal("successful outputs removed, or obsolete input retained")
++	}
+ }
+diff --git a/internal/repository/index/index_stream_adoption_test.go b/internal/repository/index/index_stream_adoption_test.go
+index c528517a434a393f9e73dcb76d0d6b373cde1345..d9c15291edcecf447078c8a7baf5a64fe6f6c1c9 100644
+--- a/internal/repository/index/index_stream_adoption_test.go
++++ b/internal/repository/index/index_stream_adoption_test.go
+@@ -1,55 +1,82 @@
+ package index
+ 
+ import (
+- "context"
+- "fmt"
+- "io"
+- "strings"
+- "testing"
++	"context"
++	"fmt"
++	"io"
++	"strings"
++	"testing"
+ 
+- "github.com/restic/restic/internal/restic"
++	"github.com/restic/restic/internal/restic"
+ )
+ 
+ type canonicalAdoptionLoader struct {
+- input string
+- id restic.ID
+- result *Index
++	input  string
++	id     restic.ID
++	result *Index
+ }
++
+ func (r *canonicalAdoptionLoader) Connections() uint { return 2 }
+-func (r *canonicalAdoptionLoader) List(_ context.Context, t restic.FileType, fn func(restic.ID,int64)error) error {
+- if t != restic.IndexFile { return fmt.Errorf("unexpected list %v",t) }
+- return fn(r.id,int64(len(r.input)))
++func (r *canonicalAdoptionLoader) List(_ context.Context, t restic.FileType, fn func(restic.ID, int64) error) error {
++	if t != restic.IndexFile {
++		return fmt.Errorf("unexpected list %v", t)
++	}
++	return fn(r.id, int64(len(r.input)))
+ }
+-func (r *canonicalAdoptionLoader) LoadUnpacked(context.Context, restic.FileType,restic.ID)([]byte,error) {
+- return nil,fmt.Errorf("stream capability was not used")
++func (r *canonicalAdoptionLoader) LoadUnpacked(context.Context, restic.FileType, restic.ID) ([]byte, error) {
++	return nil, fmt.Errorf("stream capability was not used")
+ }
+-func (r *canonicalAdoptionLoader) LoadIndexStream(_ context.Context,id restic.ID)(*Index,[]byte,error) {
+- idx,ok:=DecodeCanonicalIndexStream(func()(io.ReadCloser,error){return io.NopCloser(strings.NewReader(r.input)),nil},id)
+- if !ok { return nil,nil,fmt.Errorf("canonical stream rejected") }
+- r.result=idx
+- return idx,nil,nil
++func (r *canonicalAdoptionLoader) LoadIndexStream(_ context.Context, id restic.ID) (*Index, []byte, error) {
++	idx, ok := DecodeCanonicalIndexStream(func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(r.input)), nil }, id)
++	if !ok {
++		return nil, nil, fmt.Errorf("canonical stream rejected")
++	}
++	r.result = idx
++	return idx, nil, nil
+ }
+ func TestCanonicalStreamFreshLoadAdoption(t *testing.T) {
+- var document strings.Builder
+- fmt.Fprintf(&document,`{"packs":[{"id":"%s","blobs":[`,restic.Hash([]byte("pack")))
+- for i:=0;i<10000;i++ {
+-  if i>0 { document.WriteByte(',') }
+-  fmt.Fprintf(&document,`{"id":"%s","type":"data","offset":%d,"length":33}`,restic.Hash([]byte(fmt.Sprint(i))),i*33)
+- }
+- document.WriteString(`]}]}`)
+- for _,callback:=range []bool{false,true} {
+-  loader:=&canonicalAdoptionLoader{input:document.String(),id:restic.Hash([]byte("index"))}
+-  mi:=NewMasterIndex()
+-  calls:=0
+-  var cb func(restic.ID,*Index,error)error
+-  if callback { cb=func(_ restic.ID,idx *Index,err error)error { calls++;if err!=nil||idx==nil { t.Fatalf("idx=%v err=%v",idx,err) };return nil } }
+-  if err:=mi.Load(context.Background(),loader,restic.NoopCounter,cb);err!=nil { t.Fatal(err) }
+-  if loader.result==nil { t.Fatal("stream never dispatched") }
+-  if callback {
+-   if calls!=1||mi.idx[0]==loader.result { t.Fatal("callback ownership was adopted") }
+-  } else if mi.idx[0]!=loader.result { t.Fatal("exclusive fresh-load result was not adopted") }
+-  count:=0
+-  for range mi.Values() { count++ }
+-  if count!=10000 { t.Fatalf("lost entries: %d",count) }
+- }
++	var document strings.Builder
++	fmt.Fprintf(&document, `{"packs":[{"id":"%s","blobs":[`, restic.Hash([]byte("pack")))
++	for i := 0; i < 10000; i++ {
++		if i > 0 {
++			document.WriteByte(',')
++		}
++		fmt.Fprintf(&document, `{"id":"%s","type":"data","offset":%d,"length":33}`, restic.Hash([]byte(fmt.Sprint(i))), i*33)
++	}
++	document.WriteString(`]}]}`)
++	for _, callback := range []bool{false, true} {
++		loader := &canonicalAdoptionLoader{input: document.String(), id: restic.Hash([]byte("index"))}
++		mi := NewMasterIndex()
++		calls := 0
++		var cb func(restic.ID, *Index, error) error
++		if callback {
++			cb = func(_ restic.ID, idx *Index, err error) error {
++				calls++
++				if err != nil || idx == nil {
++					t.Fatalf("idx=%v err=%v", idx, err)
++				}
++				return nil
++			}
++		}
++		if err := mi.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil {
++			t.Fatal(err)
++		}
++		if loader.result == nil {
++			t.Fatal("stream never dispatched")
++		}
++		if callback {
++			if calls != 1 || mi.idx[0] == loader.result {
++				t.Fatal("callback ownership was adopted")
++			}
++		} else if mi.idx[0] != loader.result {
++			t.Fatal("exclusive fresh-load result was not adopted")
++		}
++		count := 0
++		for range mi.Values() {
++			count++
++		}
++		if count != 10000 {
++			t.Fatalf("lost entries: %d", count)
++		}
++	}
+ }
+diff --git a/internal/repository/index/merge_growth_boundary_test.go b/internal/repository/index/merge_growth_boundary_test.go
+index 31daebfbceae09e809ea25a29a0eeca946db6154..216fdd3bdd5902be5021979e950b8713dba4ef27 100644
+--- a/internal/repository/index/merge_growth_boundary_test.go
++++ b/internal/repository/index/merge_growth_boundary_test.go
+@@ -26,7 +26,7 @@ func TestMergeDuplicatesAtGrowthBoundary(t *testing.T) {
+ 			for i := range blobs {
+ 				blobs[i] = pack.Blob{
+ 					BlobHandle: restic.BlobHandle{Type: typ, ID: idFor(uint64(i))},
+-					Offset: uint(i * 64), Length: 33,
++					Offset:     uint(i * 64), Length: 33,
+ 				}
+ 			}
+ 			packID := idFor(10000)
+@@ -80,7 +80,7 @@ func TestMergeDuplicatesAtGrowthBoundary(t *testing.T) {
+ 			}
+ 			incoming := pack.Blob{
+ 				BlobHandle: restic.BlobHandle{Type: typ, ID: incomingID},
+-				Offset: 256 * 64, Length: 33,
++				Offset:     256 * 64, Length: 33,
+ 			}
+ 			next := NewIndex()
+ 			next.StorePack(packID, pack.Blobs{incoming})
+diff --git a/internal/repository/index/representation_stages_test.go b/internal/repository/index/representation_stages_test.go
+index e5e3b299f6fd5151dfa9cac308404750ac09fbe0..cac28bd0039f42d1a17588467beb2f9ee3540ab4 100644
+--- a/internal/repository/index/representation_stages_test.go
++++ b/internal/repository/index/representation_stages_test.go
+@@ -30,18 +30,24 @@ func representationStages(t *testing.T, entries int, adopt bool) {
+ 	const files = 4
+ 	encoded := make([][]byte, files)
+ 	enc, err := zstd.NewWriter(nil)
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer enc.Close()
+ 	for f := range files {
+ 		idx := NewIndex()
+ 		for p := 0; p < (entries+127)/128; p++ {
+ 			var blobs pack.Blobs
+ 			for b := range 128 {
+-				if p*128+b >= entries { break }
+-				v := uint64(f*entries+p*128+b+1)
++				if p*128+b >= entries {
++					break
++				}
++				v := uint64(f*entries + p*128 + b + 1)
+ 				var id restic.ID
+-				for i := range 8 { id[i] = byte(v >> (8*i)) }
+-				blobs = append(blobs, pack.Blob{BlobHandle: restic.BlobHandle{ID: id, Type: restic.DataBlob}, Offset: uint(b*64), Length: 64})
++				for i := range 8 {
++					id[i] = byte(v >> (8 * i))
++				}
++				blobs = append(blobs, pack.Blob{BlobHandle: restic.BlobHandle{ID: id, Type: restic.DataBlob}, Offset: uint(b * 64), Length: 64})
+ 			}
+ 			var pid restic.ID
+ 			pid[0], pid[1], pid[2] = byte(p), byte(p>>8), byte(f)
+@@ -50,12 +56,16 @@ func representationStages(t *testing.T, entries int, adopt bool) {
+ 		}
+ 		idx.Finalize()
+ 		var raw bytes.Buffer
+-		if err := idx.Encode(&raw); err != nil { t.Fatal(err) }
++		if err := idx.Encode(&raw); err != nil {
++			t.Fatal(err)
++		}
+ 		encoded[f] = enc.EncodeAll(raw.Bytes(), nil)
+ 		t.Logf("file %d: canonical len/cap=%d/%d compressed len/cap=%d/%d", f, raw.Len(), raw.Cap(), len(encoded[f]), cap(encoded[f]))
+ 	}
+ 	dec, err := zstd.NewReader(nil)
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer dec.Close()
+ 	retained := make([]*Index, 0, files)
+ 	var allocatedBefore, allocatedAfter runtime.MemStats
+@@ -70,11 +80,15 @@ func representationStages(t *testing.T, entries int, adopt bool) {
+ 	for f := range files {
+ 		var plaintext []byte
+ 		measure("decompress", func() { plaintext, err = dec.DecodeAll(encoded[f], nil) })
+-		if err != nil { t.Fatal(err) }
++		if err != nil {
++			t.Fatal(err)
++		}
+ 		t.Logf("plaintext len/cap=%d/%d", len(plaintext), cap(plaintext))
+ 		var idx *Index
+-		measure("canonical decode", func() { idx, err = decodeIndexEager(plaintext, restic.ID{byte(f+1)}) })
+-		if err != nil { t.Fatal(err) }
++		measure("canonical decode", func() { idx, err = decodeIndexEager(plaintext, restic.ID{byte(f + 1)}) })
++		if err != nil {
++			t.Fatal(err)
++		}
+ 		retained = append(retained, idx)
+ 		plaintext = nil
+ 	}
+@@ -82,20 +96,30 @@ func representationStages(t *testing.T, entries int, adopt bool) {
+ 	for _, idx := range retained {
+ 		for typ := range restic.NumBlobTypes {
+ 			m := &idx.byType[typ]
+-			tableBytes += uintptr(cap(m.buckets))*unsafe.Sizeof(uint(0))
+-			for _, block := range m.blockList.blockList { tableBytes += uintptr(cap(block))*unsafe.Sizeof(indexEntry{}) }
++			tableBytes += uintptr(cap(m.buckets)) * unsafe.Sizeof(uint(0))
++			for _, block := range m.blockList.blockList {
++				tableBytes += uintptr(cap(block)) * unsafe.Sizeof(indexEntry{})
++			}
+ 		}
+ 	}
+ 	t.Logf("zero active loads; %d completed tables retain at least %d table bytes (excludes packs, notes and decoder caches)", len(retained), tableBytes)
+ 	mi := NewMasterIndex()
+-	for _, idx := range retained { mi.Insert(idx) }
++	for _, idx := range retained {
++		mi.Insert(idx)
++	}
+ 	if adopt {
+ 		measure("adopt first exclusively owned result", func() {
+-			if !mi.adoptLoadedIndex(retained[0]) { t.Fatal("adoption refused unique fixture") }
++			if !mi.adoptLoadedIndex(retained[0]) {
++				t.Fatal("adoption refused unique fixture")
++			}
+ 		})
+ 	}
+ 	measure("destination merge", func() { err = mi.MergeFinalIndexes() })
+-	if err != nil { t.Fatal(err) }
+-	if got := mi.idx[0].Len(restic.DataBlob); got != uint(files*entries) { t.Fatalf("lost entries: %d", got) }
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := mi.idx[0].Len(restic.DataBlob); got != uint(files*entries) {
++		t.Fatalf("lost entries: %d", got)
++	}
+ 	runtime.KeepAlive(retained)
+ }
+diff --git a/internal/repository/index/rewrite_identity_probe_test.go b/internal/repository/index/rewrite_identity_probe_test.go
+index fbe748823e1d4b9a06d8edc8e16c7de9275f4979..18ec3173d6d07320f14012848f724ac75484932e 100644
+--- a/internal/repository/index/rewrite_identity_probe_test.go
++++ b/internal/repository/index/rewrite_identity_probe_test.go
+@@ -16,14 +16,22 @@ func TestRewriteIdentityProbe(t *testing.T) {
+ 	idx.StorePack(id, pack.Blobs{{BlobHandle: restic.BlobHandle{ID: restic.ID{2}, Type: restic.DataBlob}, Length: 60}})
+ 	idx.Finalize()
+ 	oldID, err := idx.SaveIndex(context.Background(), repo)
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	mi := NewMasterIndex()
+-	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil { t.Fatal(err) }
+-	if err := mi.Rewrite(context.Background(), repo, nil, nil, nil, MasterIndexRewriteOpts{}); err != nil { t.Fatal(err) }
+-	if len(repo.files) == 0 { t.Fatalf("content-identical output %v was deleted as obsolete", oldID) }
++	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil {
++		t.Fatal(err)
++	}
++	if err := mi.Rewrite(context.Background(), repo, nil, nil, nil, MasterIndexRewriteOpts{}); err != nil {
++		t.Fatal(err)
++	}
++	if len(repo.files) == 0 {
++		t.Fatalf("content-identical output %v was deleted as obsolete", oldID)
++	}
+ }
+ 
+-type failedRewriteSaver struct { *mergeTestRepo }
++type failedRewriteSaver struct{ *mergeTestRepo }
+ 
+ func (r failedRewriteSaver) SaveUnpacked(context.Context, restic.FileType, []byte) (restic.ID, error) {
+ 	return restic.ID{}, errors.New("injected rewrite save failure")
+@@ -35,10 +43,18 @@ func TestRewriteIdentitySaveFailureLeavesInput(t *testing.T) {
+ 	idx.StorePack(restic.ID{1}, pack.Blobs{{BlobHandle: restic.BlobHandle{ID: restic.ID{2}, Type: restic.DataBlob}, Length: 60}})
+ 	idx.Finalize()
+ 	id, err := idx.SaveIndex(context.Background(), repo)
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	mi := NewMasterIndex()
+-	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil { t.Fatal(err) }
++	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil {
++		t.Fatal(err)
++	}
+ 	err = mi.Rewrite(context.Background(), failedRewriteSaver{repo}, nil, nil, nil, MasterIndexRewriteOpts{})
+-	if err == nil { t.Fatal("save failure was lost") }
+-	if _, ok := repo.files[id]; !ok { t.Fatal("failed save removed the original index") }
++	if err == nil {
++		t.Fatal("save failure was lost")
++	}
++	if _, ok := repo.files[id]; !ok {
++		t.Fatal("failed save removed the original index")
++	}
+ }
+diff --git a/internal/repository/index/rewrite_interruption_test.go b/internal/repository/index/rewrite_interruption_test.go
+index 9e12a77cb408b8c7183797ca3480c0a11f3e9498..f3912b9cbc74bfaebf8e61f517ad3eb3df3f5c12 100644
+--- a/internal/repository/index/rewrite_interruption_test.go
++++ b/internal/repository/index/rewrite_interruption_test.go
+@@ -12,19 +12,23 @@ import (
+ 
+ type rewriteFaultRepo struct {
+ 	*mergeTestRepo
+-	faultMutex sync.Mutex
++	faultMutex             sync.Mutex
+ 	saveCalls, removeCalls int
+-	failSave, failRemove int
+-	outputs restic.IDSet
++	failSave, failRemove   int
++	outputs                restic.IDSet
+ }
+ 
+ func (r *rewriteFaultRepo) SaveUnpacked(ctx context.Context, typ restic.FileType, buf []byte) (restic.ID, error) {
+ 	r.faultMutex.Lock()
+ 	defer r.faultMutex.Unlock()
+ 	r.saveCalls++
+-	if r.saveCalls == r.failSave { return restic.ID{}, errors.New("injected later save failure") }
++	if r.saveCalls == r.failSave {
++		return restic.ID{}, errors.New("injected later save failure")
++	}
+ 	id, err := r.mergeTestRepo.SaveUnpacked(ctx, typ, buf)
+-	if err == nil { r.outputs.Insert(id) }
++	if err == nil {
++		r.outputs.Insert(id)
++	}
+ 	return id, err
+ }
+ 
+@@ -32,7 +36,9 @@ func (r *rewriteFaultRepo) RemoveUnpacked(ctx context.Context, typ restic.FileTy
+ 	r.faultMutex.Lock()
+ 	defer r.faultMutex.Unlock()
+ 	r.removeCalls++
+-	if r.removeCalls == r.failRemove { return errors.New("injected later deletion failure") }
++	if r.removeCalls == r.failRemove {
++		return errors.New("injected later deletion failure")
++	}
+ 	return r.mergeTestRepo.RemoveUnpacked(ctx, typ, id)
+ }
+ 
+@@ -45,7 +51,9 @@ func rewriteInterruptionInput(t *testing.T) (*rewriteFaultRepo, restic.IDSet) {
+ 		idx.StorePack(restic.ID{i}, pack.Blobs{{BlobHandle: restic.BlobHandle{ID: restic.ID{i, 1}, Type: restic.DataBlob}, Length: 60}})
+ 		idx.Finalize()
+ 		id, err := idx.SaveIndex(context.Background(), base)
+-		if err != nil { t.Fatal(err) }
++		if err != nil {
++			t.Fatal(err)
++		}
+ 		inputs.Insert(id)
+ 	}
+ 	oldFull := Full
+@@ -58,22 +66,50 @@ func TestRewriteSavedPartialSaveNoDeletes(t *testing.T) {
+ 	repo, inputs := rewriteInterruptionInput(t)
+ 	repo.failSave = 2
+ 	mi := NewMasterIndex()
+-	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil { t.Fatal(err) }
+-	if err := mi.Rewrite(context.Background(), repo, nil, nil, nil, MasterIndexRewriteOpts{}); err == nil { t.Fatal("later save failure lost") }
+-	if repo.saveCalls != 2 || len(repo.outputs) != 1 || repo.removeCalls != 0 { t.Fatalf("save/deletion settlement: %d saves, %d outputs, %d removes", repo.saveCalls, len(repo.outputs), repo.removeCalls) }
+-	for id := range inputs { if _, ok := repo.files[id]; !ok { t.Fatal("failed rewrite removed an input") } }
+-	for id := range repo.outputs { if _, ok := repo.files[id]; !ok { t.Fatal("failed rewrite removed a completed output") } }
++	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil {
++		t.Fatal(err)
++	}
++	if err := mi.Rewrite(context.Background(), repo, nil, nil, nil, MasterIndexRewriteOpts{}); err == nil {
++		t.Fatal("later save failure lost")
++	}
++	if repo.saveCalls != 2 || len(repo.outputs) != 1 || repo.removeCalls != 0 {
++		t.Fatalf("save/deletion settlement: %d saves, %d outputs, %d removes", repo.saveCalls, len(repo.outputs), repo.removeCalls)
++	}
++	for id := range inputs {
++		if _, ok := repo.files[id]; !ok {
++			t.Fatal("failed rewrite removed an input")
++		}
++	}
++	for id := range repo.outputs {
++		if _, ok := repo.files[id]; !ok {
++			t.Fatal("failed rewrite removed a completed output")
++		}
++	}
+ }
+ 
+ func TestRewriteSavedDeletionFailureOutputsRemain(t *testing.T) {
+ 	repo, _ := rewriteInterruptionInput(t)
+ 	repo.failRemove = 2
+ 	mi := NewMasterIndex()
+-	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil { t.Fatal(err) }
+-	if err := mi.Rewrite(context.Background(), repo, nil, nil, nil, MasterIndexRewriteOpts{}); err == nil { t.Fatal("later deletion failure lost") }
+-	if repo.removeCalls < 2 || len(repo.outputs) != 2 { t.Fatal("did not exercise partial deletion") }
+-	for id := range repo.outputs { if _, ok := repo.files[id]; !ok { t.Fatal("partial deletion removed a completed output") } }
++	if err := mi.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil {
++		t.Fatal(err)
++	}
++	if err := mi.Rewrite(context.Background(), repo, nil, nil, nil, MasterIndexRewriteOpts{}); err == nil {
++		t.Fatal("later deletion failure lost")
++	}
++	if repo.removeCalls < 2 || len(repo.outputs) != 2 {
++		t.Fatal("did not exercise partial deletion")
++	}
++	for id := range repo.outputs {
++		if _, ok := repo.files[id]; !ok {
++			t.Fatal("partial deletion removed a completed output")
++		}
++	}
+ 	after := NewMasterIndex()
+-	if err := after.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil { t.Fatal(err) }
+-	if after.idx[0].Len(restic.DataBlob) != 3 { t.Fatal("partial deletion lost blob locations") }
++	if err := after.Load(context.Background(), repo, restic.NoopCounter, nil); err != nil {
++		t.Fatal(err)
++	}
++	if after.idx[0].Len(restic.DataBlob) != 3 {
++		t.Fatal("partial deletion lost blob locations")
++	}
+ }
+diff --git a/internal/repository/index_load_ordinary_stream.go b/internal/repository/index_load_ordinary_stream.go
+index 22a926a174d5f3f6df6b1e5acf5fe965c926ed90..cf3ac71d9ca11e741841b0e61d2ed1fa27e243c7 100644
+--- a/internal/repository/index_load_ordinary_stream.go
++++ b/internal/repository/index_load_ordinary_stream.go
+@@ -1,53 +1,63 @@
+ package repository
+ 
+ import (
+- "bytes"
+- "context"
+- "fmt"
+- "io"
++	"bytes"
++	"context"
++	"fmt"
++	"io"
+ 
+- "github.com/klauspost/compress/zstd"
+- "github.com/restic/restic/internal/debug"
+- "github.com/restic/restic/internal/repository/crypto"
+- "github.com/restic/restic/internal/repository/index"
+- "github.com/restic/restic/internal/restic"
++	"github.com/klauspost/compress/zstd"
++	"github.com/restic/restic/internal/debug"
++	"github.com/restic/restic/internal/repository/crypto"
++	"github.com/restic/restic/internal/repository/index"
++	"github.com/restic/restic/internal/restic"
+ )
+ 
+ // An operation owns this adapter. It retains no plaintext or
+ // decoder after returning a complete index, including on compatibility fallback.
+ // Public Repository deliberately does not expose the capability.
+ type ordinaryIndexStreamRepository struct {
+- *internalRepository
++	*internalRepository
+ }
+ 
+ func (r *Repository) loadIndexesStreaming(ctx context.Context, p restic.Counter, cb func(restic.ID, *index.Index, error) error) error {
+- loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{r}}
+- return r.idx.Load(ctx, loader, p, cb)
++	loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{r}}
++	return r.idx.Load(ctx, loader, p, cb)
+ }
+ 
+ func (r *ordinaryIndexStreamRepository) LoadIndexStream(ctx context.Context, id restic.ID) (*index.Index, []byte, error) {
+- if debug.IsEnabled() {
+-  buf, err := r.LoadUnpacked(ctx, restic.IndexFile, id)
+-  return nil, buf, err
+- }
+- buf, err := r.LoadRaw(ctx, restic.IndexFile, id)
+- if err != nil { return nil, nil, err }
+- if len(buf) < crypto.CiphertextLength(0) {
+-  return nil, nil, fmt.Errorf("invalid data in %v file, too short", restic.IndexFile)
+- }
+- nonce, ciphertext := buf[:r.key.NonceSize()], buf[r.key.NonceSize():]
+- buf, err = r.key.Open(ciphertext[:0], nonce, ciphertext, nil)
+- if err != nil { return nil, nil, err }
+- if r.cfg.Version >= 2 && len(buf) >= 1024*1024 && buf[0] == 2 {
+-  idx, ok := index.DecodeCanonicalIndexStream(func() (io.ReadCloser, error) {
+-   dec, err := zstd.NewReader(bytes.NewReader(buf[1:]), zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(16*1024*1024*1024))
+-   if err != nil { return nil, err }; return ordinaryIndexDecoder{dec}, nil
+-  }, id)
+-  if ok { return idx, nil, nil }
+- }
+- plaintext, err := r.decompressUnpacked(buf)
+- return nil, plaintext, err
++	if debug.IsEnabled() {
++		buf, err := r.LoadUnpacked(ctx, restic.IndexFile, id)
++		return nil, buf, err
++	}
++	buf, err := r.LoadRaw(ctx, restic.IndexFile, id)
++	if err != nil {
++		return nil, nil, err
++	}
++	if len(buf) < crypto.CiphertextLength(0) {
++		return nil, nil, fmt.Errorf("invalid data in %v file, too short", restic.IndexFile)
++	}
++	nonce, ciphertext := buf[:r.key.NonceSize()], buf[r.key.NonceSize():]
++	buf, err = r.key.Open(ciphertext[:0], nonce, ciphertext, nil)
++	if err != nil {
++		return nil, nil, err
++	}
++	if r.cfg.Version >= 2 && len(buf) >= 1024*1024 && buf[0] == 2 {
++		idx, ok := index.DecodeCanonicalIndexStream(func() (io.ReadCloser, error) {
++			dec, err := zstd.NewReader(bytes.NewReader(buf[1:]), zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(16*1024*1024*1024))
++			if err != nil {
++				return nil, err
++			}
++			return ordinaryIndexDecoder{dec}, nil
++		}, id)
++		if ok {
++			return idx, nil, nil
++		}
++	}
++	plaintext, err := r.decompressUnpacked(buf)
++	return nil, plaintext, err
+ }
+ 
+-type ordinaryIndexDecoder struct { *zstd.Decoder }
++type ordinaryIndexDecoder struct{ *zstd.Decoder }
++
+ func (d ordinaryIndexDecoder) Close() error { d.Decoder.Close(); return nil }
+diff --git a/internal/repository/index_load_ordinary_stream_test.go b/internal/repository/index_load_ordinary_stream_test.go
+index edfbb0047e5cae4c6791842d98d1c8b779881f23..f5f4542af06528197da0143312a19aee236e13db 100644
+--- a/internal/repository/index_load_ordinary_stream_test.go
++++ b/internal/repository/index_load_ordinary_stream_test.go
+@@ -7,8 +7,8 @@ import (
+ 	"io"
+ 	"reflect"
+ 	"strings"
++	"sync/atomic"
+ 	"testing"
+- "sync/atomic"
+ 
+ 	"github.com/klauspost/compress/zstd"
+ 	"github.com/restic/restic/internal/backend"
+@@ -209,97 +209,149 @@ func TestOrdinaryIndexStreamWrapperBoundary(t *testing.T) {
+ }
+ 
+ func ordinaryStreamDecode(repo *Repository, ctx context.Context, id restic.ID) (*index.Index, error, error) {
+- loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}
+- idx, buf, err := loader.LoadIndexStream(ctx, id)
+- if err != nil { return nil, err, nil }
+- if idx != nil { return idx, nil, nil }
+- idx, err = index.DecodeIndex(buf, id)
+- return idx, nil, err
++	loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}
++	idx, buf, err := loader.LoadIndexStream(ctx, id)
++	if err != nil {
++		return nil, err, nil
++	}
++	if idx != nil {
++		return idx, nil, nil
++	}
++	idx, err = index.DecodeIndex(buf, id)
++	return idx, nil, err
+ }
+ 
+ func TestOrdinaryIndexStreamCompleteLoad(t *testing.T) {
+- repo, _, _ := TestRepositoryWithVersion(t, restic.StableRepoVersion)
+- blobID := restic.Hash([]byte("test blob"))
+- packID := restic.Hash([]byte("test pack"))
+- source := index.NewMasterIndex()
+- blobs := make(pack.Blobs, 50000)
+- for i := range blobs {
+-  bid := restic.Hash([]byte(fmt.Sprint(i)))
+-  if i == 0 { bid = blobID }
+-  blobs[i] = pack.Blob{BlobHandle: restic.BlobHandle{ID: bid, Type: restic.DataBlob}, Offset: uint(i*33), Length:33}
+- }
+- if err := source.StorePack(context.Background(), packID, blobs, &internalRepository{repo}); err != nil { t.Fatal(err) }
+- if err := source.Flush(context.Background(), &internalRepository{repo}); err != nil { t.Fatal(err) }
+- for _, callback := range []bool{false, true} {
+-  repo.DiscardIndex()
+-  calls := 0
+-  var cb func(restic.ID, *index.Index, error) error
+-  if callback { cb = func(_ restic.ID, idx *index.Index, err error) error { calls++; if err != nil || idx == nil { t.Fatalf("idx=%v err=%v", idx, err) }; return nil } }
+-  loader := &ordinaryStreamObserved{ordinaryIndexStreamRepository: &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}}
+-  if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil { t.Fatal(err) }
+-  if loader.streamed.Load() != 1 { t.Fatalf("large file missed streaming: files=%d bytes=%d stream=%d fallback=%d",loader.files.Load(),uint64(0),loader.streamed.Load(),uint64(0)) }
+-  if len(repo.idx.Lookup(restic.BlobHandle{ID: blobID, Type: restic.DataBlob})) == 0 { t.Fatal("load lost blob") }
+-  if callback && calls != 1 { t.Fatalf("callbacks=%d", calls) }
+-  if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil { t.Fatal(err) }
+-  if callback && calls != 1 { t.Fatalf("incremental callback repeated: %d", calls) }
+- }
++	repo, _, _ := TestRepositoryWithVersion(t, restic.StableRepoVersion)
++	blobID := restic.Hash([]byte("test blob"))
++	packID := restic.Hash([]byte("test pack"))
++	source := index.NewMasterIndex()
++	blobs := make(pack.Blobs, 50000)
++	for i := range blobs {
++		bid := restic.Hash([]byte(fmt.Sprint(i)))
++		if i == 0 {
++			bid = blobID
++		}
++		blobs[i] = pack.Blob{BlobHandle: restic.BlobHandle{ID: bid, Type: restic.DataBlob}, Offset: uint(i * 33), Length: 33}
++	}
++	if err := source.StorePack(context.Background(), packID, blobs, &internalRepository{repo}); err != nil {
++		t.Fatal(err)
++	}
++	if err := source.Flush(context.Background(), &internalRepository{repo}); err != nil {
++		t.Fatal(err)
++	}
++	for _, callback := range []bool{false, true} {
++		repo.DiscardIndex()
++		calls := 0
++		var cb func(restic.ID, *index.Index, error) error
++		if callback {
++			cb = func(_ restic.ID, idx *index.Index, err error) error {
++				calls++
++				if err != nil || idx == nil {
++					t.Fatalf("idx=%v err=%v", idx, err)
++				}
++				return nil
++			}
++		}
++		loader := &ordinaryStreamObserved{ordinaryIndexStreamRepository: &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}}
++		if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil {
++			t.Fatal(err)
++		}
++		if loader.streamed.Load() != 1 {
++			t.Fatalf("large file missed streaming: files=%d bytes=%d stream=%d fallback=%d", loader.files.Load(), uint64(0), loader.streamed.Load(), uint64(0))
++		}
++		if len(repo.idx.Lookup(restic.BlobHandle{ID: blobID, Type: restic.DataBlob})) == 0 {
++			t.Fatal("load lost blob")
++		}
++		if callback && calls != 1 {
++			t.Fatalf("callbacks=%d", calls)
++		}
++		if err := repo.idx.Load(context.Background(), loader, restic.NoopCounter, cb); err != nil {
++			t.Fatal(err)
++		}
++		if callback && calls != 1 {
++			t.Fatalf("incremental callback repeated: %d", calls)
++		}
++	}
+ }
+ 
+ // Test instrumentation belongs to the caller; production retains no counters.
+ type ordinaryStreamObserved struct {
+- *ordinaryIndexStreamRepository
+- files, streamed atomic.Uint64
++	*ordinaryIndexStreamRepository
++	files, streamed atomic.Uint64
+ }
++
+ func (r *ordinaryStreamObserved) LoadIndexStream(ctx context.Context, id restic.ID) (*index.Index, []byte, error) {
+- r.files.Add(1)
+- idx,buf,err := r.ordinaryIndexStreamRepository.LoadIndexStream(ctx,id)
+- if idx != nil { r.streamed.Add(1) }
+- return idx,buf,err
++	r.files.Add(1)
++	idx, buf, err := r.ordinaryIndexStreamRepository.LoadIndexStream(ctx, id)
++	if idx != nil {
++		r.streamed.Add(1)
++	}
++	return idx, buf, err
+ }
+ 
+ func TestOrdinaryIndexStreamLargeTerminalErrors(t *testing.T) {
+- repo,be := TestRepositoryWithBackend(t,nil,2,Options{})
+- var document strings.Builder
+- fmt.Fprintf(&document, `{"packs":[{"id":"%s","blobs":[`,restic.Hash([]byte("large pack")))
+- for i:=0;i<50000;i++ {
+-  if i>0 { document.WriteByte(',') }
+-  fmt.Fprintf(&document,`{"id":"%s","type":"data","offset":%d,"length":33}`,restic.Hash([]byte(fmt.Sprint(i))),i*33)
+- }
+- document.WriteString(`]}]}`)
+- plain:=[]byte(document.String())
+- enc,err:=zstd.NewWriter(nil,zstd.WithEncoderConcurrency(1),zstd.WithEncoderCRC(true))
+- if err!=nil { t.Fatal(err) }; defer enc.Close()
+- valid:=append([]byte{2},enc.EncodeAll(plain,nil)...)
+- if len(valid)<1024*1024 { t.Fatalf("large case too small: %d",len(valid)) }
+- corrupt:=bytes.Clone(valid); corrupt[len(corrupt)-1]^=255
+- trailing:=append([]byte{2},enc.EncodeAll(append(bytes.Clone(plain),[]byte("true")...),nil)...)
+- split:=append([]byte{2},enc.EncodeAll(plain[:100],nil)...)
+- split=append(split,enc.EncodeAll(plain[100:],nil)...)
+- // An early malformed canonical field must not hide a later CRC failure.
+- malformed := bytes.Clone(plain)
+- malformed[2] = 'X'
+- malformedCRC := append([]byte{2}, enc.EncodeAll(malformed,nil)...)
+- malformedCRC[len(malformedCRC)-1] ^= 255
+- if len(malformedCRC) < 1024*1024 { t.Fatal("malformed case missed streaming admission") }
+- for n,payload:=range [][]byte{valid,corrupt,valid[:len(valid)-1],trailing,split,malformedCRC} {
+-  t.Run(fmt.Sprint(n),func(t *testing.T){
+-   nonce:=crypto.NewRandomNonce()
+-   ciphertext:=repo.key.Seal(nonce,nonce,payload,nil)
+-   id:=restic.Hash(ciphertext)
+-   h:=backend.Handle{Type:backend.IndexFile,Name:id.String()}
+-   if err:=be.Save(context.Background(),h,backend.NewByteReader(ciphertext,be.Hasher()));err!=nil { t.Fatal(err) }
+-   loader:=&ordinaryIndexStreamRepository{internalRepository:&internalRepository{repo}}
+-   if n==0 || n==4 {
+-    idx,_,err:=loader.LoadIndexStream(context.Background(),id)
+-    if err!=nil || idx==nil { t.Fatalf("large canonical stream missed: idx=%v err=%v",idx,err) }
+-   }
+-   got:=ordinaryStreamLoadResult(func()(*index.Index,error,error){return ordinaryStreamDecode(repo,context.Background(),id)})
+-   want:=ordinaryStreamLoadResult(func()(*index.Index,error,error){
+-    buf,err:=repo.LoadUnpacked(context.Background(),restic.IndexFile,id)
+-    if err!=nil { return nil,err,nil }
+-    idx,err:=index.DecodeIndex(buf,id);return idx,nil,err
+-   })
+-   if !reflect.DeepEqual(got,want) { t.Fatalf("terminal precedence differs: got=%+v want=%+v",got,want) }
+-  })
+- }
++	repo, be := TestRepositoryWithBackend(t, nil, 2, Options{})
++	var document strings.Builder
++	fmt.Fprintf(&document, `{"packs":[{"id":"%s","blobs":[`, restic.Hash([]byte("large pack")))
++	for i := 0; i < 50000; i++ {
++		if i > 0 {
++			document.WriteByte(',')
++		}
++		fmt.Fprintf(&document, `{"id":"%s","type":"data","offset":%d,"length":33}`, restic.Hash([]byte(fmt.Sprint(i))), i*33)
++	}
++	document.WriteString(`]}]}`)
++	plain := []byte(document.String())
++	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderCRC(true))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer enc.Close()
++	valid := append([]byte{2}, enc.EncodeAll(plain, nil)...)
++	if len(valid) < 1024*1024 {
++		t.Fatalf("large case too small: %d", len(valid))
++	}
++	corrupt := bytes.Clone(valid)
++	corrupt[len(corrupt)-1] ^= 255
++	trailing := append([]byte{2}, enc.EncodeAll(append(bytes.Clone(plain), []byte("true")...), nil)...)
++	split := append([]byte{2}, enc.EncodeAll(plain[:100], nil)...)
++	split = append(split, enc.EncodeAll(plain[100:], nil)...)
++	// An early malformed canonical field must not hide a later CRC failure.
++	malformed := bytes.Clone(plain)
++	malformed[2] = 'X'
++	malformedCRC := append([]byte{2}, enc.EncodeAll(malformed, nil)...)
++	malformedCRC[len(malformedCRC)-1] ^= 255
++	if len(malformedCRC) < 1024*1024 {
++		t.Fatal("malformed case missed streaming admission")
++	}
++	for n, payload := range [][]byte{valid, corrupt, valid[:len(valid)-1], trailing, split, malformedCRC} {
++		t.Run(fmt.Sprint(n), func(t *testing.T) {
++			nonce := crypto.NewRandomNonce()
++			ciphertext := repo.key.Seal(nonce, nonce, payload, nil)
++			id := restic.Hash(ciphertext)
++			h := backend.Handle{Type: backend.IndexFile, Name: id.String()}
++			if err := be.Save(context.Background(), h, backend.NewByteReader(ciphertext, be.Hasher())); err != nil {
++				t.Fatal(err)
++			}
++			loader := &ordinaryIndexStreamRepository{internalRepository: &internalRepository{repo}}
++			if n == 0 || n == 4 {
++				idx, _, err := loader.LoadIndexStream(context.Background(), id)
++				if err != nil || idx == nil {
++					t.Fatalf("large canonical stream missed: idx=%v err=%v", idx, err)
++				}
++			}
++			got := ordinaryStreamLoadResult(func() (*index.Index, error, error) { return ordinaryStreamDecode(repo, context.Background(), id) })
++			want := ordinaryStreamLoadResult(func() (*index.Index, error, error) {
++				buf, err := repo.LoadUnpacked(context.Background(), restic.IndexFile, id)
++				if err != nil {
++					return nil, err, nil
++				}
++				idx, err := index.DecodeIndex(buf, id)
++				return idx, nil, err
++			})
++			if !reflect.DeepEqual(got, want) {
++				t.Fatalf("terminal precedence differs: got=%+v want=%+v", got, want)
++			}
++		})
++	}
+ }
+diff --git a/internal/repository/packer_manager.go b/internal/repository/packer_manager.go
+index e430c653e1b6e009da5eea072d2ce1b8a3702942..2b495e31ca439847a2bc5f7d4f0a566006f6f34d 100644
+--- a/internal/repository/packer_manager.go
++++ b/internal/repository/packer_manager.go
+@@ -35,9 +35,9 @@ type packerManager struct {
+ 	key     *crypto.Key
+ 	queueFn func(ctx context.Context, t restic.BlobType, p *packer) error
+ 
+-	pm       sync.Mutex
+-	packers  []*packer
+-	packSize uint
++	pm          sync.Mutex
++	packers     []*packer
++	packSize    uint
+ 	hashOnWrite bool
+ }
+ 
+diff --git a/internal/repository/repack_test.go b/internal/repository/repack_test.go
+index 8316823299188d39bd4a22419bb25c1e1c2f8405..e634f01064d90bea38aa0316f508b37bc4b68466 100644
+--- a/internal/repository/repack_test.go
++++ b/internal/repository/repack_test.go
+@@ -18,13 +18,13 @@ import (
+ 
+ type heldCallbackBlobUploader struct {
+ 	restic.BlobSaverWithAsync
+-	started    chan struct{}
+-	release    <-chan struct{}
+-	firstErr   chan error
+-	once       sync.Once
+-	corrupt    bool
++	started     chan struct{}
++	release     <-chan struct{}
++	firstErr    chan error
++	once        sync.Once
++	corrupt     bool
+ 	corruptOnce sync.Once
+-	corruptID  restic.ID
++	corruptID   restic.ID
+ }
+ 
+ type delayedFirstBlobUploader struct {
+@@ -381,10 +381,10 @@ func testRepackWaitsForAsyncSaveError(t *testing.T, version uint) {
+ 		done <- repo.WithBlobUploader(context.Background(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+ 			delayed := &heldCallbackBlobUploader{
+ 				BlobSaverWithAsync: uploader,
+-				started:           uploaderStarted,
+-				release:           release,
+-				firstErr:          firstSaveErr,
+-				corrupt:           true,
++				started:            uploaderStarted,
++				release:            release,
++				firstErr:           firstSaveErr,
++				corrupt:            true,
+ 			}
+ 			return repository.CopyBlobs(ctx, repo, repo, delayed, packs, keepBlobs, restic.NoopCounter, nil)
+ 		})
+@@ -530,8 +530,8 @@ func testRepackCancelsPendingAsyncSave(t *testing.T, version uint) {
+ 		done <- repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+ 			delayed := &heldCallbackBlobUploader{
+ 				BlobSaverWithAsync: uploader,
+-				started:           uploaderStarted,
+-				release:           release,
++				started:            uploaderStarted,
++				release:            release,
+ 			}
+ 			return repository.CopyBlobs(ctx, repo, repo, delayed, packs, keepBlobs, restic.NoopCounter, nil)
+ 		})
+diff --git a/internal/repository/save_verify_compressed_test.go b/internal/repository/save_verify_compressed_test.go
+index 1d3b6aa8ac398a19136b63627526eaa427a5ddaf..c738e23708c9bcb2977b49169f7129be5a6c9e58 100644
+--- a/internal/repository/save_verify_compressed_test.go
++++ b/internal/repository/save_verify_compressed_test.go
+@@ -45,10 +45,14 @@ func TestSavedStreamVerifyEquivalence(t *testing.T) {
+ 	r := &Repository{key: crypto.NewRandomKey()}
+ 	defer func() { r.getZstdDecoder().Close() }()
+ 	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(512<<10), zstd.WithEncoderCRC(true))
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer enc.Close()
+ 	wide, err := zstd.NewWriter(nil, zstd.WithWindowSize(2<<20), zstd.WithEncoderCRC(true))
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer wide.Close()
+ 	p := bytes.Repeat([]byte("a bounded verification example "), (4<<20)/31+1)
+ 	frame := enc.EncodeAll(p, nil)
+@@ -56,7 +60,11 @@ func TestSavedStreamVerifyEquivalence(t *testing.T) {
+ 	late[len(late)-1] ^= 1
+ 	second := enc.EncodeAll([]byte("tail"), nil)
+ 	joined := append(append([]byte(nil), frame...), second...)
+-	for _, tc := range []struct { name string; compressed []byte; id restic.ID }{
++	for _, tc := range []struct {
++		name       string
++		compressed []byte
++		id         restic.ID
++	}{
+ 		{"valid", frame, restic.Hash(p)},
+ 		{"wrong-content", frame, restic.Hash([]byte("wrong"))},
+ 		{"truncated", frame[:len(frame)-3], restic.Hash(p)},
+@@ -71,38 +79,58 @@ func TestSavedStreamVerifyEquivalence(t *testing.T) {
+ 			before := append([]byte(nil), buf...)
+ 			got := r.verifyCiphertext(buf, len(p), tc.id)
+ 			want := eagerSaveVerifyTest(r, buf, len(p), tc.id)
+-			if fmt.Sprint(got) != fmt.Sprint(want) { t.Fatalf("got %v, want %v", got, want) }
+-			if !bytes.Equal(buf, before) { t.Fatal("verification modified ciphertext") }
++			if fmt.Sprint(got) != fmt.Sprint(want) {
++				t.Fatalf("got %v, want %v", got, want)
++			}
++			if !bytes.Equal(buf, before) {
++				t.Fatal("verification modified ciphertext")
++			}
+ 		})
+ 	}
+ 	buf := encryptSaveVerifyTest(r, frame)
+ 	buf[len(buf)-1] ^= 1
+-	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err == nil || !strings.Contains(err.Error(), "decryption failed") { t.Fatalf("authentication: %v", err) }
++	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err == nil || !strings.Contains(err.Error(), "decryption failed") {
++		t.Fatalf("authentication: %v", err)
++	}
+ 	r.opts.NoExtraVerify = true
+-	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err != nil { t.Fatalf("NoExtraVerify: %v", err) }
++	if err := r.verifyCiphertext(buf, len(p), restic.Hash(p)); err != nil {
++		t.Fatalf("NoExtraVerify: %v", err)
++	}
+ }
+ 
+ func TestSavedStreamVerifyDispatchAndConcurrent(t *testing.T) {
+ 	r := &Repository{key: crypto.NewRandomKey()}
+ 	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(512<<10))
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer enc.Close()
+ 	p := make([]byte, 4<<20)
+ 	_, _ = rand.New(rand.NewSource(18)).Read(p)
+ 	frame := enc.EncodeAll(p, nil)
+ 	id := restic.Hash(p)
+-	if handled, err := verifySavedCompressedHash(frame, id); !handled || err != nil { t.Fatalf("normal window dispatch %v: %v", handled, err) }
++	if handled, err := verifySavedCompressedHash(frame, id); !handled || err != nil {
++		t.Fatalf("normal window dispatch %v: %v", handled, err)
++	}
+ 	wide, err := zstd.NewWriter(nil, zstd.WithWindowSize(2<<20))
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer wide.Close()
+-	if handled, _ := verifySavedCompressedHash(wide.EncodeAll(p, nil), id); handled { t.Fatal("large window must fall back") }
++	if handled, _ := verifySavedCompressedHash(wide.EncodeAll(p, nil), id); handled {
++		t.Fatal("large window must fall back")
++	}
+ 	buf := encryptSaveVerifyTest(r, frame)
+ 	var wg sync.WaitGroup
+ 	for range 4 {
+ 		wg.Add(1)
+ 		go func() {
+ 			defer wg.Done()
+-			for range 3 { if err := r.verifyCiphertext(buf, len(p), id); err != nil { t.Error(err) } }
++			for range 3 {
++				if err := r.verifyCiphertext(buf, len(p), id); err != nil {
++					t.Error(err)
++				}
++			}
+ 		}()
+ 	}
+ 	wg.Wait()
+@@ -110,7 +138,9 @@ func TestSavedStreamVerifyDispatchAndConcurrent(t *testing.T) {
+ 
+ func TestSavedStreamCumulativeOutputLimit(t *testing.T) {
+ 	enc, err := zstd.NewWriter(nil, zstd.WithWindowSize(512<<10), zstd.WithEncoderCRC(true))
+-	if err != nil { t.Fatal(err) }
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	defer enc.Close()
+ 	part := bytes.Repeat([]byte{19}, 128<<10)
+ 	frame := enc.EncodeAll(part, nil)
+@@ -167,7 +197,7 @@ func TestSavedStreamExactLimitTerminalSettlement(t *testing.T) {
+ // Complete saving includes encryption, extra verification, packer writes and
+ // final uploader settlement. Each benchmark gets an independent repository.
+ func BenchmarkB18CompleteSaveVerify(b *testing.B) {
+-	for _, size := range []int{1<<20, 4<<20, 8<<20} {
++	for _, size := range []int{1 << 20, 4 << 20, 8 << 20} {
+ 		b.Run(fmt.Sprint(size), func(b *testing.B) {
+ 			TestUseLowSecurityKDFParameters(b)
+ 			r, _, _ := TestRepositoryWithVersion(b, 2)
+@@ -178,11 +208,15 @@ func BenchmarkB18CompleteSaveVerify(b *testing.B) {
+ 			b.ResetTimer()
+ 			err := r.WithBlobUploader(context.Background(), func(ctx context.Context, u restic.BlobSaverWithAsync) error {
+ 				for range b.N {
+-					if _, _, _, err := u.SaveBlob(ctx, restic.DataBlob, p, id, true); err != nil { return err }
++					if _, _, _, err := u.SaveBlob(ctx, restic.DataBlob, p, id, true); err != nil {
++						return err
++					}
+ 				}
+ 				return nil
+ 			})
+-			if err != nil { b.Fatal(err) }
++			if err != nil {
++				b.Fatal(err)
++			}
+ 		})
+ 	}
+ }
+diff --git a/internal/ui/backup/progress.go b/internal/ui/backup/progress.go
+index b5251c8b591119ff9c145f438311d6ca6e4fc9fb..4c0f930a80edce4aa3558e751bfc4cf7eee9d47e 100644
+--- a/internal/ui/backup/progress.go
++++ b/internal/ui/backup/progress.go
+@@ -42,10 +42,10 @@ type Progress struct {
+ 	scanStarted, scanFinished bool
+ 	archiveStarted            bool
+ 
+-	currentFiles     map[string]struct{}
+-	processed        Counter
+-	total            Counter
+-	errors           uint
++	currentFiles map[string]struct{}
++	processed    Counter
++	total        Counter
++	errors       uint
+ 
+ 	printer ProgressPrinter
+ }
+diff --git a/internal/ui/backup/progress_scan_test.go b/internal/ui/backup/progress_scan_test.go
+index c8b09040bf0b3d01afdef440cd468c143bfb6fea..9210469fb59623801c8e5273a6bdfe8138ed65af 100644
+--- a/internal/ui/backup/progress_scan_test.go
++++ b/internal/ui/backup/progress_scan_test.go
+@@ -46,8 +46,8 @@ func (p *gatedScanPrinter) ReportTotal(_ time.Time, _ archiver.ScanStats) {
+ func TestProgressFinalScanPublicationSerialized(t *testing.T) {
+ 	printer := &gatedScanPrinter{
+ 		mockPrinter: &mockPrinter{Printer: restic.NewNoopPrinter()},
+-		entered: make(chan struct{}),
+-		release: make(chan struct{}),
++		entered:     make(chan struct{}),
++		release:     make(chan struct{}),
+ 	}
+ 	p := newProgress(printer, 0)
+ 	done := make(chan struct{})
+@@ -108,4 +108,3 @@ func TestProgressIndependentScanAndArchiveAccounting(t *testing.T) {
+ 		t.Fatal("final scan result was not published")
+ 	}
+ }
+-
+diff --git a/internal/ui/termstatus/status.go b/internal/ui/termstatus/status.go
+index 8759fd6eb382911c22ce725dddb8716ee7b5b8dc..fa16239f97a7db2a2a607a0a869debe9c41852cb 100644
+--- a/internal/ui/termstatus/status.go
++++ b/internal/ui/termstatus/status.go
+@@ -106,14 +106,14 @@ func Setup(stdin io.ReadCloser, stdout, stderr io.Writer, quiet bool) (ui.Termin
+ 
+ func new(rd io.ReadCloser, wr io.Writer, errWriter io.Writer, disableStatus bool) *terminal {
+ 	t := &terminal{
+-		rd:               rd,
+-		wr:               wr,
+-		errWriter:        errWriter,
+-		msg:              make(chan message),
+-		status:           make(chan status),
+-		closed:           make(chan struct{}),
+-		batchStdout:      isRegularFile(wr),
+-		batchStderr:      isRegularFile(errWriter),
++		rd:                rd,
++		wr:                wr,
++		errWriter:         errWriter,
++		msg:               make(chan message),
++		status:            make(chan status),
++		closed:            make(chan struct{}),
++		batchStdout:       isRegularFile(wr),
++		batchStderr:       isRegularFile(errWriter),
+ 		outputBatchWindow: 100 * time.Microsecond,
+ 	}
+ 

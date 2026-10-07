@@ -1,0 +1,528 @@
+From d5d0e35660e00049f22716a778cb2f5bf14c4a60 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:53:17 +0000
+Subject: [PATCH 46/49] Red team fix 5: nothing is heard of the reads of the
+ lock wait unless they are used
+
+The reads a command starts during the lock's settle delay go through the
+retrying backend, which reports errors, retries and successes on stderr at
+once. A failed index listing of the wait was therefore printed even when the
+lock was then refused, where stock, which reads nothing before the lock is
+confirmed, prints the lock error only.
+
+The retrying backend can now hold its reports for the operations of a
+context (retry.WithHeldReports). The index load of the wait runs on such a
+context. Its reports are shown when the index of the wait is kept or
+extended, at the point where the command loads the index, in place of what
+stock's load would report there. They are dropped when the lock is refused
+and when the reads are discarded after confirmation: stock makes no such
+reads then, or the load that replaces them reports for itself. The snapshot
+listing of the wait is only compared and never used, so its reports are
+always dropped. Progress was already held back the same way.
+
+Tests: TestRefusedLockShowsNoWaitDiagnostics (seat 1 R3, carried in; the
+restore command, production 200 ms delay) fails before this commit and
+passes after. TestWaitDiagnosticsFollowTheUseOfTheReads covers kept,
+refused and discarded reads; TestHeldReports covers the holder.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ cmd/restic/lock_wait_reports_test.go        | 222 ++++++++++++++++++++
+ cmd/restic/wait_index_load.go               |  23 +-
+ internal/backend/retry/backend_retry.go     |   4 +-
+ internal/backend/retry/held_reports.go      |  94 +++++++++
+ internal/backend/retry/held_reports_test.go |  55 +++++
+ 5 files changed, 394 insertions(+), 4 deletions(-)
+ create mode 100644 cmd/restic/lock_wait_reports_test.go
+ create mode 100644 internal/backend/retry/held_reports.go
+ create mode 100644 internal/backend/retry/held_reports_test.go
+
+diff --git a/cmd/restic/lock_wait_reports_test.go b/cmd/restic/lock_wait_reports_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..74da3e5bfa17e71c4392cbf228861eea8f691d56
+--- /dev/null
++++ b/cmd/restic/lock_wait_reports_test.go
+@@ -0,0 +1,222 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/backend"
++	"github.com/restic/restic/internal/backend/retry"
++	"github.com/restic/restic/internal/global"
++	"github.com/restic/restic/internal/repository"
++	"github.com/restic/restic/internal/restic"
++	rtest "github.com/restic/restic/internal/test"
++)
++
++type indexListErrorBackend struct {
++	backend.Backend
++	err error
++}
++
++func (be *indexListErrorBackend) List(ctx context.Context, typ backend.FileType, fn func(backend.FileInfo) error) error {
++	if typ == backend.IndexFile {
++		return be.err
++	}
++	return be.Backend.List(ctx, typ, fn)
++}
++
++func (be *indexListErrorBackend) IsPermanentError(err error) bool {
++	return err == be.err || be.Backend.IsPermanentError(err)
++}
++
++// firstLockListHiddenBackend hides the lock files from the first listing: a
++// competing lock becomes visible only in the confirmation scan.
++type firstLockListHiddenBackend struct {
++	backend.Backend
++	mu    sync.Mutex
++	lists int
++}
++
++func (be *firstLockListHiddenBackend) List(ctx context.Context, typ backend.FileType, fn func(backend.FileInfo) error) error {
++	if typ == backend.LockFile {
++		be.mu.Lock()
++		be.lists++
++		first := be.lists == 1
++		be.mu.Unlock()
++		if first {
++			return nil
++		}
++	}
++	return be.Backend.List(ctx, typ, fn)
++}
++
++// TestRefusedLockShowsNoWaitDiagnostics is the red team's test (seat 1 R3):
++// the index listing of the wait fails, and the lock is then refused. Stock
++// makes no such listing and prints the lock error only.
++func TestRefusedLockShowsNoWaitDiagnostics(t *testing.T) {
++	env, cleanup := withTestEnvironment(t)
++	defer cleanup()
++	env.gopts.NoCache = true
++	env.gopts.BackendTestHook = nil
++	testRunInit(t, env.gopts)
++	var competitor *repository.Repository
++	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, opts global.Options) error {
++		var err error
++		competitor, err = global.OpenRepository(ctx, opts, restic.NewNoopPrinter())
++		return err
++	}))
++	unlock, _, err := repository.LockRepo(context.Background(), competitor, true, 0, func(string) {}, func(string, ...any) {})
++	rtest.OK(t, err)
++	defer unlock()
++	failure := fmt.Errorf("injected unconfirmed index listing failure")
++	env.gopts.BackendInnerTestHook = func(be backend.Backend) (backend.Backend, error) {
++		return &indexListErrorBackend{Backend: be, err: failure}, nil
++	}
++	env.gopts.BackendTestHook = func(be backend.Backend) (backend.Backend, error) {
++		return &firstLockListHiddenBackend{Backend: be}, nil
++	}
++	run := func() (string, error) {
++		_, stderr, err := withCaptureStdoutStderr(t, env.gopts, func(ctx context.Context, opts global.Options) error {
++			return runRestore(ctx, RestoreOptions{Target: filepath.Join(env.base, "unused-restore")}, opts, opts.Term, []string{"latest"})
++		})
++		return stderr.String(), err
++	}
++	repository.TestSetLockTimeout(t, 200*time.Millisecond)
++	defer repository.TestSetLockTimeout(t, 0)
++	gotStderr, gotError := run()
++	rtest.Assert(t, repository.IsAlreadyLocked(gotError), "the competing lock must be refused: %v", gotError)
++	repository.TestSetLockTimeout(t, 0)
++	wantStderr, wantError := run()
++	rtest.Assert(t, repository.IsAlreadyLocked(wantError), "the control must refuse the competing lock: %v", wantError)
++	if gotStderr != wantStderr {
++		t.Fatalf("a read made before the lock was confirmed was reported although the lock was refused: stderr %q, without wait work %q", gotStderr, wantStderr)
++	}
++}
++
++// flakyLoadBackend fails the first load of every index file and of nothing
++// else, with an error that is retried.
++type flakyLoadBackend struct {
++	backend.Backend
++	mu     sync.Mutex
++	failed map[string]bool
++}
++
++func (be *flakyLoadBackend) Load(ctx context.Context, h backend.Handle, n int, offset int64, fn func(io.Reader) error) error {
++	if h.Type == backend.IndexFile {
++		be.mu.Lock()
++		first := !be.failed[h.Name]
++		be.failed[h.Name] = true
++		be.mu.Unlock()
++		if first {
++			return fmt.Errorf("injected transient failure")
++		}
++	}
++	return be.Backend.Load(ctx, h, n, offset, fn)
++}
++
++type reportLog struct {
++	mu    sync.Mutex
++	lines []string
++}
++
++func (l *reportLog) add(format string, args ...any) {
++	l.mu.Lock()
++	l.lines = append(l.lines, fmt.Sprintf(format, args...))
++	l.mu.Unlock()
++}
++
++func (l *reportLog) text() string {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return strings.Join(l.lines, "\n")
++}
++
++// The reports of the retries made during the wait are shown when the index of
++// the wait is used, at the point where the command loads the index, and never
++// when it is not used.
++func TestWaitDiagnosticsFollowTheUseOfTheReads(t *testing.T) {
++	retry.TestFastRetries(t)
++	for _, test := range []string{"kept", "lock refused", "discarded after confirmation"} {
++		t.Run(test, func(t *testing.T) {
++			ctx := context.Background()
++			writer, shared := repository.TestRepositoryWithBackend(t, nil, 2, repository.Options{})
++			_, err := schedStoreSnapshot(ctx, writer, 46, []int{0}, time.Now())
++			rtest.OK(t, err)
++
++			log := &reportLog{}
++			be := retry.New(&flakyLoadBackend{Backend: shared, failed: map[string]bool{}}, time.Minute,
++				func(msg string, err error, d time.Duration) { log.add("%v failed: %v", msg, err) },
++				func(msg string, retries int) { log.add("%v successful after %d retries", msg, retries) })
++			repo, err := schedOpenRepository(ctx, be)
++			rtest.OK(t, err)
++
++			load := startRepositoryIndexLoadAfterSnapshots(ctx, repo, true)
++			defer load.discard()
++			deadline := time.After(10 * time.Second)
++			for len(load.result) == 0 {
++				select {
++				case <-deadline:
++					t.Fatal("the index load of the wait did not finish")
++				default:
++					time.Sleep(time.Millisecond)
++				}
++			}
++			if got := log.text(); got != "" {
++				t.Fatalf("reported before the lock was confirmed:\n%s", got)
++			}
++
++			switch test {
++			case "lock refused":
++				load.settle(false)
++				if got := log.text(); got != "" {
++					t.Fatalf("reported although the lock was refused:\n%s", got)
++				}
++			case "kept":
++				load.settle(true)
++				_ = load.snapshotLister(repo)
++				if got := log.text(); got != "" {
++					t.Fatalf("reported before the command loads the index:\n%s", got)
++				}
++				rtest.OK(t, load.consume(restic.NoopTerminalCounterFactory))
++				got := log.text()
++				if !strings.Contains(got, "injected transient failure") || !strings.Contains(got, "successful after 1 retries") {
++					t.Fatalf("the retries of the index that is used were not reported:\n%s", got)
++				}
++			case "discarded after confirmation":
++				// another index file appears to be gone: the reads are discarded
++				var target backend.Handle
++				rtest.OK(t, shared.List(ctx, backend.IndexFile, func(fi backend.FileInfo) error {
++					target = backend.Handle{Type: backend.IndexFile, Name: fi.Name}
++					return nil
++				}))
++				var raw []byte
++				rtest.OK(t, shared.Load(ctx, target, 0, 0, func(rd io.Reader) (err error) {
++					raw, err = io.ReadAll(rd)
++					return err
++				}))
++				rtest.OK(t, shared.Remove(ctx, target))
++				other := backend.Handle{Type: backend.IndexFile, Name: restic.Hash(raw[:len(raw)-1]).String()}
++				rtest.OK(t, shared.Save(ctx, other, backend.NewByteReader(raw[:len(raw)-1], shared.Hasher())))
++
++				load.settle(true)
++				_ = load.snapshotLister(repo)
++				err := load.consume(restic.NoopTerminalCounterFactory)
++				if !load.rereadAfterConfirmation() {
++					t.Fatalf("the reads of the wait were not discarded (error %v)", err)
++				}
++				// what is reported now belongs to the load after confirmation,
++				// which meets the new file for the first time
++				for _, line := range strings.Split(log.text(), "\n") {
++					if line != "" && !strings.Contains(line, other.Name[:10]) && !strings.Contains(line, other.Name) {
++						t.Fatalf("a report of the discarded reads was shown: %q", line)
++					}
++				}
++			}
++		})
++	}
++}
+diff --git a/cmd/restic/wait_index_load.go b/cmd/restic/wait_index_load.go
+index e4545dbce57b50bbaf4e569fb64246e69127cf31..89d0c7e084fcc6d891619f972fe966e844e3b53d 100644
+--- a/cmd/restic/wait_index_load.go
++++ b/cmd/restic/wait_index_load.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"context"
+ 
++	"github.com/restic/restic/internal/backend/retry"
+ 	"github.com/restic/restic/internal/errors"
+ 	"github.com/restic/restic/internal/repository"
+ 	"github.com/restic/restic/internal/restic"
+@@ -34,6 +35,14 @@ import (
+ //     another size, or if any read during the wait failed, everything read
+ //     during the wait is discarded and read again as stock does: snapshots,
+ //     then the index.
++//   - Nothing is heard of the reads of the wait unless they are used. What
++//     the backend's retries report for them (errors, retries, successes) is
++//     held back. It is shown where the command loads the index when the
++//     index of the wait is kept, in place of what stock's load would report
++//     there, and dropped when the lock is refused or the reads are discarded:
++//     stock makes no such reads then, or makes its own, which report for
++//     themselves. The snapshot listing of the wait is only compared, never
++//     used, so its reports are always dropped.
+ //
+ // A name is the hash of the content that was read during the wait. It does
+ // not say what is stored under that name now: a file that was damaged in
+@@ -135,6 +144,8 @@ type repositoryIndexLoad struct {
+ 	result    chan error
+ 	progress  *delayedTerminalCounterFactory
+ 	snapshots *preparedSnapshots // listed during the wait; only compared
++	// reports holds what the retries of the index load of the wait report
++	reports *retry.HeldReports
+ 	// confirmed is the listing the command took after the lock was confirmed
+ 	confirmed *preparedSnapshots
+ 	verdict   lockWaitVerdict
+@@ -167,15 +178,19 @@ func startRepositoryIndexLoadAfterSnapshots(ctx context.Context, repo *repositor
+ 	if listSnapshots {
+ 		load.snapshots = newPreparedSnapshots()
+ 	}
++	indexCtx, reports := retry.WithHeldReports(loadCtx)
++	load.reports = reports
+ 	go func() {
+-		load.snapshots.list(loadCtx, repo)
++		listCtx, listReports := retry.WithHeldReports(loadCtx)
++		load.snapshots.list(listCtx, repo)
++		listReports.Drop()
+ 		if load.snapshots != nil && load.snapshots.err != nil {
+ 			// The index is not listed after a failed snapshot listing: the
+ 			// snapshots are listed again later, and the index must follow.
+ 			load.result <- errLockWaitSnapshotListing
+ 			return
+ 		}
+-		load.result <- repo.LoadIndex(loadCtx, load.progress)
++		load.result <- repo.LoadIndex(indexCtx, load.progress)
+ 	}()
+ 	return load
+ }
+@@ -301,12 +316,15 @@ func (load *repositoryIndexLoad) consume(printer restic.TerminalCounterFactory)
+ 	load.verdict, added = validateLockWaitReads(load.ctx, load.repo, load.snapshots, confirmed, load.waitErr)
+ 	switch load.verdict {
+ 	case keepLockWaitReads:
++		load.reports.Release()
+ 		load.progress.activate(printer)
+ 	case extendLockWaitReads:
++		load.reports.Release()
+ 		load.progress.activate(printer)
+ 		// only the added index files are read
+ 		load.err = load.repo.LoadAddedIndexFiles(load.ctx, added)
+ 	default:
++		load.reports.Drop()
+ 		load.reread = true
+ 		load.repo.DiscardIndex()
+ 		load.err = load.repo.LoadIndex(load.ctx, printer)
+@@ -334,5 +352,6 @@ func (load *repositoryIndexLoad) discard() {
+ 	load.cancel()
+ 	load.join()
+ 	load.done = true
++	load.reports.Drop()
+ 	load.repo.DiscardIndex()
+ }
+diff --git a/internal/backend/retry/backend_retry.go b/internal/backend/retry/backend_retry.go
+index fcfd238254f12876fb85629573d6501f4f9ca83e..630aee8cb935dc3b22eb65d74ad9a8de977aae33 100644
+--- a/internal/backend/retry/backend_retry.go
++++ b/internal/backend/retry/backend_retry.go
+@@ -148,12 +148,12 @@ func (be *Backend) retry(ctx context.Context, msg string, f func() error) error
+ 		backoff.WithContext(b, ctx),
+ 		func(err error, d time.Duration) {
+ 			if be.Report != nil {
+-				be.Report(msg, err, d)
++				report(ctx, func() { be.Report(msg, err, d) })
+ 			}
+ 		},
+ 		func(retries int) {
+ 			if be.Success != nil {
+-				be.Success(msg, retries)
++				report(ctx, func() { be.Success(msg, retries) })
+ 			}
+ 		},
+ 	)
+diff --git a/internal/backend/retry/held_reports.go b/internal/backend/retry/held_reports.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7f11fa907090c4e7ae1c067740d6a0bbd2a9d52
+--- /dev/null
++++ b/internal/backend/retry/held_reports.go
+@@ -0,0 +1,94 @@
++package retry
++
++import (
++	"context"
++	"sync"
++)
++
++// HeldReports keeps what the retries of some operations would report (an
++// error with the delay until the next attempt, the final error, a success
++// after retries) until the owner of those operations knows whether their
++// result is used. Release reports everything that was held, in order, and
++// lets later reports through; Drop discards what was held and every later
++// report.
++//
++// It exists for reads which a command starts before it holds the repository
++// lock: stock does not make them, so nothing may be heard of them unless
++// they take the place of reads that stock makes.
++type HeldReports struct {
++	mu      sync.Mutex
++	state   heldState
++	pending []func()
++}
++
++type heldState int
++
++const (
++	holdingReports heldState = iota
++	releasedReports
++	droppedReports
++)
++
++type heldReportsKey struct{}
++
++// WithHeldReports returns a context on which the reports of this package are
++// held, and the holder.
++func WithHeldReports(ctx context.Context) (context.Context, *HeldReports) {
++	h := &HeldReports{}
++	return context.WithValue(ctx, heldReportsKey{}, h), h
++}
++
++// report runs fn now, later or never, according to the holder of ctx.
++func report(ctx context.Context, fn func()) {
++	h, _ := ctx.Value(heldReportsKey{}).(*HeldReports)
++	if h == nil {
++		fn()
++		return
++	}
++	h.mu.Lock()
++	switch h.state {
++	case holdingReports:
++		h.pending = append(h.pending, fn)
++		h.mu.Unlock()
++		return
++	case droppedReports:
++		h.mu.Unlock()
++		return
++	}
++	h.mu.Unlock()
++	fn()
++}
++
++// Release reports what was held and no longer holds anything back. It does
++// nothing after Drop.
++func (h *HeldReports) Release() {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	if h.state != holdingReports {
++		return
++	}
++	// reports made meanwhile wait for the lock, so the order is kept
++	for _, fn := range h.pending {
++		fn()
++	}
++	h.pending = nil
++	h.state = releasedReports
++}
++
++// Drop discards what was held and everything reported from now on. It does
++// nothing after Release.
++func (h *HeldReports) Drop() {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	if h.state != holdingReports {
++		return
++	}
++	h.pending = nil
++	h.state = droppedReports
++}
+diff --git a/internal/backend/retry/held_reports_test.go b/internal/backend/retry/held_reports_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8c3262b4ddb3aa341ddf8ed07fd2d9adf367a9e
+--- /dev/null
++++ b/internal/backend/retry/held_reports_test.go
+@@ -0,0 +1,55 @@
++package retry
++
++import (
++	"context"
++	"reflect"
++	"testing"
++)
++
++func TestHeldReports(t *testing.T) {
++	var got []string
++	say := func(ctx context.Context, s string) {
++		report(ctx, func() { got = append(got, s) })
++	}
++
++	// without a holder a report is made at once
++	say(context.Background(), "direct")
++	if !reflect.DeepEqual(got, []string{"direct"}) {
++		t.Fatalf("got %v", got)
++	}
++
++	// held until released, in order; later reports pass
++	got = nil
++	ctx, held := WithHeldReports(context.Background())
++	child, cancel := context.WithCancel(ctx)
++	defer cancel()
++	say(ctx, "one")
++	say(child, "two")
++	if got != nil {
++		t.Fatalf("reported while held: %v", got)
++	}
++	held.Release()
++	say(child, "three")
++	held.Drop() // nothing after Release
++	say(ctx, "four")
++	if want := []string{"one", "two", "three", "four"}; !reflect.DeepEqual(got, want) {
++		t.Fatalf("got %v, want %v", got, want)
++	}
++
++	// dropped for good
++	got = nil
++	ctx, held = WithHeldReports(context.Background())
++	say(ctx, "one")
++	held.Drop()
++	say(ctx, "two")
++	held.Release() // nothing after Drop
++	say(ctx, "three")
++	if got != nil {
++		t.Fatalf("reported after Drop: %v", got)
++	}
++
++	// a nil holder is accepted
++	var none *HeldReports
++	none.Release()
++	none.Drop()
++}

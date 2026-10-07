@@ -1,0 +1,4229 @@
+{
+ "ok": true,
+ "op": "bench",
+ "seconds": 433.08,
+ "workload": "remote",
+ "candidate_sha256": "7a9ad12c6a999517d8b561faaa7aae99c208be40b181f0df98f849760364cddb",
+ "summary": "backup-initial: +6.58% time, +46.16% memory, 5/5 wins, band +/-1.03% -> gain beyond noise; requests 91 vs 89, MiB up 1248.5 vs 1248.5, down 0 vs 0; backup-unchanged: +21.67% time, +60.69% memory, 5/5 wins, band +/-0.72% -> gain beyond noise; requests 19 vs 17, MiB up 6.1 vs 6.1, down 9.9 vs 9.9; backup-mutated: +19.75% time, +43.27% memory, 5/5 wins, band +/-3.27% -> gain beyond noise; requests 25 vs 23, MiB up 93.5 vs 93.5, down 9.9 vs 9.9; restore: +30.07% time, +58.12% memory, 5/5 wins, band +/-0.51% -> gain beyond noise; requests 91 vs 89, MiB up 0 vs 0, down 1245.4 vs 1245.4; check-read-data: +6.16% time, +41.93% memory, 5/5 wins, band +/-2.08% -> gain beyond noise; requests 90 vs 90, MiB up 0 vs 0, down 1248.4 vs 1248.4; forget-prune: +13.24% time, +17.89% memory, 5/5 wins, band +/-1.13% -> gain beyond noise; requests 134 vs 117, MiB up 135.1 vs 135.1, down 150.2 vs 153.1; ls-json: +37.08% time, +12.87% memory, 5/5 wins, band +/-0.41% -> gain beyond noise; requests 16 vs 14, MiB up 0 vs 0, down 9.9 vs 9.9. Worth on the remote score: +17.64 points from the resolved phases (+17.64 if every reading is taken at face value; phases not benched count as 0): backup-initial +6.58% x 22% of the time = +1.42; backup-unchanged +21.67% x 8% of the time = +1.72; backup-mutated +19.75% x 8% of the time = +1.68; restore +30.07% x 28% of the time = +8.31; check-read-data +6.16% x 19% of the time = +1.14; forget-prune +13.24% x 10% of the time = +1.38; ls-json +37.08% x 5% of the time = +1.98 (candidate vs incumbent; paired, each phase stops when its verdict is clear: 35 pairs in all, limit 5 per phase; performance governor; diagnostic, the judge alone scores). Note: remote is reached through a simulated link; requests and MiB are candidate vs incumbent. REST backend: 30 ms per request, 48 MiB/s per connection, 5 connections. latency_s = requests x latency (connection-seconds); transfer_floor_s = bytes moved / (rate x connections): no code change goes below it without moving fewer bytes. Request count and how many connections stay busy are the terms a tree can move.",
+ "diagnostic_only": true,
+ "harness_version": "rt-2",
+ "cpus": "26,27,28,29,30,31,32,33",
+ "team": "FINALM",
+ "versus": "incumbent",
+ "reps": 5,
+ "reps_target": 5,
+ "reps_limit": 5,
+ "governor": "performance",
+ "identical_build_input": false,
+ "phases": {
+  "backup-initial": {
+   "time_saved_pct": 6.58,
+   "rss_saved_pct": 46.16,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 1.03,
+   "rss_noise_band_pct": 4.5,
+   "verdict": "gain beyond noise",
+   "reason": "median +6.58% is outside the +/-1.03% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 0.479,
+    "null": 0.9148
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 7.894,
+   "inc_median_s": 8.449,
+   "cand_median_rss_mib": 165.5,
+   "inc_median_rss_mib": 308.7,
+   "null": {
+    "time_pair_sigma_pct": 0.9148,
+    "rss_pair_sigma_pct": 4.0164,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:22:45.576004+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 7.9313,
+     "inc_s": 8.5191,
+     "cand_rss_mib": 165.5,
+     "inc_rss_mib": 307.4,
+     "time_saved_pct": 6.9,
+     "rss_saved_pct": 46.161,
+     "cand_requests": 91,
+     "cand_mib_up": 1248.5,
+     "cand_mib_down": 0.0,
+     "inc_requests": 88,
+     "inc_mib_up": 1248.5,
+     "inc_mib_down": 0.0,
+     "cand_user_s": 16.971,
+     "inc_user_s": 17.217,
+     "cand_sys_s": 3.854,
+     "inc_sys_s": 4.411
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 7.8773,
+     "inc_s": 8.4162,
+     "cand_rss_mib": 175.4,
+     "inc_rss_mib": 300.2,
+     "time_saved_pct": 6.403,
+     "rss_saved_pct": 41.572,
+     "cand_requests": 91,
+     "cand_mib_up": 1248.5,
+     "cand_mib_down": 0.0,
+     "inc_requests": 89,
+     "inc_mib_up": 1248.5,
+     "inc_mib_down": 0.0,
+     "cand_user_s": 16.901,
+     "inc_user_s": 17.176,
+     "cand_sys_s": 3.926,
+     "inc_sys_s": 4.36
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 7.8935,
+     "inc_s": 8.4492,
+     "cand_rss_mib": 176.5,
+     "inc_rss_mib": 323.3,
+     "time_saved_pct": 6.577,
+     "rss_saved_pct": 45.407,
+     "cand_requests": 91,
+     "cand_mib_up": 1248.5,
+     "cand_mib_down": 0.0,
+     "inc_requests": 88,
+     "inc_mib_up": 1248.5,
+     "inc_mib_down": 0.0,
+     "cand_user_s": 17.084,
+     "inc_user_s": 17.263,
+     "cand_sys_s": 3.967,
+     "inc_sys_s": 4.314
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 7.9276,
+     "inc_s": 8.4067,
+     "cand_rss_mib": 161.0,
+     "inc_rss_mib": 314.6,
+     "time_saved_pct": 5.699,
+     "rss_saved_pct": 48.824,
+     "cand_requests": 91,
+     "cand_mib_up": 1248.5,
+     "cand_mib_down": 0.0,
+     "inc_requests": 89,
+     "inc_mib_up": 1248.5,
+     "inc_mib_down": 0.0,
+     "cand_user_s": 17.223,
+     "inc_user_s": 17.286,
+     "cand_sys_s": 3.742,
+     "inc_sys_s": 4.372
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 7.8724,
+     "inc_s": 8.5345,
+     "cand_rss_mib": 163.2,
+     "inc_rss_mib": 308.7,
+     "time_saved_pct": 7.758,
+     "rss_saved_pct": 47.133,
+     "cand_requests": 90,
+     "cand_mib_up": 1248.5,
+     "cand_mib_down": 0.0,
+     "inc_requests": 89,
+     "inc_mib_up": 1248.5,
+     "inc_mib_down": 0.0,
+     "cand_user_s": 17.091,
+     "inc_user_s": 16.92,
+     "cand_sys_s": 3.886,
+     "inc_sys_s": 4.401
+    }
+   ],
+   "seconds": 92.1,
+   "remote": {
+    "cand": {
+     "requests": 91,
+     "mib_up": 1248.5,
+     "mib_down": 0.0,
+     "latency_s": 2.73,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 5.2,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET index/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 76,
+       "mib_up": 1244.9,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 2,
+       "mib_up": 3.5,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 89,
+     "mib_up": 1248.5,
+     "mib_down": 0.0,
+     "latency_s": 2.67,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 5.2,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 76,
+       "mib_up": 1244.9,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 2,
+       "mib_up": 3.5,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 21.6,
+   "worth_on_workload_score": 1.42
+  },
+  "backup-unchanged": {
+   "time_saved_pct": 21.67,
+   "rss_saved_pct": 60.69,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 0.72,
+   "rss_noise_band_pct": 5.3,
+   "verdict": "gain beyond noise",
+   "reason": "median +21.67% is outside the +/-0.72% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 0.108,
+    "null": 0.642
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 2.434,
+   "inc_median_s": 3.111,
+   "cand_median_rss_mib": 79.8,
+   "inc_median_rss_mib": 203.0,
+   "null": {
+    "time_pair_sigma_pct": 0.642,
+    "rss_pair_sigma_pct": 4.731,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:24:23.776567+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 2.4339,
+     "inc_s": 3.1071,
+     "cand_rss_mib": 79.8,
+     "inc_rss_mib": 203.0,
+     "time_saved_pct": 21.667,
+     "rss_saved_pct": 60.69,
+     "cand_requests": 19,
+     "cand_mib_up": 6.1,
+     "cand_mib_down": 9.9,
+     "inc_requests": 17,
+     "inc_mib_up": 6.1,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 2.766,
+     "inc_user_s": 3.074,
+     "cand_sys_s": 0.948,
+     "inc_sys_s": 0.982
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 2.4229,
+     "inc_s": 3.1021,
+     "cand_rss_mib": 79.2,
+     "inc_rss_mib": 203.3,
+     "time_saved_pct": 21.895,
+     "rss_saved_pct": 61.043,
+     "cand_requests": 19,
+     "cand_mib_up": 6.1,
+     "cand_mib_down": 9.9,
+     "inc_requests": 17,
+     "inc_mib_up": 6.1,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 2.806,
+     "inc_user_s": 3.082,
+     "cand_sys_s": 0.888,
+     "inc_sys_s": 0.994
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 2.4393,
+     "inc_s": 3.1113,
+     "cand_rss_mib": 80.0,
+     "inc_rss_mib": 197.5,
+     "time_saved_pct": 21.599,
+     "rss_saved_pct": 59.494,
+     "cand_requests": 19,
+     "cand_mib_up": 6.1,
+     "cand_mib_down": 9.9,
+     "inc_requests": 17,
+     "inc_mib_up": 6.1,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 2.77,
+     "inc_user_s": 3.02,
+     "cand_sys_s": 0.938,
+     "inc_sys_s": 1.002
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 2.4403,
+     "inc_s": 3.1124,
+     "cand_rss_mib": 82.4,
+     "inc_rss_mib": 192.6,
+     "time_saved_pct": 21.594,
+     "rss_saved_pct": 57.217,
+     "cand_requests": 19,
+     "cand_mib_up": 6.1,
+     "cand_mib_down": 9.9,
+     "inc_requests": 17,
+     "inc_mib_up": 6.1,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 2.781,
+     "inc_user_s": 3.021,
+     "cand_sys_s": 0.966,
+     "inc_sys_s": 1.021
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 2.4258,
+     "inc_s": 3.1261,
+     "cand_rss_mib": 79.8,
+     "inc_rss_mib": 203.9,
+     "time_saved_pct": 22.402,
+     "rss_saved_pct": 60.863,
+     "cand_requests": 19,
+     "cand_mib_up": 6.1,
+     "cand_mib_down": 9.9,
+     "inc_requests": 17,
+     "inc_mib_up": 6.1,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 2.848,
+     "inc_user_s": 3.075,
+     "cand_sys_s": 0.901,
+     "inc_sys_s": 1.045
+    }
+   ],
+   "seconds": 39.4,
+   "remote": {
+    "cand": {
+     "requests": 19,
+     "mib_up": 6.1,
+     "mib_down": 9.9,
+     "latency_s": 0.57,
+     "queue_s": 0,
+     "max_in_flight": 2,
+     "runs": 5,
+     "transfer_floor_s": 0.07,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 6.3
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 1,
+       "mib_up": 6.0,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 17,
+     "mib_up": 6.1,
+     "mib_down": 9.9,
+     "latency_s": 0.51,
+     "queue_s": 0,
+     "max_in_flight": 2,
+     "runs": 5,
+     "transfer_floor_s": 0.07,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 6.3
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 1,
+       "mib_up": 6.0,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 8.0,
+   "worth_on_workload_score": 1.72
+  },
+  "backup-mutated": {
+   "time_saved_pct": 19.75,
+   "rss_saved_pct": 43.27,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 3.27,
+   "rss_noise_band_pct": 6.96,
+   "verdict": "gain beyond noise",
+   "reason": "median +19.75% is outside the +/-3.27% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 1.604,
+    "null": 2.92
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 2.64,
+   "inc_median_s": 3.32,
+   "cand_median_rss_mib": 134.9,
+   "inc_median_rss_mib": 240.1,
+   "null": {
+    "time_pair_sigma_pct": 2.92,
+    "rss_pair_sigma_pct": 6.2054,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:25:46.950778+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 2.6405,
+     "inc_s": 3.1888,
+     "cand_rss_mib": 142.3,
+     "inc_rss_mib": 240.1,
+     "time_saved_pct": 17.195,
+     "rss_saved_pct": 40.733,
+     "cand_requests": 25,
+     "cand_mib_up": 93.5,
+     "cand_mib_down": 9.9,
+     "inc_requests": 23,
+     "inc_mib_up": 93.5,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 3.221,
+     "inc_user_s": 3.458,
+     "cand_sys_s": 1.061,
+     "inc_sys_s": 1.252
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 2.6356,
+     "inc_s": 3.3196,
+     "cand_rss_mib": 124.8,
+     "inc_rss_mib": 262.0,
+     "time_saved_pct": 20.605,
+     "rss_saved_pct": 52.366,
+     "cand_requests": 25,
+     "cand_mib_up": 93.5,
+     "cand_mib_down": 9.9,
+     "inc_requests": 23,
+     "inc_mib_up": 93.5,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 3.224,
+     "inc_user_s": 3.6,
+     "cand_sys_s": 1.017,
+     "inc_sys_s": 1.201
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 2.7048,
+     "inc_s": 3.3703,
+     "cand_rss_mib": 126.0,
+     "inc_rss_mib": 222.1,
+     "time_saved_pct": 19.746,
+     "rss_saved_pct": 43.269,
+     "cand_requests": 25,
+     "cand_mib_up": 93.5,
+     "cand_mib_down": 9.9,
+     "inc_requests": 23,
+     "inc_mib_up": 93.5,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 3.246,
+     "inc_user_s": 3.527,
+     "cand_sys_s": 1.05,
+     "inc_sys_s": 1.267
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 2.6863,
+     "inc_s": 3.393,
+     "cand_rss_mib": 134.9,
+     "inc_rss_mib": 219.2,
+     "time_saved_pct": 20.828,
+     "rss_saved_pct": 38.458,
+     "cand_requests": 25,
+     "cand_mib_up": 93.5,
+     "cand_mib_down": 9.9,
+     "inc_requests": 23,
+     "inc_mib_up": 93.5,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 3.329,
+     "inc_user_s": 3.499,
+     "cand_sys_s": 1.036,
+     "inc_sys_s": 1.238
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 2.6069,
+     "inc_s": 3.2025,
+     "cand_rss_mib": 136.4,
+     "inc_rss_mib": 241.4,
+     "time_saved_pct": 18.598,
+     "rss_saved_pct": 43.496,
+     "cand_requests": 25,
+     "cand_mib_up": 93.5,
+     "cand_mib_down": 9.9,
+     "inc_requests": 23,
+     "inc_mib_up": 93.5,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 3.211,
+     "inc_user_s": 3.629,
+     "cand_sys_s": 1.088,
+     "inc_sys_s": 1.204
+    }
+   ],
+   "seconds": 41.7,
+   "remote": {
+    "cand": {
+     "requests": 25,
+     "mib_up": 93.5,
+     "mib_down": 9.9,
+     "latency_s": 0.75,
+     "queue_s": 0,
+     "max_in_flight": 4,
+     "runs": 5,
+     "transfer_floor_s": 0.43,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 6.3
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 7,
+       "mib_up": 93.3,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 1,
+       "mib_up": 0.2,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 23,
+     "mib_up": 93.5,
+     "mib_down": 9.9,
+     "latency_s": 0.69,
+     "queue_s": 0,
+     "max_in_flight": 4,
+     "runs": 5,
+     "transfer_floor_s": 0.43,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 6.3
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 7,
+       "mib_up": 93.3,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 1,
+       "mib_up": 0.2,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 8.5,
+   "worth_on_workload_score": 1.68
+  },
+  "restore": {
+   "time_saved_pct": 30.07,
+   "rss_saved_pct": 58.12,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 0.51,
+   "rss_noise_band_pct": 3.8,
+   "verdict": "gain beyond noise",
+   "reason": "median +30.07% is outside the +/-0.51% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 0.454,
+    "null": 0.1364
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 7.548,
+   "inc_median_s": 10.818,
+   "cand_median_rss_mib": 127.9,
+   "inc_median_rss_mib": 305.4,
+   "null": {
+    "time_pair_sigma_pct": 0.1364,
+    "rss_pair_sigma_pct": 3.3907,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:28:56.636867+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 7.5146,
+     "inc_s": 10.831,
+     "cand_rss_mib": 127.9,
+     "inc_rss_mib": 305.4,
+     "time_saved_pct": 30.62,
+     "rss_saved_pct": 58.12,
+     "cand_requests": 91,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1245.4,
+     "inc_requests": 89,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1245.4,
+     "cand_user_s": 6.062,
+     "inc_user_s": 5.556,
+     "cand_sys_s": 2.809,
+     "inc_sys_s": 3.865
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 7.6824,
+     "inc_s": 10.8177,
+     "cand_rss_mib": 124.8,
+     "inc_rss_mib": 307.2,
+     "time_saved_pct": 28.983,
+     "rss_saved_pct": 59.375,
+     "cand_requests": 91,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1245.4,
+     "inc_requests": 89,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1245.4,
+     "cand_user_s": 5.976,
+     "inc_user_s": 5.539,
+     "cand_sys_s": 2.964,
+     "inc_sys_s": 3.777
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 7.5564,
+     "inc_s": 10.7654,
+     "cand_rss_mib": 125.7,
+     "inc_rss_mib": 305.4,
+     "time_saved_pct": 29.808,
+     "rss_saved_pct": 58.841,
+     "cand_requests": 91,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1245.4,
+     "inc_requests": 89,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1245.4,
+     "cand_user_s": 6.284,
+     "inc_user_s": 5.425,
+     "cand_sys_s": 3.002,
+     "inc_sys_s": 3.791
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 7.5485,
+     "inc_s": 10.7951,
+     "cand_rss_mib": 130.4,
+     "inc_rss_mib": 296.5,
+     "time_saved_pct": 30.075,
+     "rss_saved_pct": 56.02,
+     "cand_requests": 91,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1245.4,
+     "inc_requests": 89,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1245.4,
+     "cand_user_s": 6.082,
+     "inc_user_s": 5.465,
+     "cand_sys_s": 2.988,
+     "inc_sys_s": 3.754
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 7.5402,
+     "inc_s": 10.8306,
+     "cand_rss_mib": 129.9,
+     "inc_rss_mib": 289.7,
+     "time_saved_pct": 30.381,
+     "rss_saved_pct": 55.161,
+     "cand_requests": 91,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1245.4,
+     "inc_requests": 89,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1245.4,
+     "cand_user_s": 6.069,
+     "inc_user_s": 5.591,
+     "cand_sys_s": 3.049,
+     "inc_sys_s": 3.892
+    }
+   ],
+   "seconds": 113.0,
+   "remote": {
+    "cand": {
+     "requests": 91,
+     "mib_up": 0.0,
+     "mib_down": 1245.4,
+     "latency_s": 2.73,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 5.19,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 76,
+       "mib_up": 0.0,
+       "mib_down": 1241.9
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 89,
+     "mib_up": 0.0,
+     "mib_down": 1245.4,
+     "latency_s": 2.67,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 5.19,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 76,
+       "mib_up": 0.0,
+       "mib_down": 1241.9
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 27.6,
+   "worth_on_workload_score": 8.31
+  },
+  "check-read-data": {
+   "time_saved_pct": 6.16,
+   "rss_saved_pct": 41.93,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 2.08,
+   "rss_noise_band_pct": 4.95,
+   "verdict": "gain beyond noise",
+   "reason": "median +6.16% is outside the +/-2.08% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 0.51,
+    "null": 1.8555
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 6.812,
+   "inc_median_s": 7.268,
+   "cand_median_rss_mib": 86.5,
+   "inc_median_rss_mib": 149.5,
+   "null": {
+    "time_pair_sigma_pct": 1.8555,
+    "rss_pair_sigma_pct": 4.4137,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:31:46.960601+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 6.812,
+     "inc_s": 7.2329,
+     "cand_rss_mib": 88.5,
+     "inc_rss_mib": 152.4,
+     "time_saved_pct": 5.819,
+     "rss_saved_pct": 41.929,
+     "cand_requests": 90,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1248.4,
+     "inc_requests": 90,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1248.4,
+     "cand_user_s": 4.519,
+     "inc_user_s": 4.413,
+     "cand_sys_s": 0.493,
+     "inc_sys_s": 0.53
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 6.7942,
+     "inc_s": 7.2874,
+     "cand_rss_mib": 84.7,
+     "inc_rss_mib": 149.4,
+     "time_saved_pct": 6.768,
+     "rss_saved_pct": 43.307,
+     "cand_requests": 90,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1248.4,
+     "inc_requests": 90,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1248.4,
+     "cand_user_s": 4.513,
+     "inc_user_s": 4.352,
+     "cand_sys_s": 0.46,
+     "inc_sys_s": 0.543
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 6.8197,
+     "inc_s": 7.2676,
+     "cand_rss_mib": 89.5,
+     "inc_rss_mib": 149.5,
+     "time_saved_pct": 6.163,
+     "rss_saved_pct": 40.134,
+     "cand_requests": 90,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1248.4,
+     "inc_requests": 90,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1248.4,
+     "cand_user_s": 4.593,
+     "inc_user_s": 4.481,
+     "cand_sys_s": 0.425,
+     "inc_sys_s": 0.541
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 6.8032,
+     "inc_s": 7.1989,
+     "cand_rss_mib": 86.5,
+     "inc_rss_mib": 148.3,
+     "time_saved_pct": 5.497,
+     "rss_saved_pct": 41.672,
+     "cand_requests": 90,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1248.4,
+     "inc_requests": 90,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1248.4,
+     "cand_user_s": 4.627,
+     "inc_user_s": 4.381,
+     "cand_sys_s": 0.477,
+     "inc_sys_s": 0.573
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 6.8324,
+     "inc_s": 7.3014,
+     "cand_rss_mib": 80.6,
+     "inc_rss_mib": 156.9,
+     "time_saved_pct": 6.423,
+     "rss_saved_pct": 48.63,
+     "cand_requests": 90,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 1248.4,
+     "inc_requests": 90,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 1248.4,
+     "cand_user_s": 4.549,
+     "inc_user_s": 4.355,
+     "cand_sys_s": 0.429,
+     "inc_sys_s": 0.587
+    }
+   ],
+   "seconds": 77.3,
+   "remote": {
+    "cand": {
+     "requests": 90,
+     "mib_up": 0.0,
+     "mib_down": 1248.4,
+     "latency_s": 2.7,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 5.2,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 76,
+       "mib_up": 0.0,
+       "mib_down": 1244.9
+      },
+      "GET data/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 90,
+     "mib_up": 0.0,
+     "mib_down": 1248.4,
+     "latency_s": 2.7,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 5.2,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 76,
+       "mib_up": 0.0,
+       "mib_down": 1244.9
+      },
+      "GET data/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 18.6,
+   "worth_on_workload_score": 1.14
+  },
+  "forget-prune": {
+   "time_saved_pct": 13.24,
+   "rss_saved_pct": 17.89,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 1.13,
+   "rss_noise_band_pct": 7.18,
+   "verdict": "gain beyond noise",
+   "reason": "median +13.24% is outside the +/-1.13% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 0.643,
+    "null": 1.0059
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 3.56,
+   "inc_median_s": 4.072,
+   "cand_median_rss_mib": 140.1,
+   "inc_median_rss_mib": 167.6,
+   "null": {
+    "time_pair_sigma_pct": 1.0059,
+    "rss_pair_sigma_pct": 6.4078,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:33:32.593679+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 3.4931,
+     "inc_s": 4.072,
+     "cand_rss_mib": 134.6,
+     "inc_rss_mib": 168.8,
+     "time_saved_pct": 14.217,
+     "rss_saved_pct": 20.261,
+     "cand_requests": 134,
+     "cand_mib_up": 135.1,
+     "cand_mib_down": 150.2,
+     "inc_requests": 117,
+     "inc_mib_up": 135.1,
+     "inc_mib_down": 153.1,
+     "cand_user_s": 2.868,
+     "inc_user_s": 2.535,
+     "cand_sys_s": 0.515,
+     "inc_sys_s": 0.521
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 3.4796,
+     "inc_s": 4.0307,
+     "cand_rss_mib": 140.1,
+     "inc_rss_mib": 161.6,
+     "time_saved_pct": 13.673,
+     "rss_saved_pct": 13.304,
+     "cand_requests": 134,
+     "cand_mib_up": 135.1,
+     "cand_mib_down": 150.2,
+     "inc_requests": 117,
+     "inc_mib_up": 135.1,
+     "inc_mib_down": 153.1,
+     "cand_user_s": 2.875,
+     "inc_user_s": 2.551,
+     "cand_sys_s": 0.511,
+     "inc_sys_s": 0.513
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 3.5952,
+     "inc_s": 4.0231,
+     "cand_rss_mib": 132.0,
+     "inc_rss_mib": 167.6,
+     "time_saved_pct": 10.636,
+     "rss_saved_pct": 21.241,
+     "cand_requests": 134,
+     "cand_mib_up": 135.1,
+     "cand_mib_down": 150.2,
+     "inc_requests": 117,
+     "inc_mib_up": 135.1,
+     "inc_mib_down": 153.1,
+     "cand_user_s": 2.854,
+     "inc_user_s": 2.499,
+     "cand_sys_s": 0.492,
+     "inc_sys_s": 0.568
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 3.5598,
+     "inc_s": 4.0967,
+     "cand_rss_mib": 142.0,
+     "inc_rss_mib": 166.7,
+     "time_saved_pct": 13.106,
+     "rss_saved_pct": 14.817,
+     "cand_requests": 134,
+     "cand_mib_up": 135.1,
+     "cand_mib_down": 150.2,
+     "inc_requests": 117,
+     "inc_mib_up": 135.1,
+     "inc_mib_down": 153.1,
+     "cand_user_s": 2.79,
+     "inc_user_s": 2.521,
+     "cand_sys_s": 0.501,
+     "inc_sys_s": 0.561
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 3.5794,
+     "inc_s": 4.1256,
+     "cand_rss_mib": 140.9,
+     "inc_rss_mib": 171.6,
+     "time_saved_pct": 13.239,
+     "rss_saved_pct": 17.89,
+     "cand_requests": 134,
+     "cand_mib_up": 135.1,
+     "cand_mib_down": 150.2,
+     "inc_requests": 117,
+     "inc_mib_up": 135.1,
+     "inc_mib_down": 153.1,
+     "cand_user_s": 2.796,
+     "inc_user_s": 2.492,
+     "cand_sys_s": 0.553,
+     "inc_sys_s": 0.585
+    }
+   ],
+   "seconds": 50.7,
+   "remote": {
+    "cand": {
+     "requests": 134,
+     "mib_up": 135.1,
+     "mib_down": 150.2,
+     "latency_s": 4.02,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 1.19,
+     "by_kind": {
+      "DELETE data": {
+       "requests": 31,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "DELETE index": {
+       "requests": 5,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "DELETE snapshots": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 63,
+       "mib_up": 0.0,
+       "mib_down": 146.5
+      },
+      "GET data/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET index": {
+       "requests": 4,
+       "mib_up": 0.0,
+       "mib_down": 3.7
+      },
+      "GET index/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 3,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 3,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 9,
+       "mib_up": 131.4,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 3,
+       "mib_up": 3.8,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 117,
+     "mib_up": 135.1,
+     "mib_down": 153.1,
+     "latency_s": 3.51,
+     "queue_s": 0,
+     "max_in_flight": 5,
+     "runs": 5,
+     "transfer_floor_s": 1.2,
+     "by_kind": {
+      "DELETE data": {
+       "requests": 31,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "DELETE index": {
+       "requests": 5,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "DELETE snapshots": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 48,
+       "mib_up": 0.0,
+       "mib_down": 149.4
+      },
+      "GET data/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET index": {
+       "requests": 4,
+       "mib_up": 0.0,
+       "mib_down": 3.7
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 3,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST data": {
+       "requests": 9,
+       "mib_up": 131.4,
+       "mib_down": 0.0
+      },
+      "POST index": {
+       "requests": 3,
+       "mib_up": 3.8,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 10.4,
+   "worth_on_workload_score": 1.38
+  },
+  "ls-json": {
+   "time_saved_pct": 37.08,
+   "rss_saved_pct": 12.87,
+   "wins": 5,
+   "reps": 5,
+   "noise_band_pct": 0.41,
+   "rss_noise_band_pct": 1.56,
+   "verdict": "gain beyond noise",
+   "reason": "median +37.08% is outside the +/-0.41% band and 5/5 pairs agree",
+   "pair_sigma_pct": {
+    "own": 0.092,
+    "null": 0.3692
+   },
+   "stopped": "at the limit of 5 pairs",
+   "cand_median_s": 1.314,
+   "inc_median_s": 2.089,
+   "cand_median_rss_mib": 56.2,
+   "inc_median_rss_mib": 65.2,
+   "null": {
+    "time_pair_sigma_pct": 0.3692,
+    "rss_pair_sigma_pct": 0.8873,
+    "pairs": 8,
+    "governor": "performance",
+    "measured_at": "2026-10-06T12:34:10.233717+00:00",
+    "origin": "v2"
+   },
+   "pairs": [
+    {
+     "rep": 1,
+     "first": "candidate",
+     "cand_s": 1.3121,
+     "inc_s": 2.0951,
+     "cand_rss_mib": 56.2,
+     "inc_rss_mib": 65.2,
+     "time_saved_pct": 37.373,
+     "rss_saved_pct": 13.804,
+     "cand_requests": 16,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 9.9,
+     "inc_requests": 14,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 1.439,
+     "inc_user_s": 1.325,
+     "cand_sys_s": 0.099,
+     "inc_sys_s": 0.217
+    },
+    {
+     "rep": 2,
+     "first": "incumbent",
+     "cand_s": 1.314,
+     "inc_s": 2.0883,
+     "cand_rss_mib": 57.8,
+     "inc_rss_mib": 63.8,
+     "time_saved_pct": 37.078,
+     "rss_saved_pct": 9.404,
+     "cand_requests": 16,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 9.9,
+     "inc_requests": 14,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 1.453,
+     "inc_user_s": 1.305,
+     "cand_sys_s": 0.081,
+     "inc_sys_s": 0.219
+    },
+    {
+     "rep": 3,
+     "first": "candidate",
+     "cand_s": 1.3168,
+     "inc_s": 2.0913,
+     "cand_rss_mib": 56.2,
+     "inc_rss_mib": 65.2,
+     "time_saved_pct": 37.034,
+     "rss_saved_pct": 13.804,
+     "cand_requests": 16,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 9.9,
+     "inc_requests": 14,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 1.46,
+     "inc_user_s": 1.308,
+     "cand_sys_s": 0.089,
+     "inc_sys_s": 0.223
+    },
+    {
+     "rep": 4,
+     "first": "incumbent",
+     "cand_s": 1.3132,
+     "inc_s": 2.0891,
+     "cand_rss_mib": 56.2,
+     "inc_rss_mib": 64.5,
+     "time_saved_pct": 37.14,
+     "rss_saved_pct": 12.868,
+     "cand_requests": 16,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 9.9,
+     "inc_requests": 14,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 1.444,
+     "inc_user_s": 1.305,
+     "cand_sys_s": 0.096,
+     "inc_sys_s": 0.224
+    },
+    {
+     "rep": 5,
+     "first": "candidate",
+     "cand_s": 1.3192,
+     "inc_s": 2.0689,
+     "cand_rss_mib": 57.0,
+     "inc_rss_mib": 65.2,
+     "time_saved_pct": 36.237,
+     "rss_saved_pct": 12.577,
+     "cand_requests": 16,
+     "cand_mib_up": 0.0,
+     "cand_mib_down": 9.9,
+     "inc_requests": 14,
+     "inc_mib_up": 0.0,
+     "inc_mib_down": 9.9,
+     "cand_user_s": 1.451,
+     "inc_user_s": 1.279,
+     "cand_sys_s": 0.105,
+     "inc_sys_s": 0.213
+    }
+   ],
+   "seconds": 18.5,
+   "remote": {
+    "cand": {
+     "requests": 16,
+     "mib_up": 0.0,
+     "mib_down": 9.9,
+     "latency_s": 0.48,
+     "queue_s": 0,
+     "max_in_flight": 2,
+     "runs": 5,
+     "transfer_floor_s": 0.04,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 6.3
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    },
+    "ref": {
+     "requests": 14,
+     "mib_up": 0.0,
+     "mib_down": 9.9,
+     "latency_s": 0.42,
+     "queue_s": 0,
+     "max_in_flight": 2,
+     "runs": 5,
+     "transfer_floor_s": 0.04,
+     "by_kind": {
+      "DELETE locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET data": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 6.3
+      },
+      "GET index": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 3.5
+      },
+      "GET index/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET keys/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET locks/": {
+       "requests": 2,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "GET snapshots/": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "HEAD config": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      },
+      "POST locks": {
+       "requests": 1,
+       "mib_up": 0.0,
+       "mib_down": 0.0
+      }
+     }
+    }
+   },
+   "share_of_workload_time_pct": 5.3,
+   "worth_on_workload_score": 1.98
+  }
+ },
+ "workloads": {
+  "remote": {
+   "phases": {
+    "backup-initial": {
+     "time_saved_pct": 6.58,
+     "rss_saved_pct": 46.16,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 1.03,
+     "rss_noise_band_pct": 4.5,
+     "verdict": "gain beyond noise",
+     "reason": "median +6.58% is outside the +/-1.03% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 0.479,
+      "null": 0.9148
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 7.894,
+     "inc_median_s": 8.449,
+     "cand_median_rss_mib": 165.5,
+     "inc_median_rss_mib": 308.7,
+     "null": {
+      "time_pair_sigma_pct": 0.9148,
+      "rss_pair_sigma_pct": 4.0164,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:22:45.576004+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 7.9313,
+       "inc_s": 8.5191,
+       "cand_rss_mib": 165.5,
+       "inc_rss_mib": 307.4,
+       "time_saved_pct": 6.9,
+       "rss_saved_pct": 46.161,
+       "cand_requests": 91,
+       "cand_mib_up": 1248.5,
+       "cand_mib_down": 0.0,
+       "inc_requests": 88,
+       "inc_mib_up": 1248.5,
+       "inc_mib_down": 0.0,
+       "cand_user_s": 16.971,
+       "inc_user_s": 17.217,
+       "cand_sys_s": 3.854,
+       "inc_sys_s": 4.411
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 7.8773,
+       "inc_s": 8.4162,
+       "cand_rss_mib": 175.4,
+       "inc_rss_mib": 300.2,
+       "time_saved_pct": 6.403,
+       "rss_saved_pct": 41.572,
+       "cand_requests": 91,
+       "cand_mib_up": 1248.5,
+       "cand_mib_down": 0.0,
+       "inc_requests": 89,
+       "inc_mib_up": 1248.5,
+       "inc_mib_down": 0.0,
+       "cand_user_s": 16.901,
+       "inc_user_s": 17.176,
+       "cand_sys_s": 3.926,
+       "inc_sys_s": 4.36
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 7.8935,
+       "inc_s": 8.4492,
+       "cand_rss_mib": 176.5,
+       "inc_rss_mib": 323.3,
+       "time_saved_pct": 6.577,
+       "rss_saved_pct": 45.407,
+       "cand_requests": 91,
+       "cand_mib_up": 1248.5,
+       "cand_mib_down": 0.0,
+       "inc_requests": 88,
+       "inc_mib_up": 1248.5,
+       "inc_mib_down": 0.0,
+       "cand_user_s": 17.084,
+       "inc_user_s": 17.263,
+       "cand_sys_s": 3.967,
+       "inc_sys_s": 4.314
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 7.9276,
+       "inc_s": 8.4067,
+       "cand_rss_mib": 161.0,
+       "inc_rss_mib": 314.6,
+       "time_saved_pct": 5.699,
+       "rss_saved_pct": 48.824,
+       "cand_requests": 91,
+       "cand_mib_up": 1248.5,
+       "cand_mib_down": 0.0,
+       "inc_requests": 89,
+       "inc_mib_up": 1248.5,
+       "inc_mib_down": 0.0,
+       "cand_user_s": 17.223,
+       "inc_user_s": 17.286,
+       "cand_sys_s": 3.742,
+       "inc_sys_s": 4.372
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 7.8724,
+       "inc_s": 8.5345,
+       "cand_rss_mib": 163.2,
+       "inc_rss_mib": 308.7,
+       "time_saved_pct": 7.758,
+       "rss_saved_pct": 47.133,
+       "cand_requests": 90,
+       "cand_mib_up": 1248.5,
+       "cand_mib_down": 0.0,
+       "inc_requests": 89,
+       "inc_mib_up": 1248.5,
+       "inc_mib_down": 0.0,
+       "cand_user_s": 17.091,
+       "inc_user_s": 16.92,
+       "cand_sys_s": 3.886,
+       "inc_sys_s": 4.401
+      }
+     ],
+     "seconds": 92.1,
+     "remote": {
+      "cand": {
+       "requests": 91,
+       "mib_up": 1248.5,
+       "mib_down": 0.0,
+       "latency_s": 2.73,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 5.2,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET index/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 76,
+         "mib_up": 1244.9,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 2,
+         "mib_up": 3.5,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 89,
+       "mib_up": 1248.5,
+       "mib_down": 0.0,
+       "latency_s": 2.67,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 5.2,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 76,
+         "mib_up": 1244.9,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 2,
+         "mib_up": 3.5,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 21.6,
+     "worth_on_workload_score": 1.42
+    },
+    "backup-unchanged": {
+     "time_saved_pct": 21.67,
+     "rss_saved_pct": 60.69,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 0.72,
+     "rss_noise_band_pct": 5.3,
+     "verdict": "gain beyond noise",
+     "reason": "median +21.67% is outside the +/-0.72% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 0.108,
+      "null": 0.642
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 2.434,
+     "inc_median_s": 3.111,
+     "cand_median_rss_mib": 79.8,
+     "inc_median_rss_mib": 203.0,
+     "null": {
+      "time_pair_sigma_pct": 0.642,
+      "rss_pair_sigma_pct": 4.731,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:24:23.776567+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 2.4339,
+       "inc_s": 3.1071,
+       "cand_rss_mib": 79.8,
+       "inc_rss_mib": 203.0,
+       "time_saved_pct": 21.667,
+       "rss_saved_pct": 60.69,
+       "cand_requests": 19,
+       "cand_mib_up": 6.1,
+       "cand_mib_down": 9.9,
+       "inc_requests": 17,
+       "inc_mib_up": 6.1,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 2.766,
+       "inc_user_s": 3.074,
+       "cand_sys_s": 0.948,
+       "inc_sys_s": 0.982
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 2.4229,
+       "inc_s": 3.1021,
+       "cand_rss_mib": 79.2,
+       "inc_rss_mib": 203.3,
+       "time_saved_pct": 21.895,
+       "rss_saved_pct": 61.043,
+       "cand_requests": 19,
+       "cand_mib_up": 6.1,
+       "cand_mib_down": 9.9,
+       "inc_requests": 17,
+       "inc_mib_up": 6.1,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 2.806,
+       "inc_user_s": 3.082,
+       "cand_sys_s": 0.888,
+       "inc_sys_s": 0.994
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 2.4393,
+       "inc_s": 3.1113,
+       "cand_rss_mib": 80.0,
+       "inc_rss_mib": 197.5,
+       "time_saved_pct": 21.599,
+       "rss_saved_pct": 59.494,
+       "cand_requests": 19,
+       "cand_mib_up": 6.1,
+       "cand_mib_down": 9.9,
+       "inc_requests": 17,
+       "inc_mib_up": 6.1,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 2.77,
+       "inc_user_s": 3.02,
+       "cand_sys_s": 0.938,
+       "inc_sys_s": 1.002
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 2.4403,
+       "inc_s": 3.1124,
+       "cand_rss_mib": 82.4,
+       "inc_rss_mib": 192.6,
+       "time_saved_pct": 21.594,
+       "rss_saved_pct": 57.217,
+       "cand_requests": 19,
+       "cand_mib_up": 6.1,
+       "cand_mib_down": 9.9,
+       "inc_requests": 17,
+       "inc_mib_up": 6.1,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 2.781,
+       "inc_user_s": 3.021,
+       "cand_sys_s": 0.966,
+       "inc_sys_s": 1.021
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 2.4258,
+       "inc_s": 3.1261,
+       "cand_rss_mib": 79.8,
+       "inc_rss_mib": 203.9,
+       "time_saved_pct": 22.402,
+       "rss_saved_pct": 60.863,
+       "cand_requests": 19,
+       "cand_mib_up": 6.1,
+       "cand_mib_down": 9.9,
+       "inc_requests": 17,
+       "inc_mib_up": 6.1,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 2.848,
+       "inc_user_s": 3.075,
+       "cand_sys_s": 0.901,
+       "inc_sys_s": 1.045
+      }
+     ],
+     "seconds": 39.4,
+     "remote": {
+      "cand": {
+       "requests": 19,
+       "mib_up": 6.1,
+       "mib_down": 9.9,
+       "latency_s": 0.57,
+       "queue_s": 0,
+       "max_in_flight": 2,
+       "runs": 5,
+       "transfer_floor_s": 0.07,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 6.3
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 1,
+         "mib_up": 6.0,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 17,
+       "mib_up": 6.1,
+       "mib_down": 9.9,
+       "latency_s": 0.51,
+       "queue_s": 0,
+       "max_in_flight": 2,
+       "runs": 5,
+       "transfer_floor_s": 0.07,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 6.3
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 1,
+         "mib_up": 6.0,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 8.0,
+     "worth_on_workload_score": 1.72
+    },
+    "backup-mutated": {
+     "time_saved_pct": 19.75,
+     "rss_saved_pct": 43.27,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 3.27,
+     "rss_noise_band_pct": 6.96,
+     "verdict": "gain beyond noise",
+     "reason": "median +19.75% is outside the +/-3.27% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 1.604,
+      "null": 2.92
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 2.64,
+     "inc_median_s": 3.32,
+     "cand_median_rss_mib": 134.9,
+     "inc_median_rss_mib": 240.1,
+     "null": {
+      "time_pair_sigma_pct": 2.92,
+      "rss_pair_sigma_pct": 6.2054,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:25:46.950778+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 2.6405,
+       "inc_s": 3.1888,
+       "cand_rss_mib": 142.3,
+       "inc_rss_mib": 240.1,
+       "time_saved_pct": 17.195,
+       "rss_saved_pct": 40.733,
+       "cand_requests": 25,
+       "cand_mib_up": 93.5,
+       "cand_mib_down": 9.9,
+       "inc_requests": 23,
+       "inc_mib_up": 93.5,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 3.221,
+       "inc_user_s": 3.458,
+       "cand_sys_s": 1.061,
+       "inc_sys_s": 1.252
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 2.6356,
+       "inc_s": 3.3196,
+       "cand_rss_mib": 124.8,
+       "inc_rss_mib": 262.0,
+       "time_saved_pct": 20.605,
+       "rss_saved_pct": 52.366,
+       "cand_requests": 25,
+       "cand_mib_up": 93.5,
+       "cand_mib_down": 9.9,
+       "inc_requests": 23,
+       "inc_mib_up": 93.5,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 3.224,
+       "inc_user_s": 3.6,
+       "cand_sys_s": 1.017,
+       "inc_sys_s": 1.201
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 2.7048,
+       "inc_s": 3.3703,
+       "cand_rss_mib": 126.0,
+       "inc_rss_mib": 222.1,
+       "time_saved_pct": 19.746,
+       "rss_saved_pct": 43.269,
+       "cand_requests": 25,
+       "cand_mib_up": 93.5,
+       "cand_mib_down": 9.9,
+       "inc_requests": 23,
+       "inc_mib_up": 93.5,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 3.246,
+       "inc_user_s": 3.527,
+       "cand_sys_s": 1.05,
+       "inc_sys_s": 1.267
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 2.6863,
+       "inc_s": 3.393,
+       "cand_rss_mib": 134.9,
+       "inc_rss_mib": 219.2,
+       "time_saved_pct": 20.828,
+       "rss_saved_pct": 38.458,
+       "cand_requests": 25,
+       "cand_mib_up": 93.5,
+       "cand_mib_down": 9.9,
+       "inc_requests": 23,
+       "inc_mib_up": 93.5,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 3.329,
+       "inc_user_s": 3.499,
+       "cand_sys_s": 1.036,
+       "inc_sys_s": 1.238
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 2.6069,
+       "inc_s": 3.2025,
+       "cand_rss_mib": 136.4,
+       "inc_rss_mib": 241.4,
+       "time_saved_pct": 18.598,
+       "rss_saved_pct": 43.496,
+       "cand_requests": 25,
+       "cand_mib_up": 93.5,
+       "cand_mib_down": 9.9,
+       "inc_requests": 23,
+       "inc_mib_up": 93.5,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 3.211,
+       "inc_user_s": 3.629,
+       "cand_sys_s": 1.088,
+       "inc_sys_s": 1.204
+      }
+     ],
+     "seconds": 41.7,
+     "remote": {
+      "cand": {
+       "requests": 25,
+       "mib_up": 93.5,
+       "mib_down": 9.9,
+       "latency_s": 0.75,
+       "queue_s": 0,
+       "max_in_flight": 4,
+       "runs": 5,
+       "transfer_floor_s": 0.43,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 6.3
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 7,
+         "mib_up": 93.3,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 1,
+         "mib_up": 0.2,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 23,
+       "mib_up": 93.5,
+       "mib_down": 9.9,
+       "latency_s": 0.69,
+       "queue_s": 0,
+       "max_in_flight": 4,
+       "runs": 5,
+       "transfer_floor_s": 0.43,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 6.3
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 7,
+         "mib_up": 93.3,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 1,
+         "mib_up": 0.2,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 8.5,
+     "worth_on_workload_score": 1.68
+    },
+    "restore": {
+     "time_saved_pct": 30.07,
+     "rss_saved_pct": 58.12,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 0.51,
+     "rss_noise_band_pct": 3.8,
+     "verdict": "gain beyond noise",
+     "reason": "median +30.07% is outside the +/-0.51% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 0.454,
+      "null": 0.1364
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 7.548,
+     "inc_median_s": 10.818,
+     "cand_median_rss_mib": 127.9,
+     "inc_median_rss_mib": 305.4,
+     "null": {
+      "time_pair_sigma_pct": 0.1364,
+      "rss_pair_sigma_pct": 3.3907,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:28:56.636867+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 7.5146,
+       "inc_s": 10.831,
+       "cand_rss_mib": 127.9,
+       "inc_rss_mib": 305.4,
+       "time_saved_pct": 30.62,
+       "rss_saved_pct": 58.12,
+       "cand_requests": 91,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1245.4,
+       "inc_requests": 89,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1245.4,
+       "cand_user_s": 6.062,
+       "inc_user_s": 5.556,
+       "cand_sys_s": 2.809,
+       "inc_sys_s": 3.865
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 7.6824,
+       "inc_s": 10.8177,
+       "cand_rss_mib": 124.8,
+       "inc_rss_mib": 307.2,
+       "time_saved_pct": 28.983,
+       "rss_saved_pct": 59.375,
+       "cand_requests": 91,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1245.4,
+       "inc_requests": 89,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1245.4,
+       "cand_user_s": 5.976,
+       "inc_user_s": 5.539,
+       "cand_sys_s": 2.964,
+       "inc_sys_s": 3.777
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 7.5564,
+       "inc_s": 10.7654,
+       "cand_rss_mib": 125.7,
+       "inc_rss_mib": 305.4,
+       "time_saved_pct": 29.808,
+       "rss_saved_pct": 58.841,
+       "cand_requests": 91,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1245.4,
+       "inc_requests": 89,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1245.4,
+       "cand_user_s": 6.284,
+       "inc_user_s": 5.425,
+       "cand_sys_s": 3.002,
+       "inc_sys_s": 3.791
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 7.5485,
+       "inc_s": 10.7951,
+       "cand_rss_mib": 130.4,
+       "inc_rss_mib": 296.5,
+       "time_saved_pct": 30.075,
+       "rss_saved_pct": 56.02,
+       "cand_requests": 91,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1245.4,
+       "inc_requests": 89,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1245.4,
+       "cand_user_s": 6.082,
+       "inc_user_s": 5.465,
+       "cand_sys_s": 2.988,
+       "inc_sys_s": 3.754
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 7.5402,
+       "inc_s": 10.8306,
+       "cand_rss_mib": 129.9,
+       "inc_rss_mib": 289.7,
+       "time_saved_pct": 30.381,
+       "rss_saved_pct": 55.161,
+       "cand_requests": 91,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1245.4,
+       "inc_requests": 89,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1245.4,
+       "cand_user_s": 6.069,
+       "inc_user_s": 5.591,
+       "cand_sys_s": 3.049,
+       "inc_sys_s": 3.892
+      }
+     ],
+     "seconds": 113.0,
+     "remote": {
+      "cand": {
+       "requests": 91,
+       "mib_up": 0.0,
+       "mib_down": 1245.4,
+       "latency_s": 2.73,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 5.19,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 76,
+         "mib_up": 0.0,
+         "mib_down": 1241.9
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 89,
+       "mib_up": 0.0,
+       "mib_down": 1245.4,
+       "latency_s": 2.67,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 5.19,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 76,
+         "mib_up": 0.0,
+         "mib_down": 1241.9
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 27.6,
+     "worth_on_workload_score": 8.31
+    },
+    "check-read-data": {
+     "time_saved_pct": 6.16,
+     "rss_saved_pct": 41.93,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 2.08,
+     "rss_noise_band_pct": 4.95,
+     "verdict": "gain beyond noise",
+     "reason": "median +6.16% is outside the +/-2.08% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 0.51,
+      "null": 1.8555
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 6.812,
+     "inc_median_s": 7.268,
+     "cand_median_rss_mib": 86.5,
+     "inc_median_rss_mib": 149.5,
+     "null": {
+      "time_pair_sigma_pct": 1.8555,
+      "rss_pair_sigma_pct": 4.4137,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:31:46.960601+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 6.812,
+       "inc_s": 7.2329,
+       "cand_rss_mib": 88.5,
+       "inc_rss_mib": 152.4,
+       "time_saved_pct": 5.819,
+       "rss_saved_pct": 41.929,
+       "cand_requests": 90,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1248.4,
+       "inc_requests": 90,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1248.4,
+       "cand_user_s": 4.519,
+       "inc_user_s": 4.413,
+       "cand_sys_s": 0.493,
+       "inc_sys_s": 0.53
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 6.7942,
+       "inc_s": 7.2874,
+       "cand_rss_mib": 84.7,
+       "inc_rss_mib": 149.4,
+       "time_saved_pct": 6.768,
+       "rss_saved_pct": 43.307,
+       "cand_requests": 90,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1248.4,
+       "inc_requests": 90,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1248.4,
+       "cand_user_s": 4.513,
+       "inc_user_s": 4.352,
+       "cand_sys_s": 0.46,
+       "inc_sys_s": 0.543
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 6.8197,
+       "inc_s": 7.2676,
+       "cand_rss_mib": 89.5,
+       "inc_rss_mib": 149.5,
+       "time_saved_pct": 6.163,
+       "rss_saved_pct": 40.134,
+       "cand_requests": 90,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1248.4,
+       "inc_requests": 90,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1248.4,
+       "cand_user_s": 4.593,
+       "inc_user_s": 4.481,
+       "cand_sys_s": 0.425,
+       "inc_sys_s": 0.541
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 6.8032,
+       "inc_s": 7.1989,
+       "cand_rss_mib": 86.5,
+       "inc_rss_mib": 148.3,
+       "time_saved_pct": 5.497,
+       "rss_saved_pct": 41.672,
+       "cand_requests": 90,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1248.4,
+       "inc_requests": 90,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1248.4,
+       "cand_user_s": 4.627,
+       "inc_user_s": 4.381,
+       "cand_sys_s": 0.477,
+       "inc_sys_s": 0.573
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 6.8324,
+       "inc_s": 7.3014,
+       "cand_rss_mib": 80.6,
+       "inc_rss_mib": 156.9,
+       "time_saved_pct": 6.423,
+       "rss_saved_pct": 48.63,
+       "cand_requests": 90,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 1248.4,
+       "inc_requests": 90,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 1248.4,
+       "cand_user_s": 4.549,
+       "inc_user_s": 4.355,
+       "cand_sys_s": 0.429,
+       "inc_sys_s": 0.587
+      }
+     ],
+     "seconds": 77.3,
+     "remote": {
+      "cand": {
+       "requests": 90,
+       "mib_up": 0.0,
+       "mib_down": 1248.4,
+       "latency_s": 2.7,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 5.2,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 76,
+         "mib_up": 0.0,
+         "mib_down": 1244.9
+        },
+        "GET data/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 90,
+       "mib_up": 0.0,
+       "mib_down": 1248.4,
+       "latency_s": 2.7,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 5.2,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 76,
+         "mib_up": 0.0,
+         "mib_down": 1244.9
+        },
+        "GET data/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 18.6,
+     "worth_on_workload_score": 1.14
+    },
+    "forget-prune": {
+     "time_saved_pct": 13.24,
+     "rss_saved_pct": 17.89,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 1.13,
+     "rss_noise_band_pct": 7.18,
+     "verdict": "gain beyond noise",
+     "reason": "median +13.24% is outside the +/-1.13% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 0.643,
+      "null": 1.0059
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 3.56,
+     "inc_median_s": 4.072,
+     "cand_median_rss_mib": 140.1,
+     "inc_median_rss_mib": 167.6,
+     "null": {
+      "time_pair_sigma_pct": 1.0059,
+      "rss_pair_sigma_pct": 6.4078,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:33:32.593679+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 3.4931,
+       "inc_s": 4.072,
+       "cand_rss_mib": 134.6,
+       "inc_rss_mib": 168.8,
+       "time_saved_pct": 14.217,
+       "rss_saved_pct": 20.261,
+       "cand_requests": 134,
+       "cand_mib_up": 135.1,
+       "cand_mib_down": 150.2,
+       "inc_requests": 117,
+       "inc_mib_up": 135.1,
+       "inc_mib_down": 153.1,
+       "cand_user_s": 2.868,
+       "inc_user_s": 2.535,
+       "cand_sys_s": 0.515,
+       "inc_sys_s": 0.521
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 3.4796,
+       "inc_s": 4.0307,
+       "cand_rss_mib": 140.1,
+       "inc_rss_mib": 161.6,
+       "time_saved_pct": 13.673,
+       "rss_saved_pct": 13.304,
+       "cand_requests": 134,
+       "cand_mib_up": 135.1,
+       "cand_mib_down": 150.2,
+       "inc_requests": 117,
+       "inc_mib_up": 135.1,
+       "inc_mib_down": 153.1,
+       "cand_user_s": 2.875,
+       "inc_user_s": 2.551,
+       "cand_sys_s": 0.511,
+       "inc_sys_s": 0.513
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 3.5952,
+       "inc_s": 4.0231,
+       "cand_rss_mib": 132.0,
+       "inc_rss_mib": 167.6,
+       "time_saved_pct": 10.636,
+       "rss_saved_pct": 21.241,
+       "cand_requests": 134,
+       "cand_mib_up": 135.1,
+       "cand_mib_down": 150.2,
+       "inc_requests": 117,
+       "inc_mib_up": 135.1,
+       "inc_mib_down": 153.1,
+       "cand_user_s": 2.854,
+       "inc_user_s": 2.499,
+       "cand_sys_s": 0.492,
+       "inc_sys_s": 0.568
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 3.5598,
+       "inc_s": 4.0967,
+       "cand_rss_mib": 142.0,
+       "inc_rss_mib": 166.7,
+       "time_saved_pct": 13.106,
+       "rss_saved_pct": 14.817,
+       "cand_requests": 134,
+       "cand_mib_up": 135.1,
+       "cand_mib_down": 150.2,
+       "inc_requests": 117,
+       "inc_mib_up": 135.1,
+       "inc_mib_down": 153.1,
+       "cand_user_s": 2.79,
+       "inc_user_s": 2.521,
+       "cand_sys_s": 0.501,
+       "inc_sys_s": 0.561
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 3.5794,
+       "inc_s": 4.1256,
+       "cand_rss_mib": 140.9,
+       "inc_rss_mib": 171.6,
+       "time_saved_pct": 13.239,
+       "rss_saved_pct": 17.89,
+       "cand_requests": 134,
+       "cand_mib_up": 135.1,
+       "cand_mib_down": 150.2,
+       "inc_requests": 117,
+       "inc_mib_up": 135.1,
+       "inc_mib_down": 153.1,
+       "cand_user_s": 2.796,
+       "inc_user_s": 2.492,
+       "cand_sys_s": 0.553,
+       "inc_sys_s": 0.585
+      }
+     ],
+     "seconds": 50.7,
+     "remote": {
+      "cand": {
+       "requests": 134,
+       "mib_up": 135.1,
+       "mib_down": 150.2,
+       "latency_s": 4.02,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 1.19,
+       "by_kind": {
+        "DELETE data": {
+         "requests": 31,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "DELETE index": {
+         "requests": 5,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "DELETE snapshots": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 63,
+         "mib_up": 0.0,
+         "mib_down": 146.5
+        },
+        "GET data/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET index": {
+         "requests": 4,
+         "mib_up": 0.0,
+         "mib_down": 3.7
+        },
+        "GET index/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 3,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 3,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 9,
+         "mib_up": 131.4,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 3,
+         "mib_up": 3.8,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 117,
+       "mib_up": 135.1,
+       "mib_down": 153.1,
+       "latency_s": 3.51,
+       "queue_s": 0,
+       "max_in_flight": 5,
+       "runs": 5,
+       "transfer_floor_s": 1.2,
+       "by_kind": {
+        "DELETE data": {
+         "requests": 31,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "DELETE index": {
+         "requests": 5,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "DELETE snapshots": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 48,
+         "mib_up": 0.0,
+         "mib_down": 149.4
+        },
+        "GET data/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET index": {
+         "requests": 4,
+         "mib_up": 0.0,
+         "mib_down": 3.7
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 3,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST data": {
+         "requests": 9,
+         "mib_up": 131.4,
+         "mib_down": 0.0
+        },
+        "POST index": {
+         "requests": 3,
+         "mib_up": 3.8,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 10.4,
+     "worth_on_workload_score": 1.38
+    },
+    "ls-json": {
+     "time_saved_pct": 37.08,
+     "rss_saved_pct": 12.87,
+     "wins": 5,
+     "reps": 5,
+     "noise_band_pct": 0.41,
+     "rss_noise_band_pct": 1.56,
+     "verdict": "gain beyond noise",
+     "reason": "median +37.08% is outside the +/-0.41% band and 5/5 pairs agree",
+     "pair_sigma_pct": {
+      "own": 0.092,
+      "null": 0.3692
+     },
+     "stopped": "at the limit of 5 pairs",
+     "cand_median_s": 1.314,
+     "inc_median_s": 2.089,
+     "cand_median_rss_mib": 56.2,
+     "inc_median_rss_mib": 65.2,
+     "null": {
+      "time_pair_sigma_pct": 0.3692,
+      "rss_pair_sigma_pct": 0.8873,
+      "pairs": 8,
+      "governor": "performance",
+      "measured_at": "2026-10-06T12:34:10.233717+00:00",
+      "origin": "v2"
+     },
+     "pairs": [
+      {
+       "rep": 1,
+       "first": "candidate",
+       "cand_s": 1.3121,
+       "inc_s": 2.0951,
+       "cand_rss_mib": 56.2,
+       "inc_rss_mib": 65.2,
+       "time_saved_pct": 37.373,
+       "rss_saved_pct": 13.804,
+       "cand_requests": 16,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 9.9,
+       "inc_requests": 14,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 1.439,
+       "inc_user_s": 1.325,
+       "cand_sys_s": 0.099,
+       "inc_sys_s": 0.217
+      },
+      {
+       "rep": 2,
+       "first": "incumbent",
+       "cand_s": 1.314,
+       "inc_s": 2.0883,
+       "cand_rss_mib": 57.8,
+       "inc_rss_mib": 63.8,
+       "time_saved_pct": 37.078,
+       "rss_saved_pct": 9.404,
+       "cand_requests": 16,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 9.9,
+       "inc_requests": 14,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 1.453,
+       "inc_user_s": 1.305,
+       "cand_sys_s": 0.081,
+       "inc_sys_s": 0.219
+      },
+      {
+       "rep": 3,
+       "first": "candidate",
+       "cand_s": 1.3168,
+       "inc_s": 2.0913,
+       "cand_rss_mib": 56.2,
+       "inc_rss_mib": 65.2,
+       "time_saved_pct": 37.034,
+       "rss_saved_pct": 13.804,
+       "cand_requests": 16,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 9.9,
+       "inc_requests": 14,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 1.46,
+       "inc_user_s": 1.308,
+       "cand_sys_s": 0.089,
+       "inc_sys_s": 0.223
+      },
+      {
+       "rep": 4,
+       "first": "incumbent",
+       "cand_s": 1.3132,
+       "inc_s": 2.0891,
+       "cand_rss_mib": 56.2,
+       "inc_rss_mib": 64.5,
+       "time_saved_pct": 37.14,
+       "rss_saved_pct": 12.868,
+       "cand_requests": 16,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 9.9,
+       "inc_requests": 14,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 1.444,
+       "inc_user_s": 1.305,
+       "cand_sys_s": 0.096,
+       "inc_sys_s": 0.224
+      },
+      {
+       "rep": 5,
+       "first": "candidate",
+       "cand_s": 1.3192,
+       "inc_s": 2.0689,
+       "cand_rss_mib": 57.0,
+       "inc_rss_mib": 65.2,
+       "time_saved_pct": 36.237,
+       "rss_saved_pct": 12.577,
+       "cand_requests": 16,
+       "cand_mib_up": 0.0,
+       "cand_mib_down": 9.9,
+       "inc_requests": 14,
+       "inc_mib_up": 0.0,
+       "inc_mib_down": 9.9,
+       "cand_user_s": 1.451,
+       "inc_user_s": 1.279,
+       "cand_sys_s": 0.105,
+       "inc_sys_s": 0.213
+      }
+     ],
+     "seconds": 18.5,
+     "remote": {
+      "cand": {
+       "requests": 16,
+       "mib_up": 0.0,
+       "mib_down": 9.9,
+       "latency_s": 0.48,
+       "queue_s": 0,
+       "max_in_flight": 2,
+       "runs": 5,
+       "transfer_floor_s": 0.04,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 6.3
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      },
+      "ref": {
+       "requests": 14,
+       "mib_up": 0.0,
+       "mib_down": 9.9,
+       "latency_s": 0.42,
+       "queue_s": 0,
+       "max_in_flight": 2,
+       "runs": 5,
+       "transfer_floor_s": 0.04,
+       "by_kind": {
+        "DELETE locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET data": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 6.3
+        },
+        "GET index": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 3.5
+        },
+        "GET index/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET keys/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET locks/": {
+         "requests": 2,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "GET snapshots/": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "HEAD config": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        },
+        "POST locks": {
+         "requests": 1,
+         "mib_up": 0.0,
+         "mib_down": 0.0
+        }
+       }
+      }
+     },
+     "share_of_workload_time_pct": 5.3,
+     "worth_on_workload_score": 1.98
+    }
+   },
+   "worth": {
+    "resolved_points": 17.64,
+    "point_estimate": 17.64,
+    "parts": [
+     "backup-initial +6.58% x 22% of the time = +1.42",
+     "backup-unchanged +21.67% x 8% of the time = +1.72",
+     "backup-mutated +19.75% x 8% of the time = +1.68",
+     "restore +30.07% x 28% of the time = +8.31",
+     "check-read-data +6.16% x 19% of the time = +1.14",
+     "forget-prune +13.24% x 10% of the time = +1.38",
+     "ls-json +37.08% x 5% of the time = +1.98"
+    ],
+    "text": "worth on the remote score: +17.64 points from the resolved phases (+17.64 if every reading is taken at face value; phases not benched count as 0): backup-initial +6.58% x 22% of the time = +1.42; backup-unchanged +21.67% x 8% of the time = +1.72; backup-mutated +19.75% x 8% of the time = +1.68; restore +30.07% x 28% of the time = +8.31; check-read-data +6.16% x 19% of the time = +1.14; forget-prune +13.24% x 10% of the time = +1.38; ls-json +37.08% x 5% of the time = +1.98"
+   },
+   "remote_profile": {
+    "backend": "rest",
+    "latency_ms": 30.0,
+    "max_connections": 5,
+    "rate_bytes_per_second": 50331648,
+    "server_sha256": "5817b11d36577b107cf96df19771edc6862b07af2a5a34008b620bd6116d53ba",
+    "server_source_sha256": "60f5fbb827dd3bb559a99cba4c8a837416713f1c281f87b49cb4e939003e6d1f",
+    "transport": "unix socket bound into the sandbox work dir",
+    "note": "REST backend: 30 ms per request, 48 MiB/s per connection, 5 connections. latency_s = requests x latency (connection-seconds); transfer_floor_s = bytes moved / (rate x connections): no code change goes below it without moving fewer bytes. Request count and how many connections stay busy are the terms a tree can move."
+   }
+  }
+ },
+ "notes": [
+  "remote is reached through a simulated link; requests and MiB are candidate vs incumbent. REST backend: 30 ms per request, 48 MiB/s per connection, 5 connections. latency_s = requests x latency (connection-seconds); transfer_floor_s = bytes moved / (rate x connections): no code change goes below it without moving fewer bytes. Request count and how many connections stay busy are the terms a tree can move"
+ ],
+ "remote_profile": {
+  "backend": "rest",
+  "latency_ms": 30.0,
+  "max_connections": 5,
+  "rate_bytes_per_second": 50331648,
+  "server_sha256": "5817b11d36577b107cf96df19771edc6862b07af2a5a34008b620bd6116d53ba",
+  "server_source_sha256": "60f5fbb827dd3bb559a99cba4c8a837416713f1c281f87b49cb4e939003e6d1f",
+  "transport": "unix socket bound into the sandbox work dir",
+  "note": "REST backend: 30 ms per request, 48 MiB/s per connection, 5 connections. latency_s = requests x latency (connection-seconds); transfer_floor_s = bytes moved / (rate x connections): no code change goes below it without moving fewer bytes. Request count and how many connections stay busy are the terms a tree can move."
+ },
+ "worth": {
+  "resolved_points": 17.64,
+  "point_estimate": 17.64,
+  "parts": [
+   "backup-initial +6.58% x 22% of the time = +1.42",
+   "backup-unchanged +21.67% x 8% of the time = +1.72",
+   "backup-mutated +19.75% x 8% of the time = +1.68",
+   "restore +30.07% x 28% of the time = +8.31",
+   "check-read-data +6.16% x 19% of the time = +1.14",
+   "forget-prune +13.24% x 10% of the time = +1.38",
+   "ls-json +37.08% x 5% of the time = +1.98"
+  ],
+  "text": "worth on the remote score: +17.64 points from the resolved phases (+17.64 if every reading is taken at face value; phases not benched count as 0): backup-initial +6.58% x 22% of the time = +1.42; backup-unchanged +21.67% x 8% of the time = +1.72; backup-mutated +19.75% x 8% of the time = +1.68; restore +30.07% x 28% of the time = +8.31; check-read-data +6.16% x 19% of the time = +1.14; forget-prune +13.24% x 10% of the time = +1.38; ls-json +37.08% x 5% of the time = +1.98"
+ }
+}

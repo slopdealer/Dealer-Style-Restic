@@ -1,0 +1,562 @@
+{
+ "what": "every evidence file copied into league/evidence/ from the league's records, with the SHA-256 of the original and of the published copy",
+ "rule": "the league box's working prefix reads /opt/league/ in every published copy; prefix_replaced counts the replacements in the file. A file with 0 is byte-identical to its original.",
+ "renamed": {
+  "many-core-rc9/SHA256SUMS.original": "SHA256SUMS in the original folder; it lists the ORIGINAL hashes, so the files with prefix_replaced above 0 do not verify against it"
+ },
+ "files": [
+  {
+   "file": "judged-vs-published/diff.offsets",
+   "set": "comparison of the judged binary with a build of the published source, same flags",
+   "original_sha256": "24f3f251a8c68d21d2b95dbc961814bede09c97de53bb3247f620c9a56ef3a5d",
+   "published_sha256": "24f3f251a8c68d21d2b95dbc961814bede09c97de53bb3247f620c9a56ef3a5d",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "judged-vs-published/proof.sh",
+   "set": "comparison of the judged binary with a build of the published source, same flags",
+   "original_sha256": "ae113ce63b4296fd9965f0523b8398c10dbb1fdf120469efaa8d6755b359e88d",
+   "published_sha256": "f77a5c79a1e9701858baf957458af4ec108e116b4d2208e576bab6be73b0a93f",
+   "prefix_replaced": 2
+  },
+  {
+   "file": "judged-vs-published/PROOF.txt",
+   "set": "comparison of the judged binary with a build of the published source, same flags",
+   "original_sha256": "be07dc00f3852899225ecab218b0284cba64205b3b288c55559f609ed37dde91",
+   "published_sha256": "be07dc00f3852899225ecab218b0284cba64205b3b288c55559f609ed37dde91",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/l3dirs-progress-lines.txt",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "79262cbb25673281d6f686768b27725a65bc54203ed70903c11cca6cbaee0906",
+   "published_sha256": "79262cbb25673281d6f686768b27725a65bc54203ed70903c11cca6cbaee0906",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/l3dirs.log",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "748a4caee0705a9f3238611c0c33b4a3ae2915975663f7d7eac405c9279afbd1",
+   "published_sha256": "748a4caee0705a9f3238611c0c33b4a3ae2915975663f7d7eac405c9279afbd1",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/l3dirs.sh",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "c856bc3e78496ffdd06164ad7ccb2d3b009dc78ac965382880b9c75708cbf284",
+   "published_sha256": "d405058d4921709350df31d3ca44a2fb54ea80a49e6f11113c483243b6648ab0",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "many-core-rc9/mc-rc9-table.txt",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "4e98718e864e1b34492d4104049fe29e550bea12514c51de5c9d3257a2f8bd4d",
+   "published_sha256": "4e98718e864e1b34492d4104049fe29e550bea12514c51de5c9d3257a2f8bd4d",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-big-index.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "7599ded49a41431767b8b6c59efecd4054ba802d7702368c21c6e1101b4fe0b5",
+   "published_sha256": "7599ded49a41431767b8b6c59efecd4054ba802d7702368c21c6e1101b4fe0b5",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-big-index.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "d0be215a5841849d829cb12c8aebe2999830dd1dd27edde869d2fc1aabb960fe",
+   "published_sha256": "d0be215a5841849d829cb12c8aebe2999830dd1dd27edde869d2fc1aabb960fe",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-large-files.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "e67f7f23fdac61551a040a0d8d52f02a4616d76c4a8d2be3e674e1f454c41a43",
+   "published_sha256": "e67f7f23fdac61551a040a0d8d52f02a4616d76c4a8d2be3e674e1f454c41a43",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-large-files.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "e3b35853f7301ed43020c0668e7616732c9c67eef43fe6731c1d5d9d92a19fc2",
+   "published_sha256": "e3b35853f7301ed43020c0668e7616732c9c67eef43fe6731c1d5d9d92a19fc2",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-main.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "e0ef79c7933d1b5723c1f077b9d00cd1252b1ca4e8eccf3846f0d07b1c41d65f",
+   "published_sha256": "e0ef79c7933d1b5723c1f077b9d00cd1252b1ca4e8eccf3846f0d07b1c41d65f",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-main.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "941fe881f78909e1dba6de9ed956f509f0564f8a07f354c70e4450984e4019ae",
+   "published_sha256": "941fe881f78909e1dba6de9ed956f509f0564f8a07f354c70e4450984e4019ae",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-remote.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "a46f529851e58484d412175de40947e402c1e418f352bcf371ceaf03fe29a922",
+   "published_sha256": "a46f529851e58484d412175de40947e402c1e418f352bcf371ceaf03fe29a922",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc16-rc9-remote.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "fa9fe4b4d24f95a67abcc6508edb8196de3d5f56c51f067b6f8314527577edaa",
+   "published_sha256": "fa9fe4b4d24f95a67abcc6508edb8196de3d5f56c51f067b6f8314527577edaa",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc2.sh",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "3bbc32d55573101125f480c3f0d4dfe78ecac43b0236fe2c8d06e1383a3ffdd1",
+   "published_sha256": "2cfdad3b8f6f1bc187d1ae05e6b11e5849a8a43c0d42c3d84b173555413313a1",
+   "prefix_replaced": 2
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-big-index.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "04136b885a8dac156e08ab9ae92cdb27776f5e2dfa61bba3678449c74fbfa360",
+   "published_sha256": "04136b885a8dac156e08ab9ae92cdb27776f5e2dfa61bba3678449c74fbfa360",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-big-index.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "324df007c5f6c0c773ab57b8571e39c8f934692be6761416a2ba9b8cbec03843",
+   "published_sha256": "324df007c5f6c0c773ab57b8571e39c8f934692be6761416a2ba9b8cbec03843",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-large-files.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "9c677780abde899c5814d09af08dda5bf3ad0807a7307c81f7c89653c9de1283",
+   "published_sha256": "9c677780abde899c5814d09af08dda5bf3ad0807a7307c81f7c89653c9de1283",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-large-files.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "2a9c02e75ed71121ce0ca22b96bd31be4557248a216b7259f6ed47d387618cc3",
+   "published_sha256": "2a9c02e75ed71121ce0ca22b96bd31be4557248a216b7259f6ed47d387618cc3",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-main.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "7ef56759f49791a0c4fa81e6b20476e900dfc4116ea1f3b1897062400c08c520",
+   "published_sha256": "7ef56759f49791a0c4fa81e6b20476e900dfc4116ea1f3b1897062400c08c520",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-main.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "b35bbf51941619e36a082f19cbd31a2b30b1ee97bb73719a4d3caf393e25fb67",
+   "published_sha256": "b35bbf51941619e36a082f19cbd31a2b30b1ee97bb73719a4d3caf393e25fb67",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-remote.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "7923991d8716730654dcde5a8bab689fd95733a6b444117a3db6591598e3a01a",
+   "published_sha256": "7923991d8716730654dcde5a8bab689fd95733a6b444117a3db6591598e3a01a",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mc8-rc9-remote.json.status.json",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "5b0cebf44c9141e9c15ea20fa4a06f5bc36d472c91da48467b86155c267ef020",
+   "published_sha256": "5b0cebf44c9141e9c15ea20fa4a06f5bc36d472c91da48467b86155c267ef020",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "many-core-rc9/mcbench.py",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "9cdf887572a95cfb23b40a7b17863dedb21568e77ab11b8c3ae3ae497bf9c1bc",
+   "published_sha256": "a9e661926ba81a8eb319d75e441eb2b665c43fb8a28680978bf457b13d8a0116",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "many-core-rc9/mcsum.py",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "0992dcb8df104775eb489247f151326fc122e4a83da6e81def4f6d7a2ee10f43",
+   "published_sha256": "e23951a8c3496726d550a9600ff3d0de6166e8ac373865c313aeead8d3814762",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "many-core-rc9/SHA256SUMS.original",
+   "set": "8 and 16 core bench of the published commit and the cache-layout test of the many-directory restore",
+   "original_sha256": "7198b10ba4dd5608f32dd411f0cf1d986b32bc530cf826ab4898adb360a55da2",
+   "published_sha256": "7198b10ba4dd5608f32dd411f0cf1d986b32bc530cf826ab4898adb360a55da2",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/c10/summary.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "378474507622804b12bb6f8ab43012fb33d98d871d367111f1a33d4c2e924edc",
+   "published_sha256": "a2a5503536a0672f9fd8daa4127f11f282a6ae9dcb4572cd2264139bd283b542",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/clock-performance.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "09a561b443a0ae7278a8440991a9cca0919b8446d26a506db80414714dca438f",
+   "published_sha256": "af62743317e716d2a8c0b32b325b41abf8d4217b4299c317bba47cfa384f8d5c",
+   "prefix_replaced": 57
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/clock-schedutil-quiet.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "b94d3eef6368d974cc8d094ade95256d27389f98f4381e857b91ee1037072aa8",
+   "published_sha256": "9a4a2d410898ad985eda7d79d6f1afb7a6739ff5f3c3ef49996e30d5989243c1",
+   "prefix_replaced": 22
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/quiet-wait.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "035dd6044ac8423e89f30e92790df660663fbaee33cf3dc25c9239b4423c96ef",
+   "published_sha256": "035dd6044ac8423e89f30e92790df660663fbaee33cf3dc25c9239b4423c96ef",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/restore.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "17ff9147d13b1fd63feb2eddde93f720fee9c115b6e6637611574ecebc6f4c77",
+   "published_sha256": "17ff9147d13b1fd63feb2eddde93f720fee9c115b6e6637611574ecebc6f4c77",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/save.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "f2437a75efcdfccdb0f2a6b8e8baacbd7b54cfb177f99395e5c3a4de6cba64ff",
+   "published_sha256": "f2437a75efcdfccdb0f2a6b8e8baacbd7b54cfb177f99395e5c3a4de6cba64ff",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/saved-state.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "02b0bcb8c097d25ae7a83e679747ae75949ff72d1474158fbb251e2e8a728b24",
+   "published_sha256": "02b0bcb8c097d25ae7a83e679747ae75949ff72d1474158fbb251e2e8a728b24",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/saved-state.restored.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "0fbff7ed91d1d5a0117c4449d10a2c2fc6e26a88c08ee6881b3b7423a471c3c2",
+   "published_sha256": "0fbff7ed91d1d5a0117c4449d10a2c2fc6e26a88c08ee6881b3b7423a471c3c2",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/cpufreq/set-performance.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "fa08fe95406d1c96ef9b0b05626e20ef8a99bb7e814baa18fb423c2660c74ba5",
+   "published_sha256": "fa08fe95406d1c96ef9b0b05626e20ef8a99bb7e814baa18fb423c2660c74ba5",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/published-commit-8f9372b/status.txt",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "0d5263d90f00641419bd0aa2808791515b380dcb46a7b5355d658b4759291111",
+   "published_sha256": "9693a9d92d3ffda9dfcdd1e51825e6bf1d60e2b399c8f18f8430f6fa36c375a1",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "release-checks-final3-b8cf439/status.txt",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "0eda2ac51607231099d5a4fd3bf98a2a5b0945d429ac8437010a3e1c82242101",
+   "published_sha256": "c86a515884cb699dba51992304b69efcfb90564ac0e91ef85a87e272a60f8f95",
+   "prefix_replaced": 20
+  },
+  {
+   "file": "release-checks-final3-b8cf439/table.md",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "f3a5e0c4490d60486d1d421ba4d5d5d9ecd369423bc45a707b0aee52a7274d55",
+   "published_sha256": "bddc33b9cfeb1ead52b756cf025bdb4a47d2649047208ffa055d8e24b4740778",
+   "prefix_replaced": 17
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060/runs.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "206592196425a2e6eeb2a20915ed6a505ec2542ec3c801ae691f70a34fe71b2f",
+   "published_sha256": "206592196425a2e6eeb2a20915ed6a505ec2542ec3c801ae691f70a34fe71b2f",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060/table.md",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "405a524660fe8896fcc0d430908ab74db6982b479828b8bb5044938aa1a264c1",
+   "published_sha256": "405a524660fe8896fcc0d430908ab74db6982b479828b8bb5044938aa1a264c1",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/cpufreq/clock-performance.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "09a561b443a0ae7278a8440991a9cca0919b8446d26a506db80414714dca438f",
+   "published_sha256": "af62743317e716d2a8c0b32b325b41abf8d4217b4299c317bba47cfa384f8d5c",
+   "prefix_replaced": 57
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/cpufreq/restore.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "c02a578b0d9699992bc1145ae27e0dd1aaf839bae0e699ad6b142e291ddb14f9",
+   "published_sha256": "c02a578b0d9699992bc1145ae27e0dd1aaf839bae0e699ad6b142e291ddb14f9",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/cpufreq/save.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "f2437a75efcdfccdb0f2a6b8e8baacbd7b54cfb177f99395e5c3a4de6cba64ff",
+   "published_sha256": "f2437a75efcdfccdb0f2a6b8e8baacbd7b54cfb177f99395e5c3a4de6cba64ff",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/cpufreq/saved-state.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "02b0bcb8c097d25ae7a83e679747ae75949ff72d1474158fbb251e2e8a728b24",
+   "published_sha256": "02b0bcb8c097d25ae7a83e679747ae75949ff72d1474158fbb251e2e8a728b24",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/cpufreq/saved-state.restored.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "6c5f7ccc0c5f4b99fa9dc1902648faeb85a2879986128b109a75e45ca1e95179",
+   "published_sha256": "6c5f7ccc0c5f4b99fa9dc1902648faeb85a2879986128b109a75e45ca1e95179",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/cpufreq/set-performance.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "fa08fe95406d1c96ef9b0b05626e20ef8a99bb7e814baa18fb423c2660c74ba5",
+   "published_sha256": "fa08fe95406d1c96ef9b0b05626e20ef8a99bb7e814baa18fb423c2660c74ba5",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/progress.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "5ea0b13e611bc973217817ab98dfdc7a15684d36e703d9a7b9971af8f47983b6",
+   "published_sha256": "6fb3b0ae4a4300d5b7e7d4d3e39ac04a611e86cd2218672a07b6b29160a89b1e",
+   "prefix_replaced": 3
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/runs.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "9b711354445fd5c3706f8188899313d65564d7b4727172ea9df921b6a4abb48e",
+   "published_sha256": "9b711354445fd5c3706f8188899313d65564d7b4727172ea9df921b6a4abb48e",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/status.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "5285e5ecfae19be0da4fb3d0a67ed4bda319441fc6bb39cbad3785219ddbaba7",
+   "published_sha256": "5285e5ecfae19be0da4fb3d0a67ed4bda319441fc6bb39cbad3785219ddbaba7",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/stdout.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "5ea0b13e611bc973217817ab98dfdc7a15684d36e703d9a7b9971af8f47983b6",
+   "published_sha256": "6fb3b0ae4a4300d5b7e7d4d3e39ac04a611e86cd2218672a07b6b29160a89b1e",
+   "prefix_replaced": 3
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/summary.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "e12412e608d3d9fba1c6cc1cf4ee3c6af1f79aa1cf445862ce1a89eefae7053d",
+   "published_sha256": "d07e72234e98cb394a045aca45a733b9b2475170ade13d2ba028582a91921ff7",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-performance/table.md",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "3c9a496a036987170b1fcf29a5782a11c1a5ce0b9df48df7cd510226161a3bbe",
+   "published_sha256": "3c9a496a036987170b1fcf29a5782a11c1a5ce0b9df48df7cd510226161a3bbe",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/clock-performance.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "09a561b443a0ae7278a8440991a9cca0919b8446d26a506db80414714dca438f",
+   "published_sha256": "af62743317e716d2a8c0b32b325b41abf8d4217b4299c317bba47cfa384f8d5c",
+   "prefix_replaced": 57
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/clock-schedutil-quiet.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "b94d3eef6368d974cc8d094ade95256d27389f98f4381e857b91ee1037072aa8",
+   "published_sha256": "9a4a2d410898ad985eda7d79d6f1afb7a6739ff5f3c3ef49996e30d5989243c1",
+   "prefix_replaced": 22
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/quiet-wait.jsonl",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "035dd6044ac8423e89f30e92790df660663fbaee33cf3dc25c9239b4423c96ef",
+   "published_sha256": "035dd6044ac8423e89f30e92790df660663fbaee33cf3dc25c9239b4423c96ef",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/restore.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "c02a578b0d9699992bc1145ae27e0dd1aaf839bae0e699ad6b142e291ddb14f9",
+   "published_sha256": "c02a578b0d9699992bc1145ae27e0dd1aaf839bae0e699ad6b142e291ddb14f9",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/save.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "f2437a75efcdfccdb0f2a6b8e8baacbd7b54cfb177f99395e5c3a4de6cba64ff",
+   "published_sha256": "f2437a75efcdfccdb0f2a6b8e8baacbd7b54cfb177f99395e5c3a4de6cba64ff",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/saved-state.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "02b0bcb8c097d25ae7a83e679747ae75949ff72d1474158fbb251e2e8a728b24",
+   "published_sha256": "02b0bcb8c097d25ae7a83e679747ae75949ff72d1474158fbb251e2e8a728b24",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/saved-state.restored.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "6c5f7ccc0c5f4b99fa9dc1902648faeb85a2879986128b109a75e45ca1e95179",
+   "published_sha256": "6c5f7ccc0c5f4b99fa9dc1902648faeb85a2879986128b109a75e45ca1e95179",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/cpufreq/set-performance.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "fa08fe95406d1c96ef9b0b05626e20ef8a99bb7e814baa18fb423c2660c74ba5",
+   "published_sha256": "fa08fe95406d1c96ef9b0b05626e20ef8a99bb7e814baa18fb423c2660c74ba5",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/progress.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "4fe223589d157dd9b37f1480ed8027215032503ab3b925a26026716a4cac2c43",
+   "published_sha256": "97c81a5be5293fe83d64a71dca9be7670955b2a661907cfe4e99296de6cce992",
+   "prefix_replaced": 4
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/runs.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "21da5d01c9ed2df9921127116b646653e7c7a639ecc8863268bba2929701d3b0",
+   "published_sha256": "21da5d01c9ed2df9921127116b646653e7c7a639ecc8863268bba2929701d3b0",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/status.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "932a7c06e6e4369f515dd5dc8ca76c6545a558a78f65e6ebea92f77c7e4fce06",
+   "published_sha256": "932a7c06e6e4369f515dd5dc8ca76c6545a558a78f65e6ebea92f77c7e4fce06",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/stdout.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "4fe223589d157dd9b37f1480ed8027215032503ab3b925a26026716a4cac2c43",
+   "published_sha256": "97c81a5be5293fe83d64a71dca9be7670955b2a661907cfe4e99296de6cce992",
+   "prefix_replaced": 4
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/summary.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "a4757c0b0590e5fee56773de7950d0874f9aa91bb79938890dc4967fd93dbee1",
+   "published_sha256": "c5c749e118ce932817c755e809c2fac59b1199c6471d6160a8350343f38b84ff",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-606060-schedutil-quiet/table.md",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "e387eb88ee1dab55a2757ef9ce6ee4652b1818ee85096b542c7c2aaf07615948",
+   "published_sha256": "e387eb88ee1dab55a2757ef9ce6ee4652b1818ee85096b542c7c2aaf07615948",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/progress.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "09f74361bb8de3c0cf83a75b64d573b52c5f3e01f241f41d1fa3d99b13117d08",
+   "published_sha256": "5e2434010d4f844852eed2ca19288d1088db2a0f26e9b7dcd3219dae104742e7",
+   "prefix_replaced": 2
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/rows-completed-before-stop.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "fc9b37c13460a0653b408884036f6d4ef70cb9d6d156bafe6aa6ccdee306bb50",
+   "published_sha256": "fc9b37c13460a0653b408884036f6d4ef70cb9d6d156bafe6aa6ccdee306bb50",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/runs.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "462da848ddb5ea9337204886d64500ace8df18b43510e63f08ba0eed99dba3f0",
+   "published_sha256": "462da848ddb5ea9337204886d64500ace8df18b43510e63f08ba0eed99dba3f0",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/status.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "b23c2488629b7ea0e9b318e9eb94723c5f9157a6beaed3fa45a07a3b017c0f1e",
+   "published_sha256": "b23c2488629b7ea0e9b318e9eb94723c5f9157a6beaed3fa45a07a3b017c0f1e",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/stdout.log",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "09f74361bb8de3c0cf83a75b64d573b52c5f3e01f241f41d1fa3d99b13117d08",
+   "published_sha256": "5e2434010d4f844852eed2ca19288d1088db2a0f26e9b7dcd3219dae104742e7",
+   "prefix_replaced": 2
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/STOPPED.txt",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "bb21cdde966e7b7eda64330b6dd0e8fd4cedba01844f3ff30eea2682e8fab37c",
+   "published_sha256": "bb21cdde966e7b7eda64330b6dd0e8fd4cedba01844f3ff30eea2682e8fab37c",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/summary.json",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "98f0c9fd1f4fd9c05dc24f77e1a95f3a34c440fcd5e05f338020dcfa11f65d97",
+   "published_sha256": "31d57e71bf36ed7df402735b5e50e151d6e1f3b078cd4ea292af5527d69ba6ea",
+   "prefix_replaced": 1
+  },
+  {
+   "file": "release-checks-final3-b8cf439/x11-large-partial/table.md",
+   "set": "status lines and tables of the release checks on the judged commit and on the published commit",
+   "original_sha256": "0c2a1f7428421229d966aba475842bcc865bcd28ce383e09fe8e3665f9b8f27d",
+   "published_sha256": "0c2a1f7428421229d966aba475842bcc865bcd28ce383e09fe8e3665f9b8f27d",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "upstream-identity/UPSTREAM-IDENTITY.txt",
+   "set": "comparison of commit 1 with upstream restic",
+   "original_sha256": "1b05f788e1bee80ff816a6e744fe10416ce7657a103efa1c6a0a66278e8325b5",
+   "published_sha256": "1b05f788e1bee80ff816a6e744fe10416ce7657a103efa1c6a0a66278e8325b5",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "machine.txt",
+   "set": "the judge machine: CPU, caches, memory, kernel, CPU sets",
+   "original_sha256": "8cc07c3ace00267b8aae03d97b397bdd36a3e2af1324eea5fa78defee4431f69",
+   "published_sha256": "8cc07c3ace00267b8aae03d97b397bdd36a3e2af1324eea5fa78defee4431f69",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "independent-rebuild/offline-targets.json",
+   "set": "an independent reviewer's offline rebuild of release binaries",
+   "original_sha256": "b58fe55dce9b0f2bb1f74e1863dd230d0378f27613d343c5cda9136a6a2014a7",
+   "published_sha256": "b58fe55dce9b0f2bb1f74e1863dd230d0378f27613d343c5cda9136a6a2014a7",
+   "prefix_replaced": 0
+  },
+  {
+   "file": "independent-rebuild/offline-proof.json",
+   "set": "the same reviewer's rebuild of the judged and the published commit with the judge's flags",
+   "original_sha256": "ffaaebad371fdc5651282daabd5cd3239b373035966ba68c795bfb09714bca17",
+   "published_sha256": "ffaaebad371fdc5651282daabd5cd3239b373035966ba68c795bfb09714bca17",
+   "prefix_replaced": 0
+  }
+ ]
+}

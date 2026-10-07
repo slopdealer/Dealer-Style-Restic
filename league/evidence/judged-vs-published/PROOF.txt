@@ -1,0 +1,45 @@
+Proof that the published commit carries the judged machine code
+written 2026-10-07T19:25:58Z by tools/proof.sh rc-8 rc-9
+
+judged tree:    trees/rc-8  commit b8cf439d6a2eda190dec7e61cf7c8937a7d0451c
+published tree: trees/rc-9  commit 8f9372b7e5ead1f604674381a708c6a6499ce484
+source files that differ between the two trees:
+  Files rc-8/cmd/restic/wait_index_load.go and rc-9/cmd/restic/wait_index_load.go differ
+  Only in rc-9/internal/repository: repack_scope_test.go
+
+build, in each tree (the judge's command and environment; toolchain go1.27.0):
+  env -i CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GONOSUMCHECK=1 GOTELEMETRY=off TZ=UTC \
+    go build -trimpath -buildvcs=false -tags "selfupdate disable_grpc_modules" -ldflags "-s -w" -o restic ./cmd/restic
+
+rc-8: 32542880 bytes, sha256 4095e7ceb4cb0d8b2919cc71613085d930d09a13c247f325238d4b7e3241fe7a
+  Go build ID  BQHkognMeUMrhrtQG7yB/u68a9AmXqe2P6NI5Tn-e/I-1FHnGkl6rUdC55nxo4/G2GsutTeLWpNCPDZq4he
+  GNU build ID 5dfff9e5736cbec14f75efee9653194745d82b85
+rc-9: 32542880 bytes, sha256 958d9ff2c6bc99a4c7b49d31ac65f0708c134b5f20a5b4fc56604cb3b85d3ed3
+  Go build ID  iBvpL84fYvWFYGKJ7BVt/IM6RaU1fy5dhIsz2wBt4/I-1FHnGkl6rUdC55nxo4/G2GsutTeLWpNCPDZq4he
+  GNU build ID d818318e36778d9d6d4b39b513b8f5b5857a3a82
+
+The Go build ID has four parts: inputs/inputs/output/output. The first two are hashes of what went INTO the build
+(the source text, comments included); the last two are hashes of what came OUT. The GNU build ID is derived from it.
+
+bytes that differ: 60, at file offsets (first byte = 1) 3977 to 4096
+  inside .note.go.buildid:   40
+  inside .note.gnu.build-id: 20
+
+section                    offset       size  sha256 in rc-8                                                    sha256 in rc-9                                                    result
+.note.go.buildid             3960        100  702f9b32e3c9e88cc3d667e989279d7a591141085d77c5922bf2b568ae81877e  d7dd4579ff8b2a382d8b726afba9626c18f081ab05d6d2db96e122380f7ce009  DIFFERENT
+.note.gnu.build-id           4060         36  195fb1fa03a8f2dc9c902e5dbb75eff91d2cd3a85bc02e4e541d8e91304a5267  53a7eb71b511bd1a9e14327c474fd0c55e2e3cce4f2b20b0bed3093e1ca03e82  DIFFERENT
+.text                        4096   14722353  95b350a41a6d9d75294d4629764683fa5d2baea624882aca3150c9fc359d09b2  95b350a41a6d9d75294d4629764683fa5d2baea624882aca3150c9fc359d09b2  equal
+.rodata                  14729216    1184281  88c2d6085b7309a1235272cb1a7adca6184e0c23ad1c23f53d8c1b88c94c23f1  88c2d6085b7309a1235272cb1a7adca6184e0c23ad1c23f53d8c1b88c94c23f1  equal
+.gopclntab               15913504   11737306  33229df80809af1c2c515901aeb04113b4b2809dbb94a5b0adc0d3363b611cbe  33229df80809af1c2c515901aeb04113b4b2809dbb94a5b0adc0d3363b611cbe  equal
+.go.type                 27650816    4217464  dbc8d92bb47fdc6148b3e88bd74d1f822e994211f96d1ada29e82e27ec5c888c  dbc8d92bb47fdc6148b3e88bd74d1f822e994211f96d1ada29e82e27ec5c888c  equal
+.go.func                 31868280      14936  938aed9f29919871290596e0314dce6faac221f4c44c4e02cbcf003a5979f1fb  938aed9f29919871290596e0314dce6faac221f4c44c4e02cbcf003a5979f1fb  equal
+.go.buildinfo            31883264       7776  e3e185f1675ae2c4efcb4de96dc5cff495e5da701cf9a46dd7fd5f602963faac  e3e185f1675ae2c4efcb4de96dc5cff495e5da701cf9a46dd7fd5f602963faac  equal
+.go.fipsinfo             31891040        120  1a81284ce5c7ad35e9ae74a6bbf7244d26964fb1187ba8f472b3b9bb2ebc8c68  1a81284ce5c7ad35e9ae74a6bbf7244d26964fb1187ba8f472b3b9bb2ebc8c68  equal
+.go.module               31891168        568  2f77a6a2cb5d728406a48898b038df2e38fb0dae1ed265246b8f28a7dac4f50d  2f77a6a2cb5d728406a48898b038df2e38fb0dae1ed265246b8f28a7dac4f50d  equal
+.noptrdata               31891744     449889  a09f86d02c7cb0439513d0801cc01a80ead3075bab1b4528a642ad963897730d  a09f86d02c7cb0439513d0801cc01a80ead3075bab1b4528a642ad963897730d  equal
+.data                    32341664     199842  62ca4e52256a6ea080f6671a6fad790a5c2884564b2d5929ef885073e2fc80b0  62ca4e52256a6ea080f6671a6fad790a5c2884564b2d5929ef885073e2fc80b0  equal
+.bss                     32541536     171160  (no bytes in the file)                                            (no bytes in the file)                                            equal
+.noptrbss                32712704   33707608  (no bytes in the file)                                            (no bytes in the file)                                            equal
+.shstrtab                32542720        160  07b83ee5d0f05bd05a9eac5269411f9f852f89d547f45976a336762460af099e  07b83ee5d0f05bd05a9eac5269411f9f852f89d547f45976a336762460af099e  equal
+
+The differing offsets are in diff.offsets, one per line.

@@ -1,0 +1,19 @@
+Machine on which every judge job, bench and release check of the final tree ran
+read 2026-10-07T19:45Z (lscpu, /proc/meminfo, uname, sysfs)
+
+Architecture:        x86_64
+Model name:          AMD EPYC 9454 48-Core Processor
+CPU(s):              96 (1 socket, 48 cores, 2 threads per core)
+L2 cache:            48 MiB (48 instances)
+L3 cache:            256 MiB (8 instances)
+MemTotal:            131564588 kB (125.5 GiB; 128 GB installed)
+Kernel:              Linux 6.8.0-136-generic
+
+L3 cache domains (cores and their SMT siblings that share one L3):
+  0-5,48-53   6-11,54-59   12-17,60-65   18-23,66-71
+  24-29,72-77 30-35,78-83  36-41,84-89   42-47,90-95
+
+CPU sets used:
+  judge jobs:      26-29 (final jobs; one L3 domain 24-29)
+  release checks:  cores 10,11,16,17,18,23,46,47 and their SMT siblings 58,59,64,65,66,71,94,95
+                   (two cores in each of four L3 domains)

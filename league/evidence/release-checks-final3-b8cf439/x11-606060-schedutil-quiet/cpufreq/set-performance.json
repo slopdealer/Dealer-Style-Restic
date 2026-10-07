@@ -1,0 +1,131 @@
+{
+ "set_at": "2026-10-07T20:18:13Z",
+ "governor_asked": "performance",
+ "errors": [],
+ "state_after": {
+  "10": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "11": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "16": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "17": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "18": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "23": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "46": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "47": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "58": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "59": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "64": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "65": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "66": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "71": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "94": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  },
+  "95": {
+   "scaling_governor": "performance",
+   "scaling_min_freq": "1500000",
+   "scaling_max_freq": "2750000"
+  }
+ },
+ "kernel_policy_members": {
+  "10": "10",
+  "11": "11",
+  "16": "16",
+  "17": "17",
+  "18": "18",
+  "23": "23",
+  "46": "46",
+  "47": "47",
+  "58": "58",
+  "59": "59",
+  "64": "64",
+  "65": "65",
+  "66": "66",
+  "71": "71",
+  "94": "94",
+  "95": "95"
+ },
+ "firmware_frequency_domains_recorded_only": {
+  "10": "10 11",
+  "11": "10 11",
+  "16": "16 17",
+  "17": "16 17",
+  "18": "18 19",
+  "23": "22 23",
+  "46": "46 47",
+  "47": "46 47",
+  "58": "58 59",
+  "59": "58 59",
+  "64": "64 65",
+  "65": "64 65",
+  "66": "66 67",
+  "71": "70 71",
+  "94": "94 95",
+  "95": "94 95"
+ },
+ "firmware_domain_partners_outside_the_check_set_not_written": {
+  "19": "performance",
+  "22": "performance",
+  "67": "performance",
+  "70": "performance"
+ },
+ "all_on_asked_governor": true,
+ "every_other_setting_as_saved": true
+}

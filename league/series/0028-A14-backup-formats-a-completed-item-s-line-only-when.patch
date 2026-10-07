@@ -1,0 +1,122 @@
+From 7196e585564368f871c0614e3eaac57ecde57630 Mon Sep 17 00:00:00 2001
+From: slopdealer <326519127+slopdealer@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 05:25:39 +0000
+Subject: [PATCH 28/49] A14: backup formats a completed item's line only when
+ it will be printed
+
+Port of one hunk of T4's S016 tree (teams/T4/S016/M004,
+internal/ui/backup/text.go). For every file and directory the text
+progress quoted the path and formatted two or three sizes, then passed
+them to VV, which prints at verbosity 3 and above only. At lower
+verbosity the work had no reader. CompleteItem now returns first when
+the verbosity is below 3.
+
+Nothing printed changes: text_complete_item_test.go compares the
+terminal output with a verbatim copy of stock's function at verbosity
+0 to 4 for every kind of item, with names that need quoting. The JSON
+progress and the counters (updated before this call) are untouched.
+
+The other part of that tree, checker_assist.go, is a decode assistant
+for check's extra worker, the lever the installed bounded check worker
+already holds; it is not taken.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ internal/ui/backup/text.go                    |  7 ++
+ internal/ui/backup/text_complete_item_test.go | 69 +++++++++++++++++++
+ 2 files changed, 76 insertions(+)
+ create mode 100644 internal/ui/backup/text_complete_item_test.go
+
+diff --git a/internal/ui/backup/text.go b/internal/ui/backup/text.go
+index 32ff0effde3f1d1e974e158ab70fba22d68ccfc7..e8925c84b3a98a82c28e57161cdc770621246ce2 100644
+--- a/internal/ui/backup/text.go
++++ b/internal/ui/backup/text.go
+@@ -90,6 +90,13 @@ func (b *textProgress) Error(_ string, err error) error {
+ // CompleteItem is the status callback function for the archiver when a
+ // file/dir has been saved successfully.
+ func (b *textProgress) CompleteItem(messageType, item string, s archiver.ItemStats, d time.Duration) {
++	// Every line below is printed with VV, which prints at verbosity 3 and
++	// above only (the printer was created with b.verbosity). Below that the
++	// quoting and size formatting of each completed item has no reader.
++	if b.verbosity < 3 {
++		return
++	}
++
+ 	item = ui.Quote(item)
+ 
+ 	switch messageType {
+diff --git a/internal/ui/backup/text_complete_item_test.go b/internal/ui/backup/text_complete_item_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..295de8c7712d9d358ccdb3d46370b12e9b8e3063
+--- /dev/null
++++ b/internal/ui/backup/text_complete_item_test.go
+@@ -0,0 +1,69 @@
++package backup
++
++import (
++	"reflect"
++	"testing"
++	"time"
++
++	"github.com/restic/restic/internal/archiver"
++	"github.com/restic/restic/internal/ui"
++)
++
++// completeItemStock is stock's textProgress.CompleteItem: every argument is
++// formatted, whatever the verbosity, and VV decides whether a line appears.
++func completeItemStock(b *textProgress, messageType, item string, s archiver.ItemStats, d time.Duration) {
++	item = ui.Quote(item)
++
++	switch messageType {
++	case "dir new":
++		b.VV("new       %v, saved in %.3fs (%v added, %v stored, %v metadata)",
++			item, d.Seconds(), ui.FormatBytes(s.DataSize),
++			ui.FormatBytes(s.DataSizeInRepo), ui.FormatBytes(s.TreeSizeInRepo))
++	case "dir unchanged":
++		b.VV("unchanged %v", item)
++	case "dir modified":
++		b.VV("modified  %v, saved in %.3fs (%v added, %v stored, %v metadata)",
++			item, d.Seconds(), ui.FormatBytes(s.DataSize),
++			ui.FormatBytes(s.DataSizeInRepo), ui.FormatBytes(s.TreeSizeInRepo))
++	case "file new":
++		b.VV("new       %v, saved in %.3fs (%v added, %v stored)", item,
++			d.Seconds(), ui.FormatBytes(s.DataSize), ui.FormatBytes(s.DataSizeInRepo))
++	case "file unchanged":
++		b.VV("unchanged %v", item)
++	case "file modified":
++		b.VV("modified  %v, saved in %.3fs (%v added, %v stored)", item,
++			d.Seconds(), ui.FormatBytes(s.DataSize), ui.FormatBytes(s.DataSizeInRepo))
++	}
++}
++
++// CompleteItem returns early below verbosity 3. What reaches the terminal
++// must be what stock prints at every verbosity, for every kind of item.
++func TestCompleteItemPrintsWhatStockPrints(t *testing.T) {
++	kinds := []string{"dir new", "dir unchanged", "dir modified", "file new", "file unchanged", "file modified", "unknown kind"}
++	items := []string{"/plain/path", "/with space/ü", "/control\ncharacter", "/invalid\xffutf8", ""}
++	stats := archiver.ItemStats{DataSize: 12345, DataSizeInRepo: 6789, TreeSize: 400, TreeSizeInRepo: 222}
++
++	printedLines := 0
++	for verbosity := uint(0); verbosity <= 4; verbosity++ {
++		gotTerm, wantTerm := &ui.MockTerminal{}, &ui.MockTerminal{}
++		got := NewTextProgress(gotTerm, verbosity).(*textProgress)
++		want := NewTextProgress(wantTerm, verbosity).(*textProgress)
++		for _, kind := range kinds {
++			for _, item := range items {
++				got.CompleteItem(kind, item, stats, 1500*time.Millisecond)
++				completeItemStock(want, kind, item, stats, 1500*time.Millisecond)
++			}
++		}
++		if !reflect.DeepEqual(gotTerm.Output, wantTerm.Output) || !reflect.DeepEqual(gotTerm.Errors, wantTerm.Errors) {
++			t.Errorf("verbosity %d: printed\n%q\nstock prints\n%q", verbosity, gotTerm.Output, wantTerm.Output)
++		}
++		if verbosity < 3 && len(wantTerm.Output) != 0 {
++			t.Errorf("verbosity %d: stock prints %d item lines; the early return would drop them", verbosity, len(wantTerm.Output))
++		}
++		printedLines += len(gotTerm.Output)
++	}
++	// 6 known kinds x 5 items at verbosity 3 and 4
++	if printedLines != 2*6*len(items) {
++		t.Errorf("%d item lines printed at verbosity 3 and 4, want %d", printedLines, 2*6*len(items))
++	}
++}
