@@ -33,6 +33,9 @@ func (mi *MasterIndex) clear() {
 	mi.idx = []*Index{NewIndex()}
 	mi.idx[0].Finalize()
 	mi.clearPendingBlobs()
+	// the notes describe the index files that were loaded into the state
+	// given up here; whatever is loaded next is noted again
+	mi.fileNotes = nil
 }
 
 func (mi *MasterIndex) clearPendingBlobs() {
@@ -420,6 +423,10 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	}
 	p.SetMax(uint64(len(indexes)))
 
+	// index files that stay as they are need not be read again; this is
+	// decided from the notes of the loaded files, which clear releases
+	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
+
 	// reset state which is not necessary for Rewrite and just consumes a lot of memory
 	// the index state would be invalid after Rewrite completes anyways
 	mi.clear()
@@ -432,9 +439,6 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	}
 	debug.Log("start rebuilding index of %d indexes, excludePacks: %v", len(indexes), excludePacks)
 	wg, wgCtx := errgroup.WithContext(ctx)
-
-	// index files that stay as they are need not be read again
-	keptUnread := mi.rewriteKeepsUnread(indexes, excludePacks)
 
 	idxCh := make(chan restic.ID)
 	wg.Go(func() error {
