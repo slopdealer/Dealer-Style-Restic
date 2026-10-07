@@ -200,10 +200,12 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
 
 	// Check if all used blobs have been found in index
 	missingBlobs := restic.NewBlobSet()
-	for bh, count := range usedBlobs.All() {
-		if count == 0 {
-			// blob does not exist in any pack files
-			missingBlobs.Insert(bh)
+	if !index.AssociatedCountsInRange(usedBlobs, 1, 255) {
+		for bh, count := range usedBlobs.All() {
+			if count == 0 {
+				// blob does not exist in any pack files
+				missingBlobs.Insert(bh)
+			}
 		}
 	}
 
@@ -342,10 +344,8 @@ func packInfoFromIndexWithHeaders(ctx context.Context, idx restic.ListBlobser, u
 
 	// Sanity check. If no duplicates exist, all blobs have value 1. After handling
 	// duplicates, this also applies to duplicates.
-	for _, count := range usedBlobs.All() {
-		if count != 1 {
-			panic("internal error during blob selection")
-		}
+	if !index.AssociatedCountsInRange(usedBlobs, 1, 1) {
+		panic("internal error during blob selection")
 	}
 
 	return usedBlobs, indexPack, nil
