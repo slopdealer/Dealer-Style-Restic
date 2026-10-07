@@ -824,6 +824,11 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 
 	var treePrefetch *restoreTreePrefetch
 	if !res.opts.DryRun && len(filerestorer.files) != 0 && len(restoreTreeIDs) != 0 {
+		// These trees feed the second pass only. LoadMetadataTree returns
+		// nodes WITHOUT their content IDs (Node.Content is empty): no visitor
+		// of the second pass may read Node.Content. Today none does: the
+		// first pass plans the files and verifyFile checks them, both from
+		// trees loaded with LoadTree.
 		loadTree := restoreTreeLoader(func(ctx context.Context, id restic.ID) (data.TreeNodeIterator, error) {
 			return data.LoadMetadataTree(ctx, res.repo, id)
 		})
