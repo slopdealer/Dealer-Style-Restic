@@ -1373,11 +1373,11 @@ func (r *Repository) saveBlobAsync(ctx context.Context, t restic.BlobType, buf [
 		if ctx.Err() != nil {
 			// fail fast if the context is cancelled
 			cb(restic.ID{}, false, 0, ctx.Err())
-			return ctx.Err()
+			return asyncSaveResult(ctx, ctx.Err())
 		}
 		newID, known, size, err := r.saveBlob(ctx, t, buf, id, storeDuplicate)
 		cb(newID, known, size, err)
-		return err
+		return asyncSaveResult(ctx, err)
 	})
 }
 

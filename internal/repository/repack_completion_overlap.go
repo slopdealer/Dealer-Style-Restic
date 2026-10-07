@@ -85,12 +85,14 @@ func runRepackCompletionOverlap(queue <-chan index.PackBlobs, start func(index.P
 
 // startRepackPackCompletion reads one pack and admits the saves of the blobs
 // to keep. It returns when the pack has been read; the saves may still run.
+// The pack is read on wgCtx and the saves are submitted on saveCtx; repack
+// passes the context of its workers for both.
 //
 // The handler saves blobs, so the pack is read through
 // loadBlobsFromPackReleased: the handler never runs inside the backend's
 // Load callback, and a worker that waits for the save budget holds no backend
 // connection.
-func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, uploader restic.BlobSaverWithAsync, keepBlobs repackBlobSet, keepMutex *sync.Mutex, saveBudget *semaphore.Weighted, t index.PackBlobs) *repackPackCompletion {
+func startRepackPackCompletion(saveCtx, wgCtx context.Context, repo *Repository, uploader restic.BlobSaverWithAsync, keepBlobs repackBlobSet, keepMutex *sync.Mutex, saveBudget *semaphore.Weighted, t index.PackBlobs) *repackPackCompletion {
 	type saveResult struct {
 		blob restic.BlobHandle
 		err  error
@@ -126,7 +128,7 @@ func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, upl
 		// Keep unusually large blobs on the synchronous path so the byte
 		// budget remains a strict bound on copied plaintext.
 		if int64(len(buf)) > maxAsyncRepackCopyBytes {
-			_, _, _, saveErr := uploader.SaveBlob(ctx, blob.Type, buf, blob.ID, true)
+			_, _, _, saveErr := uploader.SaveBlob(saveCtx, blob.Type, buf, blob.ID, true)
 			resultMu.Lock()
 			results[resultID].err = saveErr
 			results[resultID].done = true
@@ -144,9 +146,10 @@ func startRepackPackCompletion(ctx, wgCtx context.Context, repo *Repository, upl
 		}
 		owned := append([]byte(nil), buf...)
 		pending.Add(1)
-		// The uploader context owns save lifetime. wgCtx is only for
-		// stopping pack reads and can be canceled as workers finish.
-		uploader.SaveBlobAsync(ctx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
+		// The save runs on the context of the repack's workers, as upstream's
+		// does: an error of another worker gives up a save that waits for
+		// an uploader. No worker returns while a save it admitted is pending.
+		uploader.SaveBlobAsync(saveCtx, blob.Type, owned, blob.ID, true, func(_ restic.ID, _ bool, _ int, saveErr error) {
 			resultMu.Lock()
 			results[resultID].err = saveErr
 			results[resultID].done = true

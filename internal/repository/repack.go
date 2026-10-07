@@ -68,7 +68,8 @@ func repack(
 	logf LogFunc,
 ) error {
 
-	wg, wgCtx := errgroup.WithContext(ctx)
+	// reads and saves run on the context of this group (repack_scope.go)
+	wg, wgCtx := errgroup.WithContext(withRepackSaves(ctx))
 
 	if feature.Flag.Enabled(feature.S3Restore) {
 		job, err := repo.StartWarmup(ctx, packs)
@@ -114,7 +115,7 @@ func repack(
 	// admitted has completed.
 	worker := func() error {
 		return runRepackCompletionOverlap(downloadQueue, func(t index.PackBlobs) *repackPackCompletion {
-			return startRepackPackCompletion(ctx, wgCtx, repo, uploader, keepBlobs, &keepMutex, saveBudget, t)
+			return startRepackPackCompletion(wgCtx, wgCtx, repo, uploader, keepBlobs, &keepMutex, saveBudget, t)
 		}, p)
 	}
 
