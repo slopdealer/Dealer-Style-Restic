@@ -90,6 +90,13 @@ func (b *textProgress) Error(_ string, err error) error {
 // CompleteItem is the status callback function for the archiver when a
 // file/dir has been saved successfully.
 func (b *textProgress) CompleteItem(messageType, item string, s archiver.ItemStats, d time.Duration) {
+	// Every line below is printed with VV, which prints at verbosity 3 and
+	// above only (the printer was created with b.verbosity). Below that the
+	// quoting and size formatting of each completed item has no reader.
+	if b.verbosity < 3 {
+		return
+	}
+
 	item = ui.Quote(item)
 
 	switch messageType {
