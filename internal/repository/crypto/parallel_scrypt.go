@@ -10,13 +10,14 @@ import (
 	"golang.org/x/crypto/scrypt"
 )
 
-// parallelScryptKey derives the same output as scrypt.Key while processing
+// parallelScryptLanes derives the same output as scrypt.Key while processing
 // independent scrypt lanes concurrently. It stores every fourth ROMix state
 // and recomputes the intervening states during the second ROMix pass.
-func parallelScryptKey(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
-	if err := checkScryptParams(N, r, p); err != nil {
-		return nil, err
-	}
+//
+// It does not validate N, r and p, and its lanes index past their tables for
+// values scrypt.Key rejects. Its only caller is parallelScryptKey in
+// scrypt_params.go, which runs scrypt.Key's parameter checks first.
+func parallelScryptLanes(password, salt []byte, N, r, p, keyLen int) ([]byte, error) {
 	const stride = 4
 	workers := min(4, p, runtime.GOMAXPROCS(0))
 	if workers <= 1 {
