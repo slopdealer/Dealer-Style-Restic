@@ -825,7 +825,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	var treePrefetch *restoreTreePrefetch
 	if !res.opts.DryRun && len(filerestorer.files) != 0 && len(restoreTreeIDs) != 0 {
 		loadTree := restoreTreeLoader(func(ctx context.Context, id restic.ID) (data.TreeNodeIterator, error) {
-			return data.LoadTree(ctx, res.repo, id)
+			return data.LoadMetadataTree(ctx, res.repo, id)
 		})
 		treePrefetch = newRestoreTreePrefetchWithCarry(ctx, restoreTreeIDs, loadTree, treeCarry)
 		defer treePrefetch.Close()
