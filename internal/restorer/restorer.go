@@ -28,6 +28,13 @@ type Restorer struct {
 
 	fileList map[string]bool
 
+	// freshDirs holds the directories that the running RestoreTo created
+	// itself, and of those only the ones the first traversal is inside at
+	// the moment: an entry is removed when the traversal leaves its
+	// directory. It is a field, not a local of RestoreTo, so that its size
+	// can be observed.
+	freshDirs map[string]struct{}
+
 	Error func(location string, err error) error
 	Warn  func(message string)
 	Info  func(message string)
@@ -661,6 +668,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	// Only paths created by an exclusive Mkdir are fresh. A directory that
 	// already exists (or wins a creation race) must retain file verification.
 	freshDirs := make(map[string]struct{})
+	res.freshDirs = freshDirs
 	var preparedDir lastPreparedDirectory
 	if !res.opts.DryRun {
 		// ensure that the target directory exists and is actually a directory
